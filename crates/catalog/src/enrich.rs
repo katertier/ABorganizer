@@ -7,17 +7,21 @@
 //! Audnexus has been hand-curated against Audible's authoritative
 //! catalog).
 //!
-//! # Slice 2A scope
+//! # Behaviour
 //!
-//! - ASIN lookup only (no Audible-search fallback — slice 2B).
-//! - Single home region from `Tunables::network::audnexus_region_order[0]`
-//!   (region walk lives in slice 2C alongside Audible fallback).
-//! - Provenance for: title, subtitle, description, language,
+//! - ASIN lookup only — Audible-search ASIN discovery for ASIN-less
+//!   books is a follow-up slice.
+//! - Region walk: tries every region in
+//!   `Tunables::network::audnexus_region_order` in order, stops on
+//!   first hit. The matched region is encoded into the provenance
+//!   source (`audnexus_asin_<region>`) so the consensus stage can
+//!   prefer home-region results.
+//! - Provenance written for: title, subtitle, description, language,
 //!   publisher, `release_date`, `runtime_length_min`.
-//! - `books.asin` column updated when the lookup succeeds and the
-//!   column is currently NULL (the "winner" gets promoted by a
-//!   later consensus stage; this column is just for fast ASIN
-//!   joins on the read path).
+//! - `books.asin` is set when the lookup succeeds and the column is
+//!   currently NULL. The "winner" semantics for fields with
+//!   multiple candidates is the consensus stage's job; this column
+//!   exists only for fast ASIN joins on the read path.
 
 use async_trait::async_trait;
 
@@ -39,24 +43,25 @@ pub const PROVENANCE_SOURCE: &str = "audnexus_asin";
 /// against Audnexus.
 pub struct AudnexusEnrichStage {
     client: AudnexusClient,
-    home_region: String,
+    region_order: Vec<String>,
     allowed: bool,
 }
 
 impl AudnexusEnrichStage {
     /// Build with a pre-configured client + network tunables. The
-    /// home region defaults to `"us"` if the configured region list
-    /// is empty.
+    /// region order defaults to a single `"us"` entry if the
+    /// configured list is empty (so the stage always tries at least
+    /// one region).
     #[must_use]
     pub fn new(client: AudnexusClient, network: &NetworkTunables) -> Self {
-        let home_region = network
-            .audnexus_region_order
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "us".to_owned());
+        let region_order = if network.audnexus_region_order.is_empty() {
+            vec!["us".to_owned()]
+        } else {
+            network.audnexus_region_order.clone()
+        };
         Self {
             client,
-            home_region,
+            region_order,
             allowed: network.audnexus_allowed,
         }
     }
@@ -85,39 +90,64 @@ impl Stage for AudnexusEnrichStage {
 
         let Some(asin) = fetch_asin_candidate(&ctx.library, book_id).await? else {
             // No ASIN in provenance — nothing to enrich against
-            // Audnexus. Slice 2B adds an Audible-search fallback for
-            // ASIN-less books.
+            // Audnexus. Audible-search ASIN-discovery fallback for
+            // ASIN-less books lands in a later slice.
             return Ok(StageOutcome::Skipped);
         };
 
-        let book = match self.client.lookup_book(&self.home_region, &asin).await {
-            Ok(Some(book)) => book,
-            Ok(None) => {
-                tracing::info!(
-                    book = %book_id,
-                    asin = %asin,
-                    region = %self.home_region,
-                    "audnexus.enrich.miss"
-                );
-                return Ok(StageOutcome::Skipped);
+        // Region walk: try home, then each configured fallback. Stop
+        // on the first 200 response. NOT_FOUND in one region just
+        // means "try the next" — books with regional Audible-store
+        // exclusivity (common for non-US releases) only resolve in
+        // their home region. The order in
+        // `Tunables::network::audnexus_region_order` is set by the
+        // user; default is us → uk → de → fr → ca → au → jp → in → it.
+        let mut hit: Option<(String, crate::audnexus::AudnexusBook)> = None;
+        for region in &self.region_order {
+            match self.client.lookup_book(region, &asin).await {
+                Ok(Some(book)) => {
+                    hit = Some((region.clone(), book));
+                    break;
+                }
+                Ok(None) => {
+                    tracing::debug!(
+                        book = %book_id,
+                        asin = %asin,
+                        region = %region,
+                        "audnexus.enrich.region_miss"
+                    );
+                }
+                Err(e) => {
+                    // Transport errors (DNS, TLS, timeout) — log + move
+                    // on. A single bad region shouldn't fail the whole
+                    // walk; the book might still resolve elsewhere.
+                    tracing::warn!(
+                        book = %book_id,
+                        asin = %asin,
+                        region = %region,
+                        error = %e,
+                        "audnexus.enrich.region_error"
+                    );
+                }
             }
-            Err(e) => {
-                tracing::warn!(
-                    book = %book_id,
-                    asin = %asin,
-                    region = %self.home_region,
-                    error = %e,
-                    "audnexus.enrich.lookup_failed"
-                );
-                return Err(e);
-            }
+        }
+
+        let Some((region, book)) = hit else {
+            tracing::info!(
+                book = %book_id,
+                asin = %asin,
+                regions_tried = self.region_order.len(),
+                "audnexus.enrich.all_regions_missed"
+            );
+            return Ok(StageOutcome::Skipped);
         };
 
-        write_provenance(&ctx.library, book_id, &book).await?;
+        write_provenance(&ctx.library, book_id, &book, &region).await?;
         promote_asin(&ctx.library, book_id, &book.asin).await?;
         tracing::info!(
             book = %book_id,
             asin = %book.asin,
+            region = %region,
             "audnexus.enrich.done"
         );
         Ok(StageOutcome::Done)
@@ -148,33 +178,38 @@ async fn fetch_asin_candidate(
     Ok(row.and_then(|r| r.value))
 }
 
-/// Write one provenance row per non-empty Audnexus field.
+/// Write one provenance row per non-empty Audnexus field. The
+/// `region` is encoded into the provenance source as
+/// `audnexus_asin_<region>` so the consensus stage can prefer
+/// home-region matches over fallback-region matches.
 async fn write_provenance(
     library: &ab_db::LibraryDb,
     book_id: BookId,
     book: &crate::audnexus::AudnexusBook,
+    region: &str,
 ) -> Result<()> {
+    let source = format_source(region);
     let mut tx = library
         .pool()
         .begin()
         .await
         .map_err(|e| Error::Database(format!("audnexus tx begin: {e}")))?;
 
-    insert_row(&mut tx, book_id, "title", &book.title).await?;
+    insert_row(&mut tx, book_id, "title", &book.title, &source).await?;
     if let Some(v) = book.subtitle.as_deref() {
-        insert_row(&mut tx, book_id, "subtitle", v).await?;
+        insert_row(&mut tx, book_id, "subtitle", v, &source).await?;
     }
     if let Some(v) = book.description.as_deref() {
-        insert_row(&mut tx, book_id, "description", v).await?;
+        insert_row(&mut tx, book_id, "description", v, &source).await?;
     }
     if let Some(v) = book.language.as_deref() {
-        insert_row(&mut tx, book_id, "language", v).await?;
+        insert_row(&mut tx, book_id, "language", v, &source).await?;
     }
     if let Some(v) = book.publisher_name.as_deref() {
-        insert_row(&mut tx, book_id, "publisher", v).await?;
+        insert_row(&mut tx, book_id, "publisher", v, &source).await?;
     }
     if let Some(v) = book.release_date.as_deref() {
-        insert_row(&mut tx, book_id, "release_date", v).await?;
+        insert_row(&mut tx, book_id, "release_date", v, &source).await?;
     }
     if let Some(minutes) = book.runtime_length_min {
         // Store as decimal-seconds string so the provenance row's
@@ -183,7 +218,14 @@ async fn write_provenance(
         // separate-column to avoid widening the provenance schema
         // for one numeric field.
         let secs = i64::from(minutes).saturating_mul(60);
-        insert_row(&mut tx, book_id, "duration_seconds", &secs.to_string()).await?;
+        insert_row(
+            &mut tx,
+            book_id,
+            "duration_seconds",
+            &secs.to_string(),
+            &source,
+        )
+        .await?;
     }
 
     tx.commit()
@@ -192,11 +234,22 @@ async fn write_provenance(
     Ok(())
 }
 
+/// Compose the provenance source tag for a successful Audnexus
+/// lookup in a given region.
+fn format_source(region: &str) -> String {
+    // Region is restricted to lowercase ASCII letters in our
+    // tunables; no escaping needed. Worst case the format is
+    // tolerant of unexpected chars (we'd just store an odd source
+    // tag).
+    format!("{PROVENANCE_SOURCE}_{region}")
+}
+
 async fn insert_row(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     book_id: BookId,
     field: &str,
     value: &str,
+    source: &str,
 ) -> Result<()> {
     let id = book_id.0;
     sqlx::query!(
@@ -206,7 +259,7 @@ async fn insert_row(
         id,
         field,
         value,
-        PROVENANCE_SOURCE,
+        source,
         AUDNEXUS_CONFIDENCE,
     )
     .execute(&mut **tx)
@@ -254,6 +307,34 @@ mod tests {
         let stage = AudnexusEnrichStage::new(client, &NetworkTunables::default());
         assert_eq!(stage.name(), "audnexus-enrich");
         assert_eq!(stage.requires(), &["tag-read"]);
+    }
+
+    #[test]
+    fn region_order_preserved_from_tunables() {
+        let client = AudnexusClient::new(&HttpClientTunables::default());
+        let network = NetworkTunables {
+            audnexus_region_order: vec!["de".into(), "uk".into(), "us".into()],
+            ..NetworkTunables::default()
+        };
+        let stage = AudnexusEnrichStage::new(client, &network);
+        assert_eq!(stage.region_order, vec!["de", "uk", "us"]);
+    }
+
+    #[test]
+    fn region_order_falls_back_when_empty() {
+        let client = AudnexusClient::new(&HttpClientTunables::default());
+        let network = NetworkTunables {
+            audnexus_region_order: Vec::new(),
+            ..NetworkTunables::default()
+        };
+        let stage = AudnexusEnrichStage::new(client, &network);
+        assert_eq!(stage.region_order, vec!["us"]);
+    }
+
+    #[test]
+    fn provenance_source_encodes_region() {
+        assert_eq!(format_source("us"), "audnexus_asin_us");
+        assert_eq!(format_source("de"), "audnexus_asin_de");
     }
 
     #[tokio::test]
