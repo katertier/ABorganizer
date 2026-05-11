@@ -10,9 +10,12 @@
 //! aggregate; `<region>.audnex.us` exists historically — current
 //! single-host pattern at `api.audnex.us/{region}/...`).
 
+use std::time::Duration;
+
 use reqwest::Client;
 use serde::Deserialize;
 
+use ab_core::tunables::HttpClientTunables;
 use ab_core::{Error, Result};
 
 /// Reusable HTTP client. Carries a single `reqwest::Client`.
@@ -24,8 +27,9 @@ pub struct AudnexusClient {
 
 impl AudnexusClient {
     /// Construct with a user agent identifying our app per Audnexus
-    /// project request (honest-identification policy).
-    pub fn new() -> Self {
+    /// project request (honest-identification policy). Timeout from
+    /// `tunables.audnexus_timeout_secs`.
+    pub fn new(tunables: &HttpClientTunables) -> Self {
         let ua = format!(
             "{}/{} (+{})",
             ab_core::build_info::APP_NAME,
@@ -34,7 +38,7 @@ impl AudnexusClient {
         );
         let http = Client::builder()
             .user_agent(ua.clone())
-            .timeout(std::time::Duration::from_secs(15))
+            .timeout(Duration::from_secs(tunables.audnexus_timeout_secs))
             .build()
             .unwrap_or_else(|_| Client::new());
         Self {
@@ -84,7 +88,7 @@ impl AudnexusClient {
 
 impl Default for AudnexusClient {
     fn default() -> Self {
-        Self::new()
+        Self::new(&HttpClientTunables::default())
     }
 }
 

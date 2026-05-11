@@ -3,8 +3,9 @@ name: CI
 on:
   push:
     branches: [main]
+  # Fire on every PR regardless of base branch so stacked PRs
+  # (a chain of branches awaiting merge) are gated end-to-end.
   pull_request:
-    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always

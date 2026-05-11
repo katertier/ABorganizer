@@ -39,6 +39,15 @@ pub struct Tunables {
 
     /// Logging.
     pub log: LogTunables,
+
+    /// Database connection pool sizes + busy-timeout.
+    pub db: DbTunables,
+
+    /// Outbound HTTP client timeouts.
+    pub http_client: HttpClientTunables,
+
+    /// Scheduler internal channel buffer sizes.
+    pub scheduler: SchedulerTunables,
 }
 
 impl Default for Tunables {
@@ -51,6 +60,9 @@ impl Default for Tunables {
             audiologo: AudiologoTunables::default(),
             player: PlayerTunables::default(),
             log: LogTunables::default(),
+            db: DbTunables::default(),
+            http_client: HttpClientTunables::default(),
+            scheduler: SchedulerTunables::default(),
         }
     }
 }
@@ -224,6 +236,78 @@ impl Default for LogTunables {
             file_rotation_mb: 10,
             file_rotation_count: 5,
             level: "info".into(),
+        }
+    }
+}
+
+/// Database connection pool sizing + busy-timeout. Applied at
+/// `LibraryDb::open` / `EphemeralDb::open` construction time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DbTunables {
+    /// Maximum concurrent connections to `library.db`. WAL allows
+    /// many readers; the daemon owns the single writer.
+    pub library_pool_max: u32,
+    /// Maximum concurrent connections to `ephemeral.db`. Smaller
+    /// because job-queue churn doesn't need wide read parallelism.
+    pub ephemeral_pool_max: u32,
+    /// SQLite `busy_timeout` (milliseconds). Time a query will wait
+    /// on a busy lock before failing with `SQLITE_BUSY`.
+    pub busy_timeout_ms: u64,
+}
+
+impl Default for DbTunables {
+    fn default() -> Self {
+        Self {
+            library_pool_max: 8,
+            ephemeral_pool_max: 4,
+            busy_timeout_ms: 5_000,
+        }
+    }
+}
+
+/// Outbound HTTP client request timeouts. Applied to the reusable
+/// `reqwest::Client` instances at construction time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HttpClientTunables {
+    /// Per-request timeout for Audnexus calls (seconds).
+    pub audnexus_timeout_secs: u64,
+    /// Per-request timeout for Audible product-page scrapes (seconds).
+    /// Generous; Audible pages can be slow.
+    pub audible_timeout_secs: u64,
+    /// Per-request timeout for the seed-data signed manifest fetch
+    /// (seconds). Small JSON payload; short timeout fine.
+    pub seed_timeout_secs: u64,
+}
+
+impl Default for HttpClientTunables {
+    fn default() -> Self {
+        Self {
+            audnexus_timeout_secs: 15,
+            audible_timeout_secs: 20,
+            seed_timeout_secs: 10,
+        }
+    }
+}
+
+/// Pipeline scheduler internal mpsc-channel buffer sizes. Larger
+/// buffers absorb burst submissions without blocking; the durable
+/// job queue (`ephemeral.db.jobs`) is the real backpressure mechanism.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SchedulerTunables {
+    /// Buffer for the interactive-priority channel.
+    pub interactive_buffer: usize,
+    /// Buffer for the background-priority channel.
+    pub background_buffer: usize,
+}
+
+impl Default for SchedulerTunables {
+    fn default() -> Self {
+        Self {
+            interactive_buffer: 128,
+            background_buffer: 4_096,
         }
     }
 }

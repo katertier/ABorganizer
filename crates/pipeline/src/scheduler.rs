@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
+use ab_core::tunables::SchedulerTunables;
 use ab_core::{BookId, Result};
 
 use crate::dag::Dag;
@@ -48,12 +49,13 @@ pub struct Scheduler {
 impl Scheduler {
     /// Construct a scheduler around a DAG. Spawns a worker that
     /// drains the queues; the returned handle is used to submit work.
-    pub fn spawn(dag: Arc<Dag>, ctx: StageContext) -> Self {
-        // Small interactive buffer; larger background buffer so scans
-        // can enqueue freely without blocking. Real backpressure lives
-        // in the DB jobs table (max_pending_per_stage).
-        let (interactive_tx, mut interactive_rx) = mpsc::channel::<Job>(128);
-        let (background_tx, mut background_rx) = mpsc::channel::<Job>(4096);
+    ///
+    /// Channel buffer sizes come from `tunables`. Real backpressure
+    /// lives in the DB jobs table (`max_pending_per_stage`).
+    pub fn spawn(dag: Arc<Dag>, ctx: StageContext, tunables: &SchedulerTunables) -> Self {
+        let (interactive_tx, mut interactive_rx) =
+            mpsc::channel::<Job>(tunables.interactive_buffer);
+        let (background_tx, mut background_rx) = mpsc::channel::<Job>(tunables.background_buffer);
         let cancel = ctx.cancel.clone();
 
         let worker_dag = Arc::clone(&dag);

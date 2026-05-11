@@ -2,10 +2,12 @@
 //! and represents user-facing data.
 
 use std::path::Path;
+use std::time::Duration;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous};
 use sqlx::{Pool, Sqlite};
 
+use ab_core::tunables::DbTunables;
 use ab_core::{Error, Result};
 
 /// Handle to the library database connection pool. Cheap to clone.
@@ -17,7 +19,10 @@ pub struct LibraryDb {
 impl LibraryDb {
     /// Open or create the library DB at `path`, run migrations,
     /// return a pooled handle.
-    pub async fn open(path: &Path) -> Result<Self> {
+    ///
+    /// Pool sizing + busy-timeout come from `tunables` (defaults in
+    /// `ab_core::tunables::DbTunables`).
+    pub async fn open(path: &Path, tunables: &DbTunables) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -27,10 +32,10 @@ impl LibraryDb {
             .journal_mode(SqliteJournalMode::Wal)
             .synchronous(SqliteSynchronous::Normal)
             .foreign_keys(true)
-            .busy_timeout(std::time::Duration::from_secs(5));
+            .busy_timeout(Duration::from_millis(tunables.busy_timeout_ms));
 
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(8)
+            .max_connections(tunables.library_pool_max)
             .connect_with(options)
             .await
             .map_err(|e| Error::Database(format!("open library db: {e}")))?;

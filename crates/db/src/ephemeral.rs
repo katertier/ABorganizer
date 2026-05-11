@@ -3,10 +3,12 @@
 //! but does not need to be backed up — recoverable from scratch.
 
 use std::path::Path;
+use std::time::Duration;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous};
 use sqlx::{Pool, Sqlite};
 
+use ab_core::tunables::DbTunables;
 use ab_core::{Error, Result};
 
 /// Handle to the ephemeral database connection pool. Cheap to clone.
@@ -18,7 +20,9 @@ pub struct EphemeralDb {
 impl EphemeralDb {
     /// Open or create the ephemeral DB at `path`, run migrations,
     /// return a pooled handle.
-    pub async fn open(path: &Path) -> Result<Self> {
+    ///
+    /// Pool sizing + busy-timeout come from `tunables`.
+    pub async fn open(path: &Path, tunables: &DbTunables) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -29,10 +33,10 @@ impl EphemeralDb {
             // OFF is acceptable here: data is restartable by design.
             .synchronous(SqliteSynchronous::Off)
             .foreign_keys(true)
-            .busy_timeout(std::time::Duration::from_secs(5));
+            .busy_timeout(Duration::from_millis(tunables.busy_timeout_ms));
 
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(4)
+            .max_connections(tunables.ephemeral_pool_max)
             .connect_with(options)
             .await
             .map_err(|e| Error::Database(format!("open ephemeral db: {e}")))?;

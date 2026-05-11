@@ -7,9 +7,12 @@
 //!
 //! Rate-limit policy: 120 ms pacing between requests per region.
 
+use std::time::Duration;
+
 use reqwest::Client;
 
 use ab_core::Result;
+use ab_core::tunables::HttpClientTunables;
 
 /// Reusable Audible HTTP client.
 #[derive(Clone)]
@@ -18,8 +21,9 @@ pub struct AudibleClient {
 }
 
 impl AudibleClient {
-    /// Construct with our user agent.
-    pub fn new() -> Self {
+    /// Construct with our user agent. Timeout from
+    /// `tunables.audible_timeout_secs`.
+    pub fn new(tunables: &HttpClientTunables) -> Self {
         let ua = format!(
             "{}/{}",
             ab_core::build_info::APP_NAME,
@@ -27,7 +31,7 @@ impl AudibleClient {
         );
         let http = Client::builder()
             .user_agent(ua)
-            .timeout(std::time::Duration::from_secs(20))
+            .timeout(Duration::from_secs(tunables.audible_timeout_secs))
             .build()
             .unwrap_or_else(|_| Client::new());
         Self { http }
@@ -52,6 +56,6 @@ impl AudibleClient {
 
 impl Default for AudibleClient {
     fn default() -> Self {
-        Self::new()
+        Self::new(&HttpClientTunables::default())
     }
 }

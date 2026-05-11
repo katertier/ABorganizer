@@ -71,13 +71,14 @@ async fn main() -> Result<()> {
 
     let tunables = Tunables::default();
 
-    // Open both databases.
+    // Open both databases. Pool sizing + busy-timeout come from
+    // `tunables.db` (single source of truth in `ab_core::tunables`).
     let library_path = storage_root.join("library.db");
     let ephemeral_path = storage_root.join("ephemeral.db");
-    let library = LibraryDb::open(&library_path)
+    let library = LibraryDb::open(&library_path, &tunables.db)
         .await
         .context("open library db")?;
-    let ephemeral = EphemeralDb::open(&ephemeral_path)
+    let ephemeral = EphemeralDb::open(&ephemeral_path, &tunables.db)
         .await
         .context("open ephemeral db")?;
 
