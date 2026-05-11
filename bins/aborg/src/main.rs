@@ -124,8 +124,9 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Library { action } => match action {
             LibraryAction::Scan { path } => library_scan(&cli.daemon, &path, cli.output).await?,
-            LibraryAction::Gaps | LibraryAction::Duplicates => {
-                tracing::warn!("not yet implemented");
+            LibraryAction::Duplicates => library_duplicates(&cli.daemon, cli.output).await?,
+            LibraryAction::Gaps => {
+                tracing::warn!("gaps not yet implemented");
             }
         },
         Command::Book { action } => match action {
@@ -248,6 +249,58 @@ async fn books_list(daemon: &str, output: OutputFormat) -> Result<()> {
                     tracing::info!(book_id = b.book_id, title = %b.title, file = %file, "book");
                 }
                 tracing::info!(count = body.books.len(), "total");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Deserialize, Debug, Serialize)]
+struct DuplicateGroup {
+    matching_offsets: u32,
+    book_ids: Vec<i64>,
+    titles: Vec<String>,
+}
+
+#[derive(Deserialize, Debug, Serialize)]
+struct DuplicatesResponse {
+    groups: Vec<DuplicateGroup>,
+}
+
+async fn library_duplicates(daemon: &str, output: OutputFormat) -> Result<()> {
+    let url = format!("{daemon}/api/v1/library/duplicates");
+    let resp = client()
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("duplicates failed: HTTP {status}: {body}");
+    }
+    let body: DuplicatesResponse = resp.json().await.context("parse duplicates response")?;
+    match output {
+        OutputFormat::Json => {
+            tracing::info!(
+                "{}",
+                serde_json::to_string_pretty(&body).unwrap_or_default()
+            );
+        }
+        OutputFormat::Human => {
+            if body.groups.is_empty() {
+                tracing::info!("no duplicates");
+            } else {
+                for g in &body.groups {
+                    let titles_joined = g.titles.join(" | ");
+                    tracing::info!(
+                        matching_offsets = g.matching_offsets,
+                        books = ?g.book_ids,
+                        "{}",
+                        titles_joined
+                    );
+                }
+                tracing::info!(group_count = body.groups.len(), "total groups");
             }
         }
     }

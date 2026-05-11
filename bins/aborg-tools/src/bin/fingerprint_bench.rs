@@ -9,10 +9,6 @@ use clap::Parser;
 struct Args {
     /// Audio file to fingerprint.
     file: PathBuf,
-    /// Approximate total duration in seconds (probe will replace this
-    /// when wired).
-    #[arg(long, default_value_t = 3600)]
-    duration_secs: u32,
 }
 
 fn main() -> Result<()> {
@@ -22,11 +18,19 @@ fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    let windows = ab_fingerprint::fingerprint_file(&args.file, args.duration_secs)?;
+    let windows = ab_fingerprint::fingerprint_file(&args.file)?;
     tracing::info!(
         file = ?args.file,
         windows = windows.len(),
         "fingerprint_bench.done"
     );
+    for w in &windows {
+        tracing::info!(
+            offset_sec = w.offset_sec,
+            duration_sec = w.duration_sec,
+            fp_len = w.fingerprint.len(),
+            "fingerprint_bench.window"
+        );
+    }
     Ok(())
 }

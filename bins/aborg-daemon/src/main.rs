@@ -89,12 +89,14 @@ async fn main() -> Result<()> {
     let cancel = CancellationToken::new();
     spawn_signal_handlers(&cancel);
 
-    // Build the pipeline DAG + scheduler. Slice 1B: a single stage
-    // (`tag-read`) is registered. The scheduler is the executor;
-    // `POST /api/v1/library/scan` submits new BookIds to it.
-    let stages: Vec<Arc<dyn Stage>> = vec![Arc::new(ab_tag_read::TagReadStage::new(
-        tunables.tag_read.clone(),
-    ))];
+    // Build the pipeline DAG + scheduler. Stages registered so far:
+    // `tag-read` (slice 1B), `fingerprint` (slice 1C). Both have no
+    // declared dependencies — the scan handler submits each new
+    // BookId to each stage independently.
+    let stages: Vec<Arc<dyn Stage>> = vec![
+        Arc::new(ab_tag_read::TagReadStage::new(tunables.tag_read.clone())),
+        Arc::new(ab_fingerprint::FingerprintStage::new()),
+    ];
     let dag = Arc::new(Dag::build(stages).context("build pipeline DAG")?);
     let stage_ctx = StageContext {
         library: library.clone(),

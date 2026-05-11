@@ -68,6 +68,28 @@ hex            = "0.4"
 # for duration/bitrate/codec probing + ID3/MP4-atom tag extraction.
 # Pinned to a current minor; verify API on each minor bump.
 lofty          = "0.24"
+# Pure-Rust audio decoder. Feeds PCM samples to chromaprint for
+# whole-book duplicate detection.
+#
+# Feature set is targeted at the formats we actually care about
+# (audiobooks are overwhelmingly mp3 + m4a/m4b in the wild):
+#
+#   * mp3       — MPEG layer 3
+#   * aac       — AAC codec inside MP4 (m4a / m4b)
+#   * isomp4    — MP4 container parsing (chapters, atoms)
+#   * flac      — FLAC codec + container
+#   * ogg       — Ogg container
+#   * vorbis    — Vorbis codec (the .ogg case)
+#
+# Formats with no decoder in symphonia 0.5 (notably `.opus`, `.aax`,
+# `.wma`) fall through the decode path, get logged, and are skipped
+# by the fingerprint stage. Other pipeline stages (tag-read,
+# audiologo via separate codepath) aren't affected.
+symphonia      = { version = "0.5", features = ["mp3", "aac", "isomp4", "flac", "ogg", "vorbis"] }
+# Pure-Rust AcoustID-compatible chromaprint. Whole-book identity
+# fingerprinting (not the audiologo RMS thumbprint, which is its
+# own crate).
+rusty-chromaprint = "0.3"
 mime           = "0.3"
 mime_guess     = "2.0"
 nix            = { version = "0.29", features = ["signal"] }

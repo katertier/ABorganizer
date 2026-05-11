@@ -16,6 +16,7 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/health", get(health))
         .route("/version", get(version))
         .route("/library/scan", post(library_scan))
+        .route("/library/duplicates", get(library_duplicates))
         .route("/books", get(books_list))
         .with_state(state)
 }
@@ -81,18 +82,24 @@ async fn library_scan(
     // downstream pipeline work (tag-read in slice 1B; more stages
     // wire in here later). Priority::Interactive — scan is a
     // user-initiated request, should preempt background drainage.
+    // Submit each new BookId to every per-book stage. Stages run
+    // concurrently (their DAG dependency lists are empty in slices
+    // 1B/1C); each completes independently.
     for book_id in &report.new_book_ids {
-        if let Err(e) = state
-            .inner
-            .scheduler
-            .submit(*book_id, "tag-read", ab_pipeline::Priority::Interactive)
-            .await
-        {
-            tracing::warn!(
-                book = %book_id,
-                error = %e,
-                "scan.scheduler_submit_failed"
-            );
+        for stage in ["tag-read", "fingerprint"] {
+            if let Err(e) = state
+                .inner
+                .scheduler
+                .submit(*book_id, stage, ab_pipeline::Priority::Interactive)
+                .await
+            {
+                tracing::warn!(
+                    book = %book_id,
+                    stage,
+                    error = %e,
+                    "scan.scheduler_submit_failed"
+                );
+            }
         }
     }
 
@@ -120,6 +127,82 @@ struct BookRow {
 #[derive(Serialize)]
 struct BooksResponse {
     books: Vec<BookRow>,
+}
+
+/// One group of books with matching fingerprints (same recording).
+#[derive(Serialize)]
+struct DuplicateGroup {
+    /// Number of offsets at which all members agree exactly.
+    /// 4 offsets agreeing → very-high-confidence match.
+    matching_offsets: u32,
+    book_ids: Vec<i64>,
+    titles: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct DuplicatesResponse {
+    groups: Vec<DuplicateGroup>,
+}
+
+/// Group books with identical chromaprint windows at the same offset.
+/// Slice 1C only: exact match. Fuzzy matching (Hamming distance
+/// < `MATCH_HD`) is a follow-up.
+async fn library_duplicates(
+    State(state): State<ApiState>,
+) -> Result<Json<DuplicatesResponse>, ApiError> {
+    let rows: Vec<(i64, i64, Vec<u8>)> = sqlx::query_as(
+        "SELECT book_id, offset_sec, fingerprint FROM book_fingerprints \
+         ORDER BY offset_sec, fingerprint",
+    )
+    .fetch_all(state.inner.library.pool())
+    .await
+    .map_err(|e| ab_core::Error::Database(format!("dups query: {e}")))?;
+
+    // (offset_sec, fingerprint) -> list of book_ids that share it.
+    let mut by_fp: std::collections::HashMap<(i64, Vec<u8>), Vec<i64>> =
+        std::collections::HashMap::new();
+    for (book_id, offset, fp) in rows {
+        by_fp.entry((offset, fp)).or_default().push(book_id);
+    }
+
+    // Sorted-deduped book_id set → count of offsets agreeing.
+    let mut group_counts: std::collections::HashMap<Vec<i64>, u32> =
+        std::collections::HashMap::new();
+    for (_, book_ids) in by_fp {
+        if book_ids.len() < 2 {
+            continue;
+        }
+        let mut sorted = book_ids;
+        sorted.sort_unstable();
+        sorted.dedup();
+        *group_counts.entry(sorted).or_default() += 1;
+    }
+
+    let mut groups = Vec::with_capacity(group_counts.len());
+    for (book_ids, matching_offsets) in group_counts {
+        let placeholders = vec!["?"; book_ids.len()].join(",");
+        let sql = format!(
+            "SELECT book_id, title FROM books WHERE book_id IN ({placeholders}) ORDER BY book_id"
+        );
+        let mut q = sqlx::query_as::<_, (i64, String)>(&sql);
+        for id in &book_ids {
+            q = q.bind(*id);
+        }
+        let title_rows = q
+            .fetch_all(state.inner.library.pool())
+            .await
+            .map_err(|e| ab_core::Error::Database(format!("dups titles: {e}")))?;
+        let titles = title_rows.into_iter().map(|(_, t)| t).collect();
+
+        groups.push(DuplicateGroup {
+            matching_offsets,
+            book_ids,
+            titles,
+        });
+    }
+    groups.sort_by_key(|g| std::cmp::Reverse(g.matching_offsets));
+
+    Ok(Json(DuplicatesResponse { groups }))
 }
 
 async fn books_list(State(state): State<ApiState>) -> Result<Json<BooksResponse>, ApiError> {

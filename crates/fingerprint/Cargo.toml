@@ -6,13 +6,23 @@ rust-version = { workspace = true }
 license      = { workspace = true }
 authors      = { workspace = true }
 repository   = { workspace = true }
-description  = "Whole-book chromaprint-based identity fingerprinting. Used for duplicate detection. Distinct from `ab-audiologo` (which fingerprints publisher jingles)."
+description  = "Whole-book chromaprint-based identity fingerprinting via symphonia decode + rusty_chromaprint. Used for duplicate detection. Distinct from `ab-audiologo` (which fingerprints publisher jingles)."
 
 [lints]
 workspace = true
 
 [dependencies]
-ab-core   = { workspace = true }
-ab-audio  = { workspace = true }
-thiserror = { workspace = true }
-tracing   = { workspace = true }
+ab-core            = { workspace = true }
+ab-db              = { workspace = true }
+ab-pipeline        = { workspace = true }
+async-trait        = { workspace = true }
+rusty-chromaprint  = { workspace = true }
+sqlx               = { workspace = true }
+symphonia          = { workspace = true }
+thiserror          = { workspace = true }
+tokio              = { workspace = true }
+tracing            = { workspace = true }
+
+[dev-dependencies]
+tempfile   = { workspace = true }
+tokio-util = { workspace = true }
