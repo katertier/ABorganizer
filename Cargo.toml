@@ -14,6 +14,7 @@ members = [
     "crates/webui-config",
     "crates/webui-player",
     "crates/seed",
+    "crates/scan",
     "bins/aborg",
     "bins/aborg-daemon",
     "bins/aborg-tools",
@@ -103,6 +104,7 @@ ab-shelf       = { path = "crates/shelf" }
 ab-webui-config = { path = "crates/webui-config" }
 ab-webui-player = { path = "crates/webui-player" }
 ab-seed        = { path = "crates/seed" }
+ab-scan        = { path = "crates/scan" }
 
 # Test-only
 proptest       = "1.5"
