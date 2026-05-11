@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT source FROM chapters WHERE book_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "source",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9940145c0630736a99124600747fe49edb152da7ec932e6077167d2b9c25cba7"
+}

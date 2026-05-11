@@ -16,6 +16,7 @@
 pub mod audible;
 pub mod audible_search;
 pub mod audnexus;
+pub mod chapter_winner;
 pub mod chapters;
 pub mod consensus;
 pub mod embedded_chapters;
@@ -25,6 +26,7 @@ pub mod identity;
 pub use audible::AudibleClient;
 pub use audible_search::AudibleSearchStage;
 pub use audnexus::AudnexusClient;
+pub use chapter_winner::ChapterWinnerStage;
 pub use chapters::AudnexusChaptersStage;
 pub use consensus::ConsensusStage;
 pub use embedded_chapters::EmbeddedChaptersStage;

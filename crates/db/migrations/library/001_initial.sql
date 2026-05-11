@@ -179,14 +179,19 @@ CREATE TABLE chapters (
     end_ms         INTEGER NOT NULL,
     title          TEXT NOT NULL,
     source         TEXT NOT NULL,            -- audnexus, embedded, cue, epub, transcript, silence
+    -- Set by the `chapter-pick-winner` stage. Exactly one source's
+    -- rows per book are marked winners; the player joins on
+    -- `is_winner = 1` to get a single consistent ToC even when
+    -- multiple sources have populated chapters.
+    is_winner      INTEGER NOT NULL DEFAULT 0,
     -- UNIQUE includes `source` so the same book can carry chapter
-    -- lists from multiple sources concurrently. A future
-    -- "chapter-pick-winner" step decides which source the player
-    -- surfaces. Indexing on `(book_id, source)` keeps the
-    -- per-source clear-then-add path cheap.
+    -- lists from multiple sources concurrently. Indexing on
+    -- `(book_id, source)` keeps the per-source clear-then-add path
+    -- cheap.
     UNIQUE (book_id, idx, source)
 ) STRICT;
 CREATE INDEX idx_chapters_book_source ON chapters(book_id, source);
+CREATE INDEX idx_chapters_winners ON chapters(book_id) WHERE is_winner = 1;
 
 -- ── Audiologo fingerprints ─────────────────────────────────────────
 -- These are the RMS thumbprints used for intro/outro trim. Each row

@@ -95,6 +95,7 @@ async fn library_scan(
             "identity-resolve",
             "audnexus-chapters",
             "embedded-chapters",
+            "chapter-pick-winner",
         ] {
             if let Err(e) = state
                 .inner

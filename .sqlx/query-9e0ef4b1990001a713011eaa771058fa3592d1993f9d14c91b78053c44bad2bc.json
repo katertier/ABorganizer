@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE chapters SET is_winner = 1 WHERE book_id = ? AND source = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "9e0ef4b1990001a713011eaa771058fa3592d1993f9d14c91b78053c44bad2bc"
+}

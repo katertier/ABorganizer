@@ -134,6 +134,11 @@ async fn main() -> Result<()> {
         // (different `chapters.source` value, UNIQUE includes
         // source).
         Arc::new(ab_catalog::EmbeddedChaptersStage::new()),
+        // `chapter-pick-winner` flips `is_winner` so exactly one
+        // chapter source per book is surfaced to the player.
+        // Precedence: audnexus > embedded > cue > epub >
+        // transcript > silence.
+        Arc::new(ab_catalog::ChapterWinnerStage::new()),
     ];
     let dag = Arc::new(Dag::build(stages).context("build pipeline DAG")?);
     let stage_ctx = StageContext {
