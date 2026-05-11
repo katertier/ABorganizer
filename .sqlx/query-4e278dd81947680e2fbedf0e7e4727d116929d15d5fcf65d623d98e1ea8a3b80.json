@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT file_id AS \"file_id!\", file_path\n           FROM book_files WHERE book_id = ? AND is_active = 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "file_id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "file_path",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "4e278dd81947680e2fbedf0e7e4727d116929d15d5fcf65d623d98e1ea8a3b80"
+}
