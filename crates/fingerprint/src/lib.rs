@@ -47,7 +47,6 @@ use std::path::Path;
 
 use async_trait::async_trait;
 use rusty_chromaprint::{Configuration, Fingerprinter};
-use sqlx::Row;
 use symphonia::core::audio::{AudioBufferRef, Signal as _};
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::formats::FormatOptions;
@@ -387,11 +386,12 @@ impl Stage for FingerprintStage {
     }
 
     async fn run(&self, ctx: &StageContext, book_id: BookId) -> Result<StageOutcome> {
-        let row = sqlx::query(
+        let id = book_id.0;
+        let row = sqlx::query!(
             "SELECT file_path FROM book_files \
              WHERE book_id = ? AND is_active = 1 ORDER BY file_id LIMIT 1",
+            id,
         )
-        .bind(book_id.0)
         .fetch_optional(ctx.library.pool())
         .await
         .map_err(|e| Error::Database(format!("fp fetch file: {e}")))?;
@@ -399,9 +399,7 @@ impl Stage for FingerprintStage {
         let Some(row) = row else {
             return Ok(StageOutcome::Skipped);
         };
-        let file_path: String = row
-            .try_get("file_path")
-            .map_err(|e| Error::Database(format!("fp file_path: {e}")))?;
+        let file_path = row.file_path;
         let path = std::path::PathBuf::from(&file_path);
 
         let windows = match tokio::task::spawn_blocking(move || fingerprint_file(&path)).await {
@@ -432,16 +430,17 @@ async fn write_fingerprint(library: &LibraryDb, book_id: BookId, window: &Window
     let bytes = fingerprint_to_bytes(&window.fingerprint);
     let offset_i64 = i64::from(window.offset_sec);
     let duration_i64 = i64::from(window.duration_sec);
-    sqlx::query(
+    let id = book_id.0;
+    sqlx::query!(
         "INSERT OR REPLACE INTO book_fingerprints \
          (book_id, offset_sec, duration_sec, fingerprint, algorithm) \
          VALUES (?, ?, ?, ?, ?)",
+        id,
+        offset_i64,
+        duration_i64,
+        bytes,
+        ALGORITHM,
     )
-    .bind(book_id.0)
-    .bind(offset_i64)
-    .bind(duration_i64)
-    .bind(&bytes)
-    .bind(ALGORITHM)
     .execute(library.pool())
     .await
     .map_err(|e| Error::Database(format!("insert fingerprint: {e}")))?;

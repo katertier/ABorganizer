@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR REPLACE INTO book_fingerprints (book_id, offset_sec, duration_sec, fingerprint, algorithm) VALUES (?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "414f93628e3f6e22b07d21b75f120e170b4d35b6725e90fe19763b541672f3b2"
+}

@@ -150,7 +150,7 @@ struct DuplicatesResponse {
 async fn library_duplicates(
     State(state): State<ApiState>,
 ) -> Result<Json<DuplicatesResponse>, ApiError> {
-    let rows: Vec<(i64, i64, Vec<u8>)> = sqlx::query_as(
+    let rows = sqlx::query!(
         "SELECT book_id, offset_sec, fingerprint FROM book_fingerprints \
          ORDER BY offset_sec, fingerprint",
     )
@@ -161,8 +161,11 @@ async fn library_duplicates(
     // (offset_sec, fingerprint) -> list of book_ids that share it.
     let mut by_fp: std::collections::HashMap<(i64, Vec<u8>), Vec<i64>> =
         std::collections::HashMap::new();
-    for (book_id, offset, fp) in rows {
-        by_fp.entry((offset, fp)).or_default().push(book_id);
+    for r in rows {
+        by_fp
+            .entry((r.offset_sec, r.fingerprint))
+            .or_default()
+            .push(r.book_id);
     }
 
     // Sorted-deduped book_id set → count of offsets agreeing.
@@ -206,11 +209,15 @@ async fn library_duplicates(
 }
 
 async fn books_list(State(state): State<ApiState>) -> Result<Json<BooksResponse>, ApiError> {
-    let rows: Vec<(i64, String, Option<String>)> = sqlx::query_as(
-        "SELECT b.book_id, b.title, \
-                (SELECT file_path FROM book_files WHERE book_id = b.book_id LIMIT 1) AS file_path \
-         FROM books b \
-         ORDER BY b.book_id",
+    // `book_id!` forces non-null inference past sqlite's
+    // `INTEGER PRIMARY KEY AUTOINCREMENT` nullability quirk
+    // (see slice 1D.2 note).
+    let rows = sqlx::query!(
+        r#"SELECT b.book_id AS "book_id!", b.title,
+                  (SELECT file_path FROM book_files
+                   WHERE book_id = b.book_id LIMIT 1) AS file_path
+           FROM books b
+           ORDER BY b.book_id"#,
     )
     .fetch_all(state.inner.library.pool())
     .await
@@ -218,10 +225,10 @@ async fn books_list(State(state): State<ApiState>) -> Result<Json<BooksResponse>
 
     let books = rows
         .into_iter()
-        .map(|(book_id, title, file_path)| BookRow {
-            book_id,
-            title,
-            file_path,
+        .map(|r| BookRow {
+            book_id: r.book_id,
+            title: r.title,
+            file_path: r.file_path,
         })
         .collect();
     Ok(Json(BooksResponse { books }))
