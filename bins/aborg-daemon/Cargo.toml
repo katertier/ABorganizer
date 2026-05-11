@@ -26,6 +26,7 @@ ab-core         = { workspace = true }
 ab-db           = { workspace = true }
 ab-pipeline     = { workspace = true }
 ab-api          = { workspace = true }
+ab-catalog      = { workspace = true }
 ab-fingerprint  = { workspace = true }
 ab-shelf        = { workspace = true }
 ab-tag-read     = { workspace = true }

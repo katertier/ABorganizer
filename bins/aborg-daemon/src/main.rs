@@ -90,12 +90,18 @@ async fn main() -> Result<()> {
     spawn_signal_handlers(&cancel);
 
     // Build the pipeline DAG + scheduler. Stages registered so far:
-    // `tag-read` (slice 1B), `fingerprint` (slice 1C). Both have no
-    // declared dependencies — the scan handler submits each new
-    // BookId to each stage independently.
+    // `tag-read` (slice 1B), `fingerprint` (slice 1C),
+    // `audnexus-enrich` (slice 2A). Tag-read + fingerprint have no
+    // declared dependencies; `audnexus-enrich` requires `tag-read`
+    // because tag-read writes the ASIN candidate it uses.
+    let audnexus_client = ab_catalog::AudnexusClient::new(&tunables.http_client);
     let stages: Vec<Arc<dyn Stage>> = vec![
         Arc::new(ab_tag_read::TagReadStage::new(tunables.tag_read.clone())),
         Arc::new(ab_fingerprint::FingerprintStage::new()),
+        Arc::new(ab_catalog::AudnexusEnrichStage::new(
+            audnexus_client,
+            &tunables.network,
+        )),
     ];
     let dag = Arc::new(Dag::build(stages).context("build pipeline DAG")?);
     let stage_ctx = StageContext {
