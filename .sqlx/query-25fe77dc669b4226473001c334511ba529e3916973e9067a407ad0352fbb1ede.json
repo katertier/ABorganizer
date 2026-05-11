@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM chapters WHERE book_id = ? AND source = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "25fe77dc669b4226473001c334511ba529e3916973e9067a407ad0352fbb1ede"
+}

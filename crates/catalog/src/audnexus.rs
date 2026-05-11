@@ -80,6 +80,45 @@ impl AudnexusClient {
         Ok(Some(book))
     }
 
+    /// Look up chapter data for a book by ASIN within a single
+    /// region. Returns `None` when the book exists but has no
+    /// chapter `ToC` (which Audnexus expresses as a 404 on this
+    /// endpoint specifically).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ab_core::Error::Network`] on transport failures or
+    /// non-success status codes (other than 404).
+    pub async fn lookup_chapters(
+        &self,
+        region: &str,
+        asin: &str,
+    ) -> Result<Option<AudnexusChapters>> {
+        let url = format!("https://api.audnex.us/books/{asin}/chapters?region={region}");
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| Error::Network(format!("audnexus chapters get: {e}")))?;
+
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            return Err(Error::Network(format!(
+                "audnexus chapters {}: HTTP {}",
+                asin,
+                resp.status()
+            )));
+        }
+        let chapters = resp
+            .json::<AudnexusChapters>()
+            .await
+            .map_err(|e| Error::Network(format!("audnexus chapters parse: {e}")))?;
+        Ok(Some(chapters))
+    }
+
     /// User agent string in use.
     pub fn user_agent(&self) -> &str {
         &self.user_agent
@@ -129,4 +168,44 @@ pub struct AudnexusContributor {
     pub name: String,
     #[serde(default)]
     pub asin: Option<String>,
+}
+
+/// `/books/{asin}/chapters` response.
+///
+/// Audnexus computes chapter boundaries from Audible's master `ToC`
+/// and includes durations for the brand intro / outro (publisher
+/// jingle) when the book has them. Books distributed by Audible
+/// Studios + other major imprints almost always carry brand
+/// markers; smaller indies skip them.
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct AudnexusChapters {
+    pub asin: String,
+    /// Brand intro duration in milliseconds. Zero when no intro
+    /// marker is present.
+    #[serde(default, rename = "brandIntroDurationMs")]
+    pub brand_intro_duration_ms: u64,
+    /// Brand outro duration in milliseconds. Zero when none.
+    #[serde(default, rename = "brandOutroDurationMs")]
+    pub brand_outro_duration_ms: u64,
+    /// True when Audnexus has high-confidence chapter timings
+    /// (verified against the Audible-supplied `ToC`).
+    #[serde(default, rename = "isAccurate")]
+    pub is_accurate: bool,
+    /// Ordered chapter list. Empty when Audible didn't supply a
+    /// `ToC` (rare for full-length audiobooks, common for samples).
+    #[serde(default)]
+    pub chapters: Vec<AudnexusChapter>,
+}
+
+/// One chapter on an Audnexus chapters response.
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct AudnexusChapter {
+    #[serde(default, rename = "lengthMs")]
+    pub length_ms: u64,
+    #[serde(default, rename = "startOffsetMs")]
+    pub start_offset_ms: u64,
+    #[serde(default)]
+    pub title: String,
 }
