@@ -127,6 +127,13 @@ async fn main() -> Result<()> {
             ab_catalog::AudnexusClient::new(&tunables.http_client),
             &tunables.network,
         )),
+        // `embedded-chapters` reads chpl + chapter-track atoms
+        // from .m4b / .m4a files via mp4ameta. Runs after
+        // tag-read (needs `book_files.duration_ms` for multi-file
+        // offsets) and is parallel-safe with audnexus-chapters
+        // (different `chapters.source` value, UNIQUE includes
+        // source).
+        Arc::new(ab_catalog::EmbeddedChaptersStage::new()),
     ];
     let dag = Arc::new(Dag::build(stages).context("build pipeline DAG")?);
     let stage_ctx = StageContext {

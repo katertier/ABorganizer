@@ -94,6 +94,7 @@ async fn library_scan(
             "consensus",
             "identity-resolve",
             "audnexus-chapters",
+            "embedded-chapters",
         ] {
             if let Err(e) = state
                 .inner

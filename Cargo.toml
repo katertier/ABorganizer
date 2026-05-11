@@ -68,6 +68,7 @@ hex            = "0.4"
 # for duration/bitrate/codec probing + ID3/MP4-atom tag extraction.
 # Pinned to a current minor; verify API on each minor bump.
 lofty          = "0.24"
+mp4ameta       = "0.13"
 # Pure-Rust audio decoder. Feeds PCM samples to chromaprint for
 # whole-book duplicate detection.
 #
