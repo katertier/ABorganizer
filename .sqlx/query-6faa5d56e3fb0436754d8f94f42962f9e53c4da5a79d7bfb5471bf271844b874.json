@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE books SET asin = ? WHERE book_id = ? AND asin IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "6faa5d56e3fb0436754d8f94f42962f9e53c4da5a79d7bfb5471bf271844b874"
+}
