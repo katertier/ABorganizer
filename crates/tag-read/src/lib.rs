@@ -22,7 +22,6 @@
 //! `ab-scan` crate docs).
 
 use async_trait::async_trait;
-use sqlx::Row;
 
 use ab_core::tunables::TagReadTunables;
 use ab_core::{BookId, Error, Result};
@@ -90,20 +89,20 @@ async fn fetch_book_files(
     library: &ab_db::LibraryDb,
     book_id: BookId,
 ) -> Result<Vec<(i64, String)>> {
-    sqlx::query("SELECT file_id, file_path FROM book_files WHERE book_id = ? AND is_active = 1")
-        .bind(book_id.0)
-        .fetch_all(library.pool())
-        .await
-        .map_err(|e| Error::Database(format!("tag-read fetch files: {e}")))
-        .map(|rows| {
-            rows.into_iter()
-                .filter_map(|r| {
-                    let file_id: i64 = r.try_get("file_id").ok()?;
-                    let file_path: String = r.try_get("file_path").ok()?;
-                    Some((file_id, file_path))
-                })
-                .collect()
-        })
+    let id = book_id.0;
+    // `file_id!` forces sqlx to treat the PK column as non-null —
+    // SQLite reports `INTEGER PRIMARY KEY AUTOINCREMENT` as nullable
+    // at the type level even though INSERT always materialises a
+    // value. See sqlx docs on "column nullability overrides".
+    let rows = sqlx::query!(
+        r#"SELECT file_id AS "file_id!", file_path
+           FROM book_files WHERE book_id = ? AND is_active = 1"#,
+        id,
+    )
+    .fetch_all(library.pool())
+    .await
+    .map_err(|e| Error::Database(format!("tag-read fetch files: {e}")))?;
+    Ok(rows.into_iter().map(|r| (r.file_id, r.file_path)).collect())
 }
 
 /// Process one file. Errors are logged + swallowed so a single bad
@@ -258,18 +257,19 @@ async fn update_book_file_properties(
     file_id: i64,
     props: &AudioProperties,
 ) -> Result<()> {
-    sqlx::query(
+    let codec = props.codec.as_deref();
+    sqlx::query!(
         "UPDATE book_files \
          SET duration_ms = ?, bitrate_kbps = ?, sample_rate_hz = ?, channels = ?, codec = ?, \
              checked_at = strftime('%s','now') \
          WHERE file_id = ?",
+        props.duration_ms,
+        props.bitrate_kbps,
+        props.sample_rate_hz,
+        props.channels,
+        codec,
+        file_id,
     )
-    .bind(props.duration_ms)
-    .bind(props.bitrate_kbps)
-    .bind(props.sample_rate_hz)
-    .bind(props.channels)
-    .bind(props.codec.as_deref())
-    .bind(file_id)
     .execute(library.pool())
     .await
     .map_err(|e| Error::Database(format!("update book_file: {e}")))?;
@@ -282,16 +282,17 @@ async fn write_provenance(
     field: &str,
     value: &str,
 ) -> Result<()> {
-    sqlx::query(
+    let id = book_id.0;
+    sqlx::query!(
         "INSERT INTO book_field_provenance \
          (book_id, field, value, source, confidence, is_winner) \
          VALUES (?, ?, ?, ?, ?, 0)",
+        id,
+        field,
+        value,
+        PROVENANCE_SOURCE,
+        TAG_CONFIDENCE,
     )
-    .bind(book_id.0)
-    .bind(field)
-    .bind(value)
-    .bind(PROVENANCE_SOURCE)
-    .bind(TAG_CONFIDENCE)
     .execute(library.pool())
     .await
     .map_err(|e| Error::Database(format!("insert provenance: {e}")))?;
