@@ -30,8 +30,11 @@ use tokio::signal;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use std::sync::Arc;
+
 use ab_core::{Tunables, paths};
 use ab_db::{EphemeralDb, LibraryDb};
+use ab_pipeline::{Dag, Scheduler, Stage, StageContext};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -82,12 +85,28 @@ async fn main() -> Result<()> {
         .await
         .context("open ephemeral db")?;
 
-    // Shared state for the API router.
-    let api_state = ab_api::ApiState::new(library.clone(), ephemeral.clone());
-
     // Cancellation propagated to every worker on SIGTERM.
     let cancel = CancellationToken::new();
     spawn_signal_handlers(&cancel);
+
+    // Build the pipeline DAG + scheduler. Slice 1B: a single stage
+    // (`tag-read`) is registered. The scheduler is the executor;
+    // `POST /api/v1/library/scan` submits new BookIds to it.
+    let stages: Vec<Arc<dyn Stage>> = vec![Arc::new(ab_tag_read::TagReadStage::new(
+        tunables.tag_read.clone(),
+    ))];
+    let dag = Arc::new(Dag::build(stages).context("build pipeline DAG")?);
+    let stage_ctx = StageContext {
+        library: library.clone(),
+        ephemeral: ephemeral.clone(),
+        cancel: cancel.clone(),
+        stage_name: "",
+    };
+    let scheduler = Arc::new(Scheduler::spawn(dag, stage_ctx, &tunables.scheduler));
+
+    // Shared state for the API router. Carries the scheduler handle
+    // so the scan endpoint can submit new BookIds.
+    let api_state = ab_api::ApiState::new(library.clone(), ephemeral.clone(), scheduler);
 
     // Build the unified Router for the API port (api + webuis).
     let mut router = Router::new()

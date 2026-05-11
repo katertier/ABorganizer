@@ -48,6 +48,9 @@ pub struct Tunables {
 
     /// Scheduler internal channel buffer sizes.
     pub scheduler: SchedulerTunables,
+
+    /// Tag-read stage (lofty-based file probe + tag extraction).
+    pub tag_read: TagReadTunables,
 }
 
 impl Default for Tunables {
@@ -63,6 +66,7 @@ impl Default for Tunables {
             db: DbTunables::default(),
             http_client: HttpClientTunables::default(),
             scheduler: SchedulerTunables::default(),
+            tag_read: TagReadTunables::default(),
         }
     }
 }
@@ -308,6 +312,24 @@ impl Default for SchedulerTunables {
         Self {
             interactive_buffer: 128,
             background_buffer: 4_096,
+        }
+    }
+}
+
+/// Tag-read stage knobs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TagReadTunables {
+    /// Insert `book_field_provenance` candidates for every tag
+    /// field we successfully extract. Off → only the per-file
+    /// audio properties (duration / bitrate / codec) are written.
+    pub write_provenance: bool,
+}
+
+impl Default for TagReadTunables {
+    fn default() -> Self {
+        Self {
+            write_provenance: true,
         }
     }
 }

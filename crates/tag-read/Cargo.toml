@@ -1,12 +1,12 @@
 [package]
-name         = "ab-api"
+name         = "ab-tag-read"
 version      = { workspace = true }
 edition      = { workspace = true }
 rust-version = { workspace = true }
 license      = { workspace = true }
 authors      = { workspace = true }
 repository   = { workspace = true }
-description  = "Native HTTP API (axum router, shared state, error mapping). Mounted at /api/v1/ on the main port; pairing + token auth."
+description  = "Tag-read pipeline stage. Probes audio files with lofty for properties (duration, bitrate, codec) and tags (title, author, ASIN, ISBN, language). Updates book_files; inserts provenance candidates for the merge step."
 
 [lints]
 workspace = true
@@ -15,13 +15,13 @@ workspace = true
 ab-core     = { workspace = true }
 ab-db       = { workspace = true }
 ab-pipeline = { workspace = true }
-ab-scan     = { workspace = true }
-axum        = { workspace = true }
-serde       = { workspace = true }
-serde_json  = { workspace = true }
+async-trait = { workspace = true }
+lofty       = { workspace = true }
 sqlx        = { workspace = true }
 thiserror   = { workspace = true }
 tokio       = { workspace = true }
-tower       = { workspace = true }
-tower-http  = { workspace = true }
 tracing     = { workspace = true }
+
+[dev-dependencies]
+tempfile   = { workspace = true }
+tokio-util = { workspace = true }

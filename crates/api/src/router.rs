@@ -76,6 +76,26 @@ async fn library_scan(
     Json(req): Json<ScanRequest>,
 ) -> Result<Json<ScanResponse>, ApiError> {
     let report = ab_scan::scan(&req.path, &state.inner.library).await?;
+
+    // Submit each newly-discovered book to the scheduler for
+    // downstream pipeline work (tag-read in slice 1B; more stages
+    // wire in here later). Priority::Interactive — scan is a
+    // user-initiated request, should preempt background drainage.
+    for book_id in &report.new_book_ids {
+        if let Err(e) = state
+            .inner
+            .scheduler
+            .submit(*book_id, "tag-read", ab_pipeline::Priority::Interactive)
+            .await
+        {
+            tracing::warn!(
+                book = %book_id,
+                error = %e,
+                "scan.scheduler_submit_failed"
+            );
+        }
+    }
+
     Ok(Json(ScanResponse {
         new_book_ids: report.new_book_ids.into_iter().map(|b| b.0).collect(),
         skipped_paths: report

@@ -27,6 +27,7 @@ ab-db           = { workspace = true }
 ab-pipeline     = { workspace = true }
 ab-api          = { workspace = true }
 ab-shelf        = { workspace = true }
+ab-tag-read     = { workspace = true }
 ab-webui-config = { workspace = true }
 ab-webui-player = { workspace = true }
 ab-seed         = { workspace = true }
