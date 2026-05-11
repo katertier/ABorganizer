@@ -1,0 +1,21 @@
+[package]
+name         = "ab-shelf"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+authors      = { workspace = true }
+repository   = { workspace = true }
+description  = "Audiobookshelf-compatible API translation layer. Documented subset only — not full parity. Pins to ABS API v2.x."
+
+[lints]
+workspace = true
+
+[dependencies]
+ab-core     = { workspace = true }
+ab-db       = { workspace = true }
+axum        = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+tokio       = { workspace = true }
+tracing     = { workspace = true }

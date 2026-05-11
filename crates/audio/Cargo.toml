@@ -1,0 +1,19 @@
+[package]
+name         = "ab-audio"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+authors      = { workspace = true }
+repository   = { workspace = true }
+description  = "Pure-Rust audio decode (Symphonia + Lofty) plus Swift FFI bridge for AVFoundation transcode/encode and Apple Intelligence (SpeechAnalyzer, NLLanguageRecognizer, FoundationModels)."
+
+[lints]
+workspace = true
+
+[dependencies]
+ab-core   = { workspace = true }
+anyhow    = { workspace = true }
+thiserror = { workspace = true }
+tokio     = { workspace = true }
+tracing   = { workspace = true }

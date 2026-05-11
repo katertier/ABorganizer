@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ display_name }} — Configuration</title>
+  <style>
+    /* OS-deferred preferences: appearance, accent, contrast all
+       follow the system via media queries + CSS custom properties.
+       User-supplied custom.css (loaded last) can override. */
+    :root {
+      color-scheme: light dark;
+      --bg: oklch(98% 0.005 250);
+      --fg: oklch(15% 0.01 250);
+      --muted: oklch(60% 0.015 250);
+      --accent: AccentColor;
+      --border: oklch(85% 0.01 250);
+      --space: 1rem;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: oklch(15% 0.01 250);
+        --fg: oklch(95% 0.005 250);
+        --muted: oklch(60% 0.015 250);
+        --border: oklch(30% 0.01 250);
+      }
+    }
+    @media (prefers-contrast: more) {
+      :root {
+        --border: oklch(60% 0.02 250);
+      }
+    }
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro", "Helvetica Neue", sans-serif;
+    }
+    .container { max-width: 720px; margin: 2rem auto; padding: 0 var(--space); }
+    h1 { font-size: 1.4rem; margin-bottom: 0.2rem; }
+    .muted { color: var(--muted); }
+    .card {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: var(--space);
+      margin: var(--space) 0;
+      background: var(--bg);
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>{{ display_name }}</h1>
+    <p class="muted">v{{ version }} — configuration interface</p>
+    <div class="card">
+      <p>Scaffolding placeholder. Real configuration screens land in follow-up PRs.</p>
+    </div>
+  </div>
+</body>
+</html>

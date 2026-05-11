@@ -1,0 +1,43 @@
+[package]
+name         = "aborg-tools"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+authors      = { workspace = true }
+repository   = { workspace = true }
+description  = "Per-aspect bench binaries for fast iteration. Each binary links only the crates it needs so recompile-after-edit stays under 30s."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "fingerprint-bench"
+path = "src/bin/fingerprint_bench.rs"
+
+[[bin]]
+name = "audiologo-bench"
+path = "src/bin/audiologo_bench.rs"
+
+[[bin]]
+name = "schema-snapshot"
+path = "src/bin/schema_snapshot.rs"
+
+[[bin]]
+name = "webui-dev"
+path = "src/bin/webui_dev.rs"
+
+[dependencies]
+ab-core        = { workspace = true }
+ab-db          = { workspace = true }
+ab-fingerprint = { workspace = true }
+ab-audiologo   = { workspace = true }
+ab-webui-config = { workspace = true }
+ab-webui-player = { workspace = true }
+ab-api         = { workspace = true }
+anyhow         = { workspace = true }
+clap           = { workspace = true }
+axum           = { workspace = true }
+tokio          = { workspace = true }
+tracing        = { workspace = true }
+tracing-subscriber = { workspace = true }

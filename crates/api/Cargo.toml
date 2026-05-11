@@ -1,0 +1,28 @@
+[package]
+name         = "ab-api"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+authors      = { workspace = true }
+repository   = { workspace = true }
+description  = "Native HTTP API (axum router, shared state, error mapping). Mounted at /api/v1/ on the main port; pairing + token auth."
+
+[lints]
+workspace = true
+
+[dependencies]
+ab-core         = { workspace = true }
+ab-db           = { workspace = true }
+ab-fingerprint  = { workspace = true }
+ab-pipeline     = { workspace = true }
+ab-scan         = { workspace = true }
+axum        = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+sqlx        = { workspace = true }
+thiserror   = { workspace = true }
+tokio       = { workspace = true }
+tower       = { workspace = true }
+tower-http  = { workspace = true }
+tracing     = { workspace = true }

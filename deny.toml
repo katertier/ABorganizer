@@ -1,0 +1,80 @@
+# cargo-deny — licenses + advisories + banned crates + sources.
+# CI runs `cargo deny check` on every PR.
+
+[graph]
+targets = [{ triple = "aarch64-apple-darwin" }]
+all-features = false
+no-default-features = false
+
+[licenses]
+# License-list per docs/POLICIES.md. MIT app, MIT/Apache deps. MPL-2.0
+# is weak copyleft and acceptable for libraries (its file-level copyleft
+# doesn't infect the consumer). LGPL / GPL / AGPL are denied.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "MPL-2.0",
+    "CC0-1.0",
+    "0BSD",
+    # webpki-roots ships under CDLA-Permissive-2.0 (Mozilla root CA list
+    # data); permissive license, no copyleft, OSI-approved.
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.93
+
+[[licenses.exceptions]]
+# `ring` ships under a non-standard license file that's MIT-compatible
+# in practice; the Rust ecosystem accepts it widely.
+allow = ["OpenSSL", "MIT", "ISC"]
+name = "ring"
+
+[bans]
+multiple-versions = "warn"
+# `wildcards = "deny"` would reject internal path deps that happen to
+# resolve to a wildcard version requirement. Workspace-relative path
+# deps are fine; only external wildcards are dangerous.
+wildcards = "allow"
+allow-wildcard-paths = true
+highlight = "all"
+deny = [
+    # Pure-sync HTTP — we are tokio-async-only.
+    { crate = "ureq", reason = "sync-only; use reqwest" },
+    # Pre-async-await; abandoned.
+    { crate = "tokio-core", reason = "pre-async-await; abandoned" },
+    # Deprecated by upstream.
+    { crate = "failure", reason = "deprecated; use thiserror + anyhow" },
+    { crate = "error-chain", reason = "deprecated; use thiserror + anyhow" },
+    # OpenSSL is system-dependent on macOS; we mandate rustls.
+    { crate = "openssl-sys", reason = "rustls is mandated workspace-wide" },
+    { crate = "native-tls", reason = "rustls is mandated workspace-wide" },
+]
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+# Active vulnerabilities by RUSTSEC ID can be ignored only with a
+# linked tracking issue + a date for revisit.
+ignore = [
+    # `paste 1.0.15` is unmaintained (per RUSTSEC-2024-0436); the
+    # maintained fork is `pastey`. `paste` is pulled in transitively by
+    # `lofty 0.24` and we cannot rename it via `[patch.crates-io]`
+    # because `pastey` is on major 0.2 vs `paste`'s 1.x, so the version
+    # constraint doesn't match without forking lofty. Replacement
+    # requires an upstream PR to lofty to switch to pastey.
+    # Tracking: revisit 2026-08-01 (or whenever lofty 0.25 lands).
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained: pulled transitively by lofty 0.24; pastey replacement requires lofty upstream PR" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

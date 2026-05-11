@@ -1,0 +1,7 @@
+[toolchain]
+channel    = "stable"
+components = ["rustfmt", "clippy", "rust-src"]
+profile    = "default"
+# macOS arm64 is the only target. Apple Intelligence (FoundationModels)
+# requires macOS 26 + Apple Silicon — no x86, no Linux.
+targets    = ["aarch64-apple-darwin"]

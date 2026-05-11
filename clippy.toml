@@ -1,0 +1,8 @@
+# Per-lint thresholds. Other lint levels live in workspace Cargo.toml
+# under [workspace.lints].
+too-many-arguments-threshold = 5     # matches POLICIES.md "≤5 params, then a deps struct"
+type-complexity-threshold    = 250
+cognitive-complexity-threshold = 30
+literal-representation-threshold = 16384
+# Doc style
+doc-valid-idents = ["ABorganizer", "Audiobookshelf", "AudioBook", "Audnexus", "AVFoundation", "AirPlay", "BCP-47", "HomePod", "macOS", "SwiftUI", "Apple", "Audible", "LibriVox", "MP4", "AAC", "AAX", "M4A", "M4B", "iOS", "iPad", "iPhone", "SQLite", "JSON", "HTTPS", "URL", "WAL", "FTS5", "ZSTD", "FFI", "NLLanguageRecognizer", "OSLog", "SF Symbols", "AcoustID"]

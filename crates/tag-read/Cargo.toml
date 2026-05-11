@@ -1,0 +1,27 @@
+[package]
+name         = "ab-tag-read"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+authors      = { workspace = true }
+repository   = { workspace = true }
+description  = "Tag-read pipeline stage. Probes audio files with lofty for properties (duration, bitrate, codec) and tags (title, author, ASIN, ISBN, language). Updates book_files; inserts provenance candidates for the merge step."
+
+[lints]
+workspace = true
+
+[dependencies]
+ab-core     = { workspace = true }
+ab-db       = { workspace = true }
+ab-pipeline = { workspace = true }
+async-trait = { workspace = true }
+lofty       = { workspace = true }
+sqlx        = { workspace = true }
+thiserror   = { workspace = true }
+tokio       = { workspace = true }
+tracing     = { workspace = true }
+
+[dev-dependencies]
+tempfile   = { workspace = true }
+tokio-util = { workspace = true }

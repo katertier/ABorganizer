@@ -1,0 +1,34 @@
+name: Nightly maintenance
+
+on:
+  schedule:
+    - cron: '0 5 * * *'  # 05:00 UTC daily
+  workflow_dispatch:
+
+jobs:
+  audit:
+    name: Security advisories
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install --locked cargo-audit || true
+      - run: cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2024-0436
+
+  outdated:
+    name: Dependency updates available
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install --locked cargo-outdated || true
+      - run: cargo outdated --workspace --exit-code 0
+
+  machete:
+    name: Unused dependencies
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install --locked cargo-machete || true
+      - run: cargo machete

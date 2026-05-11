@@ -1,0 +1,21 @@
+//! Shared types, errors, IDs, build-info constants, and the `Tunables`
+//! config. Zero I/O — pure data + traits.
+//!
+//! Every other crate depends on this one. This crate depends on
+//! nothing app-specific.
+
+pub mod build_info {
+    //! Branding constants generated from `[workspace.metadata.app]` in
+    //! the workspace `Cargo.toml`. No source file may hardcode any of
+    //! these strings — `cargo xtask check` enforces this.
+    include!(concat!(env!("OUT_DIR"), "/build_info.rs"));
+}
+
+pub mod error;
+pub mod ids;
+pub mod paths;
+pub mod tunables;
+
+pub use error::{Error, Result};
+pub use ids::{BookId, FileId, JobId};
+pub use tunables::Tunables;

@@ -1,0 +1,14 @@
+# House style. `cargo fmt --check` is enforced in CI.
+#
+# Stable-only options below. Nightly-only options (group_imports,
+# imports_granularity, wrap_comments, comment_width, etc.) intentionally
+# omitted so `cargo fmt` on stable doesn't print warnings; if we adopt
+# nightly fmt in CI later, those can return under an [unstable] block.
+edition              = "2024"
+max_width            = 100
+hard_tabs            = false
+tab_spaces           = 4
+newline_style        = "Unix"
+use_small_heuristics = "Default"
+reorder_imports      = true
+reorder_modules      = true

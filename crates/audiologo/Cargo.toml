@@ -1,0 +1,20 @@
+[package]
+name         = "ab-audiologo"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+authors      = { workspace = true }
+repository   = { workspace = true }
+description  = "Publisher-jingle (intro/outro) detection via RMS thumbprint matching, silence localisation, and transcript corroboration."
+
+[lints]
+workspace = true
+
+[dependencies]
+ab-core      = { workspace = true }
+ab-audio     = { workspace = true }
+ab-transcript = { workspace = true }
+serde        = { workspace = true }
+thiserror    = { workspace = true }
+tracing      = { workspace = true }
