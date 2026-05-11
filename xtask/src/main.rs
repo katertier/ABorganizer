@@ -32,8 +32,6 @@ struct Args {
 enum Cmd {
     /// Run every check.
     Check,
-    /// Run only the file-size check.
-    FileSize,
     /// Run only the banned-identifiers check.
     Names,
     /// Run only the banned-macros check.
@@ -46,7 +44,6 @@ fn main() -> ExitCode {
     let args = Args::parse();
     let result = match args.cmd {
         Cmd::Check => checks::run_all(),
-        Cmd::FileSize => checks::file_size::run(),
         Cmd::Names => checks::names::run(),
         Cmd::Macros => checks::macros::run(),
         Cmd::Brand => checks::brand::run(),
