@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT asin FROM books WHERE book_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "asin",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "e36bc6ef9ca4052ea2eca8967b906294e7e7a5a80c00dd27bd25252f1437377f"
+}

@@ -119,6 +119,14 @@ async fn main() -> Result<()> {
         // candidates into the identity tables + junctions, after
         // consensus has settled the scalar columns.
         Arc::new(ab_catalog::IdentityResolveStage::new()),
+        // `audnexus-chapters` fetches the per-ASIN chapter ToC +
+        // brand intro/outro markers. Runs after audnexus-enrich
+        // (which populates `books.asin`); parallel-safe with
+        // identity-resolve since they touch disjoint columns.
+        Arc::new(ab_catalog::AudnexusChaptersStage::new(
+            ab_catalog::AudnexusClient::new(&tunables.http_client),
+            &tunables.network,
+        )),
     ];
     let dag = Arc::new(Dag::build(stages).context("build pipeline DAG")?);
     let stage_ctx = StageContext {

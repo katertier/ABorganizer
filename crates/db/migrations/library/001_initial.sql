@@ -165,14 +165,20 @@ CREATE TABLE book_tags (
 
 CREATE TABLE chapters (
     chapter_id     INTEGER PRIMARY KEY AUTOINCREMENT,
-    book_id        INTEGER REFERENCES books(book_id) ON DELETE CASCADE,
+    book_id        INTEGER NOT NULL REFERENCES books(book_id) ON DELETE CASCADE,
     idx            INTEGER NOT NULL,         -- 0-based position
     start_ms       INTEGER NOT NULL,
     end_ms         INTEGER NOT NULL,
     title          TEXT NOT NULL,
     source         TEXT NOT NULL,            -- audnexus, embedded, cue, epub, transcript, silence
-    UNIQUE (book_id, idx)
+    -- UNIQUE includes `source` so the same book can carry chapter
+    -- lists from multiple sources concurrently. A future
+    -- "chapter-pick-winner" step decides which source the player
+    -- surfaces. Indexing on `(book_id, source)` keeps the
+    -- per-source clear-then-add path cheap.
+    UNIQUE (book_id, idx, source)
 ) STRICT;
+CREATE INDEX idx_chapters_book_source ON chapters(book_id, source);
 
 -- ── Audiologo fingerprints ─────────────────────────────────────────
 -- These are the RMS thumbprints used for intro/outro trim. Each row
