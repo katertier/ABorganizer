@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT provenance_id AS \"provenance_id!\", value\n           FROM book_field_provenance\n           WHERE book_id = ? AND field = 'duration_seconds' AND value IS NOT NULL\n           ORDER BY confidence DESC, recorded_at DESC\n           LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "provenance_id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "value",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "c2955552edb9b16c29d73ce9e2dfa7ad20b6f094c1d484c38bcfa87646ee0159"
+}

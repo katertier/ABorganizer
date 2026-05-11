@@ -102,6 +102,10 @@ async fn main() -> Result<()> {
             audnexus_client,
             &tunables.network,
         )),
+        // `consensus` runs after `audnexus-enrich` (via `requires`)
+        // and promotes the highest-confidence provenance value into
+        // the corresponding `books` column.
+        Arc::new(ab_catalog::ConsensusStage::new()),
     ];
     let dag = Arc::new(Dag::build(stages).context("build pipeline DAG")?);
     let stage_ctx = StageContext {

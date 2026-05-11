@@ -15,8 +15,10 @@
 
 pub mod audible;
 pub mod audnexus;
+pub mod consensus;
 pub mod enrich;
 
 pub use audible::AudibleClient;
 pub use audnexus::AudnexusClient;
+pub use consensus::ConsensusStage;
 pub use enrich::AudnexusEnrichStage;
