@@ -13,6 +13,11 @@ target
 # Contains mutation testing data
 **/mutants.out*/
 
+# Design docs kept private until the code matches them. See the
+# README warning. Documentation lives in /Users/<me>/dev/ABorganizer-docs/
+# on the maintainer's machine.
+/docs/
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
