@@ -310,6 +310,14 @@ pub struct SchedulerTunables {
     pub interactive_buffer: usize,
     /// Buffer for the background-priority channel.
     pub background_buffer: usize,
+    /// Buffer for the idle-priority channel.
+    pub idle_buffer: usize,
+    /// Seconds the interactive + background queues must both have
+    /// been empty before the idle queue starts draining. Set
+    /// lower (e.g. 30) when there's a user UI watching, higher
+    /// (e.g. 600) on a headless daemon. The starting default is a
+    /// compromise; revisit once we have real-usage telemetry.
+    pub idle_wait_secs: u64,
 }
 
 impl Default for SchedulerTunables {
@@ -317,6 +325,14 @@ impl Default for SchedulerTunables {
         Self {
             interactive_buffer: 128,
             background_buffer: 4_096,
+            idle_buffer: 4_096,
+            // 5 min of quiet before idle work starts. Conservative
+            // starting value — long enough that someone manually
+            // dropping a few books in the queue doesn't get
+            // overtaken by hours of full-transcript work; short
+            // enough that an unattended daemon doesn't sit idle
+            // forever.
+            idle_wait_secs: 300,
         }
     }
 }
