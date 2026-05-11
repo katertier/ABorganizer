@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT book_id FROM book_files WHERE file_path = ? LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "book_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8451530cd82ca4ce8de0eb6a253f100fcb480615813d910b16e3e90863ab7ffa"
+}

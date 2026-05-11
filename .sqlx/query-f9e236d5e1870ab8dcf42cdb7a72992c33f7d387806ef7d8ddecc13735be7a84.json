@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE book_files SET file_path = ?, modified_at = ?, file_size = ?, checked_at = strftime('%s','now') WHERE file_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "f9e236d5e1870ab8dcf42cdb7a72992c33f7d387806ef7d8ddecc13735be7a84"
+}

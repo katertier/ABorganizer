@@ -107,7 +107,7 @@ CREATE INDEX idx_books_language ON books(language);
 -- ── Files ──────────────────────────────────────────────────────────
 CREATE TABLE book_files (
     file_id        INTEGER PRIMARY KEY AUTOINCREMENT,
-    book_id        INTEGER REFERENCES books(book_id) ON DELETE CASCADE,
+    book_id        INTEGER NOT NULL REFERENCES books(book_id) ON DELETE CASCADE,
     file_path      TEXT NOT NULL UNIQUE,
     file_size      INTEGER,
     modified_at    INTEGER,
