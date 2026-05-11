@@ -111,4 +111,22 @@ pub struct AudnexusBook {
     pub release_date: Option<String>,
     #[serde(default, rename = "runtimeLengthMin")]
     pub runtime_length_min: Option<u32>,
+    /// Authors are an ordered array; primary author first.
+    #[serde(default)]
+    pub authors: Vec<AudnexusContributor>,
+    /// Narrators are an ordered array; can be 1..N people.
+    #[serde(default)]
+    pub narrators: Vec<AudnexusContributor>,
+}
+
+/// One author or narrator entry on an Audnexus book response.
+///
+/// Audnexus assigns its own ASINs to people (visible in their
+/// `/authors/{asin}` endpoint) — kept here so the identity-resolve
+/// stage can use them as the join key when available.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AudnexusContributor {
+    pub name: String,
+    #[serde(default)]
+    pub asin: Option<String>,
 }

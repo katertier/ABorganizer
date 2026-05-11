@@ -92,6 +92,7 @@ async fn library_scan(
             "audible-search",
             "audnexus-enrich",
             "consensus",
+            "identity-resolve",
         ] {
             if let Err(e) = state
                 .inner

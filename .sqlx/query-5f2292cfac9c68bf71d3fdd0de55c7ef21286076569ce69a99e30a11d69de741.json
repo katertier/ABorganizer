@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO publishers (name) VALUES (?) RETURNING publisher_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "publisher_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5f2292cfac9c68bf71d3fdd0de55c7ef21286076569ce69a99e30a11d69de741"
+}

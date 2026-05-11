@@ -229,6 +229,24 @@ async fn write_provenance(
         )
         .await?;
     }
+    // Authors + narrators: one provenance row per contributor.
+    // identity-resolve picks them up and links into the authors /
+    // narrators / book_narrator tables. The ASIN (when present)
+    // becomes the join key on a re-enrich pass.
+    for author in &book.authors {
+        let name = author.name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        insert_row(&mut tx, book_id, "author", name, &source).await?;
+    }
+    for narrator in &book.narrators {
+        let name = narrator.name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        insert_row(&mut tx, book_id, "narrator", name, &source).await?;
+    }
 
     tx.commit()
         .await

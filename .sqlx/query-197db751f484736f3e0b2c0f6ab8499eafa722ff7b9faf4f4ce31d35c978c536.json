@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM book_narrator WHERE book_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "197db751f484736f3e0b2c0f6ab8499eafa722ff7b9faf4f4ce31d35c978c536"
+}
