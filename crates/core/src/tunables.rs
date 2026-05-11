@@ -51,6 +51,10 @@ pub struct Tunables {
 
     /// Tag-read stage (lofty-based file probe + tag extraction).
     pub tag_read: TagReadTunables,
+
+    /// Tag presentation + export (genre `@`, DNA `#`, spoiler `!`
+    /// prefix conventions and how they're surfaced to readers).
+    pub tags: TagsTunables,
 }
 
 impl Default for Tunables {
@@ -67,6 +71,7 @@ impl Default for Tunables {
             http_client: HttpClientTunables::default(),
             scheduler: SchedulerTunables::default(),
             tag_read: TagReadTunables::default(),
+            tags: TagsTunables::default(),
         }
     }
 }
@@ -330,6 +335,50 @@ impl Default for TagReadTunables {
     fn default() -> Self {
         Self {
             write_provenance: true,
+        }
+    }
+}
+
+/// Tag presentation + export semantics.
+///
+/// `book_tags` rows are written with a one-character prefix that
+/// classifies the tag's nature:
+///
+/// | Prefix | Meaning | Stored | Player / ABS default |
+/// |---|---|---|---|
+/// | `@` | Genre tag (`@fantasy`, `@thriller`). Mirrors a row in `genres` for canonical display name + hierarchy. | always | shown |
+/// | `#` | DNA tag — safe to display (`#cozy`, `#unreliable-narrator`, `#commute-friendly`). | always | shown |
+/// | `!` | Spoiler DNA tag (`!hero-dies`, `!magic-system-revealed-chapter-12`). | always | hidden by default |
+///
+/// Filter / export semantics live entirely in this struct; the
+/// storage layer is identical for all three prefixes. That lets
+/// the spoiler-hide flag toggle uniformly across the player UI,
+/// the native API, the ABS-compat API, and file-tag writeback.
+///
+/// Similarity / "books like this" queries always use the full set
+/// — the prefixes only control what reaches the reader's eyes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TagsTunables {
+    /// Include `!`-prefixed (spoiler) tags in the player UI, API
+    /// responses, ABS-compat output, and file-tag write-back.
+    /// When `false`, spoiler tags are filtered everywhere a
+    /// reader sees them but remain in storage for similarity
+    /// queries. Default `false`.
+    pub show_spoiler_tags: bool,
+    /// Keep prefix characters (`@`, `#`, `!`) in exported tag
+    /// strings (ABS API, file-tag writes). When `false`, prefixes
+    /// are stripped before export — useful for cleaner display in
+    /// downstream tools but lossy across round-trips. Default
+    /// `true` for round-trip fidelity.
+    pub export_tag_prefix: bool,
+}
+
+impl Default for TagsTunables {
+    fn default() -> Self {
+        Self {
+            show_spoiler_tags: false,
+            export_tag_prefix: true,
         }
     }
 }
