@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT value, external_id FROM book_field_provenance WHERE book_id = ? AND field = ? AND value IS NOT NULL ORDER BY confidence DESC, recorded_at DESC",
+  "describe": {
+    "columns": [
+      {
+        "name": "value",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "external_id",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "9389dca506ec48f699c64c8ff6c5b12c1b072346eadf1e18afa70a6f2a972184"
+}

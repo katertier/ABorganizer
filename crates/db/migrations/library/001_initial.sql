@@ -20,6 +20,14 @@ CREATE TABLE book_field_provenance (
     source         TEXT NOT NULL,         -- audnexus_asin, audible_search, tag_mp4, transcript_match, nl_language, manual
     confidence     REAL NOT NULL,         -- 0.0 - 1.0
     is_winner      INTEGER NOT NULL DEFAULT 0,
+    -- Canonical external identifier attached to this candidate
+    -- when the source supplies one. Audnexus contributor rows
+    -- carry the Audnexus author/narrator ASIN here; identity-
+    -- resolve uses it to match against authors.audible_id /
+    -- narrators.audible_id before falling back to name matching.
+    -- Other sources may populate this with MusicBrainz IDs, ISBNs,
+    -- etc. as they're added.
+    external_id    TEXT,
     recorded_at    INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 ) STRICT;
 

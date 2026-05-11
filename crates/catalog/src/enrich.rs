@@ -197,21 +197,40 @@ async fn write_provenance(
         .await
         .map_err(|e| Error::Database(format!("audnexus tx begin: {e}")))?;
 
-    insert_row(&mut tx, book_id, "title", &book.title, &source).await?;
+    write_scalar_provenance(&mut tx, book_id, &source, book).await?;
+    write_contributor_provenance(&mut tx, book_id, &source, book).await?;
+
+    tx.commit()
+        .await
+        .map_err(|e| Error::Database(format!("audnexus tx commit: {e}")))?;
+    Ok(())
+}
+
+/// Write provenance for the scalar (single-value) fields:
+/// title, subtitle, description, language, publisher,
+/// `release_date`, `duration_seconds`. None of these carry an
+/// `external_id` from Audnexus.
+async fn write_scalar_provenance(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    book_id: BookId,
+    source: &str,
+    book: &crate::audnexus::AudnexusBook,
+) -> Result<()> {
+    insert_scalar(tx, book_id, "title", &book.title, source).await?;
     if let Some(v) = book.subtitle.as_deref() {
-        insert_row(&mut tx, book_id, "subtitle", v, &source).await?;
+        insert_scalar(tx, book_id, "subtitle", v, source).await?;
     }
     if let Some(v) = book.description.as_deref() {
-        insert_row(&mut tx, book_id, "description", v, &source).await?;
+        insert_scalar(tx, book_id, "description", v, source).await?;
     }
     if let Some(v) = book.language.as_deref() {
-        insert_row(&mut tx, book_id, "language", v, &source).await?;
+        insert_scalar(tx, book_id, "language", v, source).await?;
     }
     if let Some(v) = book.publisher_name.as_deref() {
-        insert_row(&mut tx, book_id, "publisher", v, &source).await?;
+        insert_scalar(tx, book_id, "publisher", v, source).await?;
     }
     if let Some(v) = book.release_date.as_deref() {
-        insert_row(&mut tx, book_id, "release_date", v, &source).await?;
+        insert_scalar(tx, book_id, "release_date", v, source).await?;
     }
     if let Some(minutes) = book.runtime_length_min {
         // Store as decimal-seconds string so the provenance row's
@@ -220,37 +239,80 @@ async fn write_provenance(
         // separate-column to avoid widening the provenance schema
         // for one numeric field.
         let secs = i64::from(minutes).saturating_mul(60);
-        insert_row(
-            &mut tx,
-            book_id,
-            "duration_seconds",
-            &secs.to_string(),
-            &source,
-        )
-        .await?;
+        let secs_str = secs.to_string();
+        insert_scalar(tx, book_id, "duration_seconds", &secs_str, source).await?;
     }
-    // Authors + narrators: one provenance row per contributor.
-    // identity-resolve picks them up and links into the authors /
-    // narrators / book_narrator tables. The ASIN (when present)
-    // becomes the join key on a re-enrich pass.
+    Ok(())
+}
+
+/// Convenience wrapper for scalar-source-no-external_id rows;
+/// keeps the call sites inside `write_scalar_provenance` short
+/// and uniform without a closure (the closure tripped a
+/// borrow-checker lifetime fight; this fn-sig variant doesn't).
+async fn insert_scalar(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    book_id: BookId,
+    field: &'static str,
+    value: &str,
+    source: &str,
+) -> Result<()> {
+    insert_row(
+        tx,
+        ProvenanceRow {
+            book_id,
+            field,
+            value,
+            source,
+            external_id: None,
+        },
+    )
+    .await
+}
+
+/// Write one provenance row per Audnexus contributor (author or
+/// narrator). The contributor's Audnexus ASIN (when present) goes
+/// into the `external_id` column so identity-resolve can match
+/// against `authors.audible_id` / `narrators.audible_id`.
+async fn write_contributor_provenance(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    book_id: BookId,
+    source: &str,
+    book: &crate::audnexus::AudnexusBook,
+) -> Result<()> {
     for author in &book.authors {
         let name = author.name.trim();
         if name.is_empty() {
             continue;
         }
-        insert_row(&mut tx, book_id, "author", name, &source).await?;
+        insert_row(
+            tx,
+            ProvenanceRow {
+                book_id,
+                field: "author",
+                value: name,
+                source,
+                external_id: author.asin.as_deref(),
+            },
+        )
+        .await?;
     }
     for narrator in &book.narrators {
         let name = narrator.name.trim();
         if name.is_empty() {
             continue;
         }
-        insert_row(&mut tx, book_id, "narrator", name, &source).await?;
+        insert_row(
+            tx,
+            ProvenanceRow {
+                book_id,
+                field: "narrator",
+                value: name,
+                source,
+                external_id: narrator.asin.as_deref(),
+            },
+        )
+        .await?;
     }
-
-    tx.commit()
-        .await
-        .map_err(|e| Error::Database(format!("audnexus tx commit: {e}")))?;
     Ok(())
 }
 
@@ -264,27 +326,37 @@ fn format_source(region: &str) -> String {
     format!("{PROVENANCE_SOURCE}_{region}")
 }
 
+/// Bundle of arguments to `insert_row`; promoted from 6 positional
+/// params to a small struct so the function stays under the
+/// `clippy::too_many_arguments` cap (5). Keeps each call site
+/// readable without macro tricks.
+struct ProvenanceRow<'a> {
+    book_id: BookId,
+    field: &'a str,
+    value: &'a str,
+    source: &'a str,
+    external_id: Option<&'a str>,
+}
+
 async fn insert_row(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    book_id: BookId,
-    field: &str,
-    value: &str,
-    source: &str,
+    row: ProvenanceRow<'_>,
 ) -> Result<()> {
-    let id = book_id.0;
+    let id = row.book_id.0;
     sqlx::query!(
         "INSERT INTO book_field_provenance \
-         (book_id, field, value, source, confidence, is_winner) \
-         VALUES (?, ?, ?, ?, ?, 0)",
+         (book_id, field, value, source, confidence, is_winner, external_id) \
+         VALUES (?, ?, ?, ?, ?, 0, ?)",
         id,
-        field,
-        value,
-        source,
+        row.field,
+        row.value,
+        row.source,
         AUDNEXUS_CONFIDENCE,
+        row.external_id,
     )
     .execute(&mut **tx)
     .await
-    .map_err(|e| Error::Database(format!("audnexus provenance {field}: {e}")))?;
+    .map_err(|e| Error::Database(format!("audnexus provenance {}: {e}", row.field)))?;
     Ok(())
 }
 
