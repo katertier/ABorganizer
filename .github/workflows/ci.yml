@@ -10,6 +10,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # `sqlx::query!()` macros use the committed `.sqlx/` query cache
+  # rather than connecting to a live DB. The cache is refreshed by
+  # `scripts/sqlx-prepare.sh` whenever a query changes, and the
+  # `sqlx-prepare` CI job below verifies the cache stays in sync.
+  SQLX_OFFLINE: "true"
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -85,3 +90,24 @@ jobs:
       # - RUSTSEC-2024-0436 (paste unmaintained): pulled transitively
       #   by lofty 0.24. Replacement requires a lofty upstream PR.
       - run: cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2024-0436
+
+  sqlx-prepare:
+    name: sqlx query cache
+    runs-on: macos-14
+    # Verifies the committed `.sqlx/` cache matches what the macros
+    # would produce against a fresh schema. Catches stale caches
+    # whenever a query is changed but `scripts/sqlx-prepare.sh` was
+    # not rerun.
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install --locked sqlx-cli --no-default-features --features sqlite,rustls --version "~0.8" || true
+      - name: Apply schema to a prep DB
+        run: |
+          rm -f /tmp/aborg-prep.db
+          sqlite3 /tmp/aborg-prep.db < crates/db/migrations/library/001_initial.sql
+      - name: Verify `.sqlx/` is up to date
+        env:
+          DATABASE_URL: "sqlite:///tmp/aborg-prep.db"
+        run: cargo sqlx prepare --workspace --check

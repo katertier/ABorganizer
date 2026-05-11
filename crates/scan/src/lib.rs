@@ -339,34 +339,38 @@ async fn upsert_book_file(
         .map_err(|e| Error::Database(format!("begin tx: {e}")))?;
 
     // Path-known shortcut.
-    let existing_by_path: Option<i64> =
-        sqlx::query_scalar("SELECT book_id FROM book_files WHERE file_path = ? LIMIT 1")
-            .bind(&file_path_str)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|e| Error::Database(format!("check path: {e}")))?;
+    let existing_by_path: Option<i64> = sqlx::query_scalar!(
+        "SELECT book_id FROM book_files WHERE file_path = ? LIMIT 1",
+        file_path_str
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| Error::Database(format!("check path: {e}")))?;
     if let Some(bid) = existing_by_path {
         return Ok(UpsertOutcome::PathKnown(BookId(bid)));
     }
 
     // Hash-known: existing row at different path → update the path.
     if let Some(hash) = &file_hash {
-        let existing_by_hash: Option<(i64, i64)> =
-            sqlx::query_as("SELECT file_id, book_id FROM book_files WHERE file_hash = ? LIMIT 1")
-                .bind(hash)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(|e| Error::Database(format!("check hash: {e}")))?;
-        if let Some((file_id, book_id)) = existing_by_hash {
-            sqlx::query(
+        let existing_by_hash = sqlx::query!(
+            "SELECT file_id, book_id FROM book_files WHERE file_hash = ? LIMIT 1",
+            hash
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| Error::Database(format!("check hash: {e}")))?;
+        if let Some(row_match) = existing_by_hash {
+            let file_id = row_match.file_id;
+            let book_id = row_match.book_id;
+            sqlx::query!(
                 "UPDATE book_files SET file_path = ?, modified_at = ?, file_size = ?, \
                                        checked_at = strftime('%s','now') \
                  WHERE file_id = ?",
+                file_path_str,
+                modified_at,
+                file_size,
+                file_id,
             )
-            .bind(&file_path_str)
-            .bind(modified_at)
-            .bind(file_size)
-            .bind(file_id)
             .execute(&mut *tx)
             .await
             .map_err(|e| Error::Database(format!("update moved: {e}")))?;
@@ -382,24 +386,29 @@ async fn upsert_book_file(
     let book_id: i64 = if let Some(BookId(b)) = book_id_hint {
         b
     } else {
-        sqlx::query_scalar("INSERT INTO books (title) VALUES (?) RETURNING book_id")
-            .bind(row.title)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|e| Error::Database(format!("insert book: {e}")))?
+        let title = row.title;
+        sqlx::query_scalar!(
+            "INSERT INTO books (title) VALUES (?) RETURNING book_id",
+            title
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| Error::Database(format!("insert book: {e}")))?
     };
 
-    sqlx::query(
+    let format_str = format.as_deref();
+    let file_hash_str = file_hash.as_deref();
+    sqlx::query!(
         "INSERT INTO book_files \
              (book_id, file_path, file_size, modified_at, format, file_hash, is_active) \
          VALUES (?, ?, ?, ?, ?, ?, 1)",
+        book_id,
+        file_path_str,
+        file_size,
+        modified_at,
+        format_str,
+        file_hash_str,
     )
-    .bind(book_id)
-    .bind(&file_path_str)
-    .bind(file_size)
-    .bind(modified_at)
-    .bind(format.as_deref())
-    .bind(file_hash.as_deref())
     .execute(&mut *tx)
     .await
     .map_err(|e| Error::Database(format!("insert book_file: {e}")))?;
@@ -476,7 +485,10 @@ mod tests {
         // One book with three files.
         assert_eq!(r.new_book_ids.len(), 1);
 
-        // Verify book_files row count.
+        // Verify book_files row count. Test queries stay runtime-
+        // checked: trivial COUNT(*) doesn't benefit from compile-
+        // time validation and `cargo sqlx prepare` doesn't reach
+        // test code cleanly.
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM book_files")
             .fetch_one(db.pool())
             .await
