@@ -63,13 +63,14 @@ yanked = "deny"
 # Active vulnerabilities by RUSTSEC ID can be ignored only with a
 # linked tracking issue + a date for revisit.
 ignore = [
-    # RSA timing sidechannel (Marvin attack). Pulled by `sqlx-mysql`,
-    # which `sqlx 0.8`'s macros transitively depend on even though we
-    # only use SQLite. We never instantiate a MySQL connection, so the
-    # vulnerable RSA auth code path is unreachable from our binary.
-    # Revisit when sqlx 0.9 modularises the macros (sqlx#3146-ish).
-    # Tracking: revisit 2026-08-01.
-    { id = "RUSTSEC-2023-0071", reason = "unreachable: we never connect to MySQL; pulled transitively by sqlx macros only" },
+    # `paste 1.0.15` is unmaintained (per RUSTSEC-2024-0436); the
+    # maintained fork is `pastey`. `paste` is pulled in transitively by
+    # `lofty 0.24` and we cannot rename it via `[patch.crates-io]`
+    # because `pastey` is on major 0.2 vs `paste`'s 1.x, so the version
+    # constraint doesn't match without forking lofty. Replacement
+    # requires an upstream PR to lofty to switch to pastey.
+    # Tracking: revisit 2026-08-01 (or whenever lofty 0.25 lands).
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained: pulled transitively by lofty 0.24; pastey replacement requires lofty upstream PR" },
 ]
 
 [sources]

@@ -275,8 +275,8 @@ fn fingerprint_window(
         // We target macOS aarch64 only (per rust-toolchain.toml);
         // usize is 64 bits. The clippy lint is pedantic-portable.
         let clip_start = usize::try_from(start_frame.saturating_sub(packet_start)).unwrap_or(0);
-        let clip_end = usize::try_from((end_frame - packet_start).min(packet_frames))
-            .unwrap_or(usize::MAX);
+        let clip_end =
+            usize::try_from((end_frame - packet_start).min(packet_frames)).unwrap_or(usize::MAX);
         let samples = decoded_to_interleaved_i16(&decoded, clip_start, clip_end);
         if !samples.is_empty() {
             fp.consume(&samples);

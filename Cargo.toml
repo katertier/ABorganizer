@@ -56,7 +56,7 @@ askama         = "0.12"
 async-trait    = "0.1"
 axum           = { version = "0.7", features = ["macros", "http2", "ws"] }
 axum-server    = { version = "0.7", features = ["tls-rustls"] }
-blake3         = "1.5"
+blake3         = "1.8"
 bytes          = "1.7"
 chrono         = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 clap           = { version = "4.6", features = ["derive", "env", "string"] }

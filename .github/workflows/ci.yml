@@ -77,4 +77,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo install --locked cargo-audit || true
       # `--ignore` mirrors the ignore list in deny.toml. Keep in sync.
-      - run: cargo audit --ignore RUSTSEC-2023-0071
+      # Ignores:
+      # - RUSTSEC-2023-0071 (rsa Marvin attack): pulled via sqlx-mysql
+      #   which our `mysql` feature never enables. Unreachable from
+      #   the binary. cargo-deny's feature-graph analysis already
+      #   excludes it; cargo-audit scans Cargo.lock blindly.
+      # - RUSTSEC-2024-0436 (paste unmaintained): pulled transitively
+      #   by lofty 0.24. Replacement requires a lofty upstream PR.
+      - run: cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2024-0436
