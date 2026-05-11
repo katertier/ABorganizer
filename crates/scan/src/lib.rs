@@ -1,4 +1,3 @@
-// xtask: max_lines = 700
 //! Directory walker + audio-file enumeration.
 //!
 //! # Pipeline placement

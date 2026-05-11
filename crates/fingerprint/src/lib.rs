@@ -1,4 +1,3 @@
-// xtask: max_lines = 600
 //! Whole-book identity fingerprinting via chromaprint.
 //!
 //! # Use-case
