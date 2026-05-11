@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT book_id, offset_sec, fingerprint FROM book_fingerprints ORDER BY offset_sec, fingerprint",
+  "describe": {
+    "columns": [
+      {
+        "name": "book_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "offset_sec",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "fingerprint",
+        "ordinal": 2,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "f16b6b347333c8a190348360c69aeaa41c3bd997738db22d3b6b8aba42283a3b"
+}

@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT b.book_id AS \"book_id!\", b.title,\n                  (SELECT file_path FROM book_files\n                   WHERE book_id = b.book_id LIMIT 1) AS file_path\n           FROM books b\n           ORDER BY b.book_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "book_id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "title",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "file_path",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "7cdfd7468b9efa60b7a4e074dd163298e96f728091cc234687e21e54ce11bb3d"
+}
