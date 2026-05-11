@@ -18,9 +18,11 @@ pub mod audible_search;
 pub mod audnexus;
 pub mod consensus;
 pub mod enrich;
+pub mod identity;
 
 pub use audible::AudibleClient;
 pub use audible_search::AudibleSearchStage;
 pub use audnexus::AudnexusClient;
 pub use consensus::ConsensusStage;
 pub use enrich::AudnexusEnrichStage;
+pub use identity::IdentityResolveStage;

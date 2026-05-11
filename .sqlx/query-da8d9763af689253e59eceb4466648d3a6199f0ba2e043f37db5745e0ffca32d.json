@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT publisher_id FROM publishers WHERE lower(name) = lower(?) LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "publisher_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "da8d9763af689253e59eceb4466648d3a6199f0ba2e043f37db5745e0ffca32d"
+}
