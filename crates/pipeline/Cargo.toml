@@ -1,0 +1,23 @@
+[package]
+name         = "ab-pipeline"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+authors      = { workspace = true }
+repository   = { workspace = true }
+description  = "Stage trait, DAG executor, priority scheduler. One pipeline, declarative stage ordering, in-memory state never crosses stage boundaries."
+
+[lints]
+workspace = true
+
+[dependencies]
+ab-core     = { workspace = true }
+ab-db       = { workspace = true }
+async-trait = { workspace = true }
+futures     = { workspace = true }
+serde       = { workspace = true }
+thiserror   = { workspace = true }
+tokio       = { workspace = true }
+tokio-util  = { workspace = true }
+tracing     = { workspace = true }

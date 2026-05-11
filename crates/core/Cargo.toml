@@ -1,0 +1,27 @@
+[package]
+name         = "ab-core"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+authors      = { workspace = true }
+repository   = { workspace = true }
+description  = "Shared types, errors, IDs, build-info constants, and the Tunables config. Zero I/O — pure data + traits."
+
+[lints]
+workspace = true
+
+[dependencies]
+chrono     = { workspace = true }
+once_cell  = { workspace = true }
+serde      = { workspace = true }
+thiserror  = { workspace = true }
+toml       = { workspace = true }
+tracing    = { workspace = true }
+uuid       = { workspace = true }
+
+[build-dependencies]
+toml = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

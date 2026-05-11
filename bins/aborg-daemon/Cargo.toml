@@ -1,0 +1,44 @@
+[package]
+name         = "aborg-daemon"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+authors      = { workspace = true }
+repository   = { workspace = true }
+description  = "ABorganizer daemon — single binary, feature-toggled at runtime. Hosts native API, ABS-compat API, web UIs, and background pipeline workers."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "aborg-daemon"
+path = "src/main.rs"
+
+[features]
+default       = ["tagger", "player", "shelf"]
+tagger        = []
+player        = []
+shelf         = []
+
+[dependencies]
+ab-core         = { workspace = true }
+ab-db           = { workspace = true }
+ab-pipeline     = { workspace = true }
+ab-api          = { workspace = true }
+ab-shelf        = { workspace = true }
+ab-webui-config = { workspace = true }
+ab-webui-player = { workspace = true }
+ab-seed         = { workspace = true }
+anyhow          = { workspace = true }
+axum            = { workspace = true }
+clap            = { workspace = true }
+fd-lock         = { workspace = true }
+nix             = { workspace = true }
+serde           = { workspace = true }
+tokio           = { workspace = true }
+tokio-util      = { workspace = true }
+tower           = { workspace = true }
+tower-http      = { workspace = true }
+tracing         = { workspace = true }
+tracing-subscriber = { workspace = true }

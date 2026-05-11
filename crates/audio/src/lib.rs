@@ -1,0 +1,29 @@
+//! Audio I/O + Apple framework bridge.
+//!
+//! # Layers
+//!
+//! 1. **Pure-Rust decode/probe** via Symphonia + Lofty + mp4ameta.
+//!    Reading tags, probing durations, decoding PCM for analysis.
+//!    No subprocess; cross-machine reproducible.
+//!
+//! 2. **Swift FFI bridge** for everything that needs Apple's
+//!    frameworks: AVFoundation (transcode, encode, AVPlayer/AirPlay),
+//!    Speech (transcription via `SpeechAnalyzer`), `NaturalLanguage`
+//!    (`NLLanguageRecognizer`), `FoundationModels` (Apple Intelligence
+//!    tag generation).
+//!
+//! The FFI surface uses the well-tested pattern from the previous
+//! codebase: `@_cdecl` functions on the Swift side; `extern "C"`
+//! declarations on the Rust side; oneshot channels carry results
+//! out of fire-and-forget callbacks.
+//!
+//! # Safety
+//!
+//! `#![forbid(unsafe_code)]` at the crate root is lifted *only* at
+//! FFI call sites with `#[expect(unsafe_code, reason = "…")]` and a
+//! `// SAFETY: …` comment explaining the invariant being upheld.
+
+pub mod ffi;
+pub mod info;
+
+pub use info::probe_duration_ms;

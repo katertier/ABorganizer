@@ -1,0 +1,21 @@
+[package]
+name         = "ab-webui-config"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+authors      = { workspace = true }
+repository   = { workspace = true }
+description  = "Server-rendered config web UI (Askama templates + htmx). No JS toolchain dependency."
+
+[lints]
+workspace = true
+
+[dependencies]
+ab-core     = { workspace = true }
+askama      = { workspace = true }
+axum        = { workspace = true }
+serde       = { workspace = true }
+tokio       = { workspace = true }
+tower-http  = { workspace = true }
+tracing     = { workspace = true }

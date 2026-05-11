@@ -1,0 +1,27 @@
+[package]
+name         = "aborg"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+authors      = { workspace = true }
+repository   = { workspace = true }
+description  = "ABorganizer CLI — thin client over the daemon's HTTP API and Unix socket."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "aborg"
+path = "src/main.rs"
+
+[dependencies]
+ab-core    = { workspace = true }
+anyhow     = { workspace = true }
+clap       = { workspace = true }
+reqwest    = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+tokio      = { workspace = true }
+tracing    = { workspace = true }
+tracing-subscriber = { workspace = true }

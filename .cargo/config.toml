@@ -1,0 +1,22 @@
+# Cargo aliases for our build commands and a handful of build flags
+# that apply to every member.
+
+[alias]
+xtask  = "run --quiet --package xtask --"
+check-all  = "xtask check"
+fmt-check  = "fmt --all -- --check"
+clippy-all = "clippy --workspace --all-targets --all-features -- -D warnings"
+
+# Self-hosted runner builds reuse this cache so 16k books worth of
+# fingerprint test data doesn't get redownloaded each time.
+[build]
+target-dir = "target"
+# Use lld via cargo if installed; macOS uses ld64 by default which is fine.
+
+[target.aarch64-apple-darwin]
+rustflags = [
+    # Apple Silicon native vectorization.
+    "-C", "target-cpu=apple-m1",
+    # Backtraces stay legible after `strip = "symbols"`.
+    "-C", "force-frame-pointers=yes",
+]

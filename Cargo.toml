@@ -1,0 +1,167 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/db",
+    "crates/pipeline",
+    "crates/fingerprint",
+    "crates/audiologo",
+    "crates/catalog",
+    "crates/transcript",
+    "crates/audio",
+    "crates/api",
+    "crates/shelf",
+    "crates/webui-config",
+    "crates/webui-player",
+    "crates/seed",
+    "bins/aborg",
+    "bins/aborg-daemon",
+    "bins/aborg-tools",
+    "xtask",
+]
+default-members = ["bins/aborg", "bins/aborg-daemon"]
+
+# ── App branding ─────────────────────────────────────────────────────────
+# Single source of truth for every user-facing name + identifier. Crates
+# read these via `core::build_info` (populated by the workspace build
+# script). No string in any source file may hardcode "ABorganizer",
+# "aborg", or the bundle ID prefix — `cargo xtask check` enforces this.
+[workspace.metadata.app]
+display_name = "ABorganizer"
+description  = "AudioBook organizer using Audible/Audnexus and Apple Intelligence"
+cli_binary   = "aborg"
+daemon_name  = "aborg-daemon"
+domain       = "io.github.katertier"
+support_url  = "https://github.com/katertier/ABorganizer"
+homepage_url = "https://github.com/katertier/ABorganizer"
+
+# ── Workspace-wide package defaults ──────────────────────────────────────
+[workspace.package]
+version      = "0.1.0"
+edition      = "2024"
+rust-version = "1.85"
+license      = "MIT"
+authors      = ["katertier"]
+repository   = "https://github.com/katertier/ABorganizer"
+homepage     = "https://github.com/katertier/ABorganizer"
+
+# ── Shared dependency versions ───────────────────────────────────────────
+# All crates inherit via `dep = { workspace = true }`. Update version
+# here once, applies everywhere. Sorted alphabetically.
+[workspace.dependencies]
+anyhow         = "1.0"
+askama         = "0.12"
+async-trait    = "0.1"
+axum           = { version = "0.7", features = ["macros", "http2", "ws"] }
+axum-server    = { version = "0.7", features = ["tls-rustls"] }
+blake3         = "1.5"
+bytes          = "1.7"
+chrono         = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+clap           = { version = "4.5", features = ["derive", "env", "string"] }
+fd-lock        = "4.0"
+figment        = { version = "0.10", features = ["toml", "env"] }
+futures        = "0.3"
+hex            = "0.4"
+mime           = "0.3"
+mime_guess     = "2.0"
+nix            = { version = "0.29", features = ["signal"] }
+once_cell      = "1.20"
+rand           = "0.8"
+regex          = "1.10"
+reqwest        = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+ring           = "0.17"
+rusqlite       = { version = "0.32", features = ["bundled"] }
+secrecy        = { version = "0.10", features = ["serde"] }
+serde          = { version = "1.0", features = ["derive"] }
+serde_json     = "1.0"
+sqlx           = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "sqlite", "macros", "migrate", "chrono"] }
+thiserror      = "2.0"
+tokio          = { version = "1.40", features = ["rt-multi-thread", "macros", "fs", "io-util", "net", "process", "signal", "sync", "time"] }
+tokio-util     = { version = "0.7", features = ["rt"] }
+toml           = "0.8"
+tower          = { version = "0.5", features = ["util"] }
+tower-http     = { version = "0.6", features = ["cors", "trace", "compression-gzip", "fs", "set-header"] }
+tracing        = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+url            = "2.5"
+uuid           = { version = "1.10", features = ["v4", "v7", "serde"] }
+walkdir        = "2.5"
+zstd           = "0.13"
+
+# Internal crates (use neutral names inside the workspace; one place if
+# we ever publish them).
+ab-core        = { path = "crates/core" }
+ab-db          = { path = "crates/db" }
+ab-pipeline    = { path = "crates/pipeline" }
+ab-fingerprint = { path = "crates/fingerprint" }
+ab-audiologo   = { path = "crates/audiologo" }
+ab-catalog     = { path = "crates/catalog" }
+ab-transcript  = { path = "crates/transcript" }
+ab-audio       = { path = "crates/audio" }
+ab-api         = { path = "crates/api" }
+ab-shelf       = { path = "crates/shelf" }
+ab-webui-config = { path = "crates/webui-config" }
+ab-webui-player = { path = "crates/webui-player" }
+ab-seed        = { path = "crates/seed" }
+
+# Test-only
+proptest       = "1.5"
+insta          = { version = "1.40", features = ["yaml"] }
+tempfile       = "3.13"
+
+# ── Lint policy (applies to every workspace member) ──────────────────────
+# - clippy at `warn` by default; specific lints denied/forbidden below.
+# - `unsafe_code` forbidden globally; the audio crate lifts it locally for
+#   FFI boundaries with `#[expect(unsafe_code, reason = "…")]` per use.
+[workspace.lints.rust]
+unsafe_code              = "forbid"
+missing_docs             = "warn"
+unreachable_pub          = "warn"
+trivial_casts            = "warn"
+trivial_numeric_casts    = "warn"
+unused_lifetimes         = "warn"
+unused_qualifications    = "warn"
+
+[workspace.lints.clippy]
+pedantic                 = { level = "warn", priority = -1 }
+nursery                  = { level = "warn", priority = -1 }
+# Suppress the pedantic lints that fire on every other line for no real win.
+module_name_repetitions  = "allow"
+missing_errors_doc       = "allow"
+missing_panics_doc       = "allow"
+must_use_candidate       = "allow"
+# Hard prohibitions — break the build.
+unwrap_used              = "deny"
+expect_used              = "warn"   # `.expect("invariant: …")` ok with the reason in the message
+panic                    = "deny"
+todo                     = "deny"
+unimplemented            = "deny"
+dbg_macro                = "deny"
+print_stdout             = "deny"
+print_stderr             = "deny"
+too_many_lines           = { level = "deny", priority = 0 }   # default cap 100 lines/fn
+exit                     = "deny"
+mem_forget               = "deny"
+str_to_string            = "deny"
+# Doc lints
+doc_markdown             = "warn"
+
+# ── Release profile ──────────────────────────────────────────────────────
+[profile.release]
+opt-level     = 3
+lto           = "thin"
+codegen-units = 1
+strip         = "symbols"
+debug         = "line-tables-only"   # keep enough DWARF for backtraces
+panic         = "abort"
+
+[profile.dev]
+opt-level = 1   # build-time/test-time happy medium
+
+[profile.dev.package."*"]
+opt-level = 2   # deps get more optimization to keep dev test runs fast
+
+# Test binaries: compile-fast targets for hot-iteration aspect testing.
+[profile.bench]
+inherits      = "release"
+debug         = "full"

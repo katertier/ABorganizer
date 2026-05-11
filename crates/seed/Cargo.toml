@@ -1,0 +1,22 @@
+[package]
+name         = "ab-seed"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+authors      = { workspace = true }
+repository   = { workspace = true }
+description  = "Embedded seed-data bootstrap + signed updater. Pulls publisher hints, audiologo fingerprints, genre canonical list, heuristic patterns from the aborganizer-seed repo on GitHub."
+
+[lints]
+workspace = true
+
+[dependencies]
+ab-core     = { workspace = true }
+reqwest     = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+ring        = { workspace = true }
+thiserror   = { workspace = true }
+tokio       = { workspace = true }
+tracing     = { workspace = true }
