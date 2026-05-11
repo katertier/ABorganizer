@@ -95,16 +95,25 @@ async fn main() -> Result<()> {
     // declared dependencies; `audnexus-enrich` requires `tag-read`
     // because tag-read writes the ASIN candidate it uses.
     let audnexus_client = ab_catalog::AudnexusClient::new(&tunables.http_client);
+    let audible_client = ab_catalog::AudibleClient::new(&tunables.http_client);
     let stages: Vec<Arc<dyn Stage>> = vec![
         Arc::new(ab_tag_read::TagReadStage::new(tunables.tag_read.clone())),
         Arc::new(ab_fingerprint::FingerprintStage::new()),
+        // `audible-search` runs after tag-read, fills in an ASIN
+        // candidate for books with no `CatalogNumber` tag.
+        Arc::new(ab_catalog::AudibleSearchStage::new(
+            audible_client,
+            &tunables.network,
+        )),
+        // `audnexus-enrich` waits for both tag-read AND
+        // audible-search so it sees whichever ASIN source landed
+        // first.
         Arc::new(ab_catalog::AudnexusEnrichStage::new(
             audnexus_client,
             &tunables.network,
         )),
-        // `consensus` runs after `audnexus-enrich` (via `requires`)
-        // and promotes the highest-confidence provenance value into
-        // the corresponding `books` column.
+        // `consensus` promotes the highest-confidence provenance
+        // value into the corresponding `books` column.
         Arc::new(ab_catalog::ConsensusStage::new()),
     ];
     let dag = Arc::new(Dag::build(stages).context("build pipeline DAG")?);

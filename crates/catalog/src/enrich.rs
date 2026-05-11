@@ -74,9 +74,11 @@ impl Stage for AudnexusEnrichStage {
     }
 
     fn requires(&self) -> &'static [&'static str] {
-        // tag-read writes the ASIN candidate. Without it we have no
-        // key to look up against Audnexus.
-        &["tag-read"]
+        // tag-read writes the tag-supplied ASIN candidate;
+        // audible-search writes a fallback ASIN candidate when no
+        // tag value exists. We wait for BOTH so the lookup sees
+        // whichever source supplied an ASIN.
+        &["tag-read", "audible-search"]
     }
 
     async fn run(&self, ctx: &StageContext, book_id: BookId) -> Result<StageOutcome> {
@@ -306,7 +308,7 @@ mod tests {
         let client = AudnexusClient::new(&HttpClientTunables::default());
         let stage = AudnexusEnrichStage::new(client, &NetworkTunables::default());
         assert_eq!(stage.name(), "audnexus-enrich");
-        assert_eq!(stage.requires(), &["tag-read"]);
+        assert_eq!(stage.requires(), &["tag-read", "audible-search"]);
     }
 
     #[test]

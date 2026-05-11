@@ -86,7 +86,13 @@ async fn library_scan(
     // concurrently (their DAG dependency lists are empty in slices
     // 1B/1C); each completes independently.
     for book_id in &report.new_book_ids {
-        for stage in ["tag-read", "fingerprint", "audnexus-enrich", "consensus"] {
+        for stage in [
+            "tag-read",
+            "fingerprint",
+            "audible-search",
+            "audnexus-enrich",
+            "consensus",
+        ] {
             if let Err(e) = state
                 .inner
                 .scheduler
