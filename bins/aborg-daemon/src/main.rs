@@ -111,6 +111,15 @@ fn build_pipeline_stages(tunables: &Tunables) -> Vec<Arc<dyn Stage>> {
             &tunables.transcribe,
             &tunables.language,
         )),
+        // `transcribe-full` (slice 3B) runs the whole book at
+        // Idle priority — drains only when interactive + bg
+        // queues are quiet. Chunked in Rust (5-min windows by
+        // default) to keep peak RAM bounded. Locale is read
+        // from the head-transcript cache, so requires
+        // `transcribe-head-tail` to have produced one.
+        Arc::new(ab_transcript::TranscribeFullStage::new(
+            &tunables.transcribe,
+        )),
     ]
 }
 

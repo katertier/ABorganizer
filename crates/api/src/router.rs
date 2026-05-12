@@ -85,28 +85,37 @@ async fn library_scan(
     // Submit each new BookId to every per-book stage. Stages run
     // concurrently (their DAG dependency lists are empty in slices
     // 1B/1C); each completes independently.
+    // (stage, priority) pairs. Most stages run at Interactive
+    // because scan is user-initiated; full-book transcribe is
+    // expensive enough to deserve its own Idle tier so it never
+    // competes with the import-time pipeline. See PROJECT.md
+    // "Pipeline priorities."
+    let stage_priorities: &[(&'static str, ab_pipeline::Priority)] = &[
+        ("tag-read", ab_pipeline::Priority::Interactive),
+        ("fingerprint", ab_pipeline::Priority::Interactive),
+        ("audible-search", ab_pipeline::Priority::Interactive),
+        ("audnexus-enrich", ab_pipeline::Priority::Interactive),
+        ("consensus", ab_pipeline::Priority::Interactive),
+        ("identity-resolve", ab_pipeline::Priority::Interactive),
+        ("audnexus-chapters", ab_pipeline::Priority::Interactive),
+        ("embedded-chapters", ab_pipeline::Priority::Interactive),
+        ("chapter-pick-winner", ab_pipeline::Priority::Interactive),
+        // 6-min head + 30-s tail. Heavier than the other
+        // stages (multi-second per book at decode +
+        // SpeechAnalyzer time) but seeded at scan time so the
+        // language gate + downstream extractors have a
+        // transcript by the time the user opens the book.
+        ("transcribe-head-tail", ab_pipeline::Priority::Interactive),
+        // Whole-book transcribe — drains during quiet periods,
+        // not in the import-time pipeline.
+        ("transcribe-full", ab_pipeline::Priority::Idle),
+    ];
     for book_id in &report.new_book_ids {
-        for stage in [
-            "tag-read",
-            "fingerprint",
-            "audible-search",
-            "audnexus-enrich",
-            "consensus",
-            "identity-resolve",
-            "audnexus-chapters",
-            "embedded-chapters",
-            "chapter-pick-winner",
-            // 6-min head + 30-s tail. Heavier than the other
-            // stages (multi-second per book at decode +
-            // SpeechAnalyzer time) but seeded at scan time so
-            // the language gate + downstream extractors have a
-            // transcript by the time the user opens the book.
-            "transcribe-head-tail",
-        ] {
+        for (stage, priority) in stage_priorities {
             if let Err(e) = state
                 .inner
                 .scheduler
-                .submit(*book_id, stage, ab_pipeline::Priority::Interactive)
+                .submit(*book_id, stage, *priority)
                 .await
             {
                 tracing::warn!(

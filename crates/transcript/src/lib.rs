@@ -14,10 +14,12 @@
 //! Add a new extractor: implement [`Extractor`], register it.
 
 pub mod bridge;
+pub mod full_stage;
 pub mod idle_install;
 pub mod language;
 pub mod stage;
 
+pub use full_stage::{CACHE_TYPE_FULL, STAGE_NAME as TRANSCRIBE_FULL_STAGE, TranscribeFullStage};
 pub use idle_install::run_idle_install_loop;
 
 pub use bridge::{

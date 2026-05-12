@@ -517,6 +517,16 @@ pub struct TranscribeTunables {
     /// new locale gets transcribed within an hour; slow enough
     /// that an empty queue costs negligible CPU.
     pub idle_install_check_secs: u64,
+    /// Per-chunk window size (seconds) for the full-book
+    /// transcribe stage. `transcribe_window` materialises the
+    /// whole window in RAM as Float32 PCM before feeding
+    /// `SpeechAnalyzer` (~200 MB / 5 min at engine sample rate).
+    /// Smaller chunks = lower peak memory + more setup overhead;
+    /// larger chunks = the opposite. 300 s (5 min) is the
+    /// empirical sweet spot. Independent of `head_secs` —
+    /// `head_secs` is a one-shot extractor window; this one is
+    /// the chunk size for whole-book iteration.
+    pub full_chunk_secs: f64,
 }
 
 impl Default for TranscribeTunables {
@@ -527,6 +537,7 @@ impl Default for TranscribeTunables {
             model_version: "speech-26.0-v1".into(),
             min_duration_secs: 30.0,
             idle_install_check_secs: 1_800,
+            full_chunk_secs: 300.0,
         }
     }
 }
