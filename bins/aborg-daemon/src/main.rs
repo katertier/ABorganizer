@@ -111,12 +111,21 @@ fn build_pipeline_stages(tunables: &Tunables) -> Vec<Arc<dyn Stage>> {
             &tunables.transcribe,
             &tunables.language,
         )),
+        // `transcribe-samples` (slice 3D.2) transcribes short
+        // windows at 25/50/75% of the book at Background
+        // priority. Provides the authoritative language signal
+        // (deep enough to dodge jingles + non-native intros)
+        // and a fast DNA-tag corpus before the full-book
+        // transcribe completes.
+        Arc::new(ab_transcript::TranscribeSamplesStage::new(
+            &tunables.transcribe,
+            &tunables.language,
+        )),
         // `transcribe-full` (slice 3B) runs the whole book at
         // Idle priority — drains only when interactive + bg
-        // queues are quiet. Chunked in Rust (5-min windows by
-        // default) to keep peak RAM bounded. Locale is read
-        // from the head-transcript cache, so requires
-        // `transcribe-head-tail` to have produced one.
+        // queues are quiet. Locale is read from the head-
+        // transcript cache. Chunked in Rust until the Swift
+        // `AVAssetReader` rewrite lands.
         Arc::new(ab_transcript::TranscribeFullStage::new(
             &tunables.transcribe,
         )),

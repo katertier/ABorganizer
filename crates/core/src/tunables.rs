@@ -555,15 +555,26 @@ pub struct TranscribeTunables {
     /// that an empty queue costs negligible CPU.
     pub idle_install_check_secs: u64,
     /// Per-chunk window size (seconds) for the full-book
-    /// transcribe stage. `transcribe_window` materialises the
-    /// whole window in RAM as Float32 PCM before feeding
-    /// `SpeechAnalyzer` (~200 MB / 5 min at engine sample rate).
-    /// Smaller chunks = lower peak memory + more setup overhead;
-    /// larger chunks = the opposite. 300 s (5 min) is the
-    /// empirical sweet spot. Independent of `head_secs` —
-    /// `head_secs` is a one-shot extractor window; this one is
-    /// the chunk size for whole-book iteration.
+    /// transcribe stage. Retained for the Rust-side chunking
+    /// path until the Swift `AVAssetReader` rewrite lands;
+    /// after that, the rewrite drops Rust-side chunks entirely
+    /// and this field can be removed. 300 s (5 min) keeps peak
+    /// PCM RAM ~20 MB.
     pub full_chunk_secs: f64,
+    /// Positions through the book at which the
+    /// `transcribe-samples` stage takes short windows for
+    /// language confirmation + fast DNA-tag corpus. Fractions
+    /// in `(0.0, 1.0)`. Default `[0.25, 0.50, 0.75]` — deep
+    /// enough that publisher jingles (0%) and outro material
+    /// (≥95%) are clear; spread across the book so a single
+    /// chapter-boundary intro can't bias all three samples.
+    pub sample_positions: Vec<f64>,
+    /// Length of each sample (seconds) the `transcribe-samples`
+    /// stage transcribes. 60 s is plenty for
+    /// `NLLanguageRecognizer` and a representative DNA-tag
+    /// corpus. Total transcribed audio per book =
+    /// `sample_positions.len() * sample_secs`.
+    pub sample_secs: f64,
 }
 
 impl Default for TranscribeTunables {
@@ -575,6 +586,8 @@ impl Default for TranscribeTunables {
             min_duration_secs: 30.0,
             idle_install_check_secs: 1_800,
             full_chunk_secs: 300.0,
+            sample_positions: vec![0.25, 0.50, 0.75],
+            sample_secs: 60.0,
         }
     }
 }

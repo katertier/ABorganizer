@@ -54,7 +54,7 @@ use ab_db::{EphemeralDb, LibraryDb};
 use ab_pipeline::{Stage, StageContext, StageOutcome};
 
 use crate::bridge::{BridgeError, TranscriptSegment, transcribe_window_typed};
-use crate::language::{LanguageDetection, detect, detect_from_transcript};
+use crate::language::{LanguageDetection, detect};
 
 /// Stage that runs head + tail transcription and seeds the
 /// language candidates.
@@ -114,12 +114,25 @@ impl Stage for TranscribeHeadTailStage {
             write_language_candidate(&ctx.library, book_id, SOURCE_NL_LANGUAGE_TAGS, d).await?;
         }
 
-        // Head window + post-transcribe quality gate. Returns
-        // `None` when the path queued an idle install + bailed.
-        let Some((head_segments, locale)) =
-            transcribe_head_with_quality_gate(ctx, book_id, &plan, &locale, &self.language).await?
-        else {
-            return Ok(StageOutcome::Skipped);
+        // Head window. Per 3D.2 the post-transcribe quality
+        // gate moved to the `transcribe-samples` stage —
+        // language detection on samples deep in the book is the
+        // authoritative signal, not on the head (which can be
+        // poisoned by jingles + non-native intros). The head
+        // stage just transcribes in the pre-picked locale here.
+        let head_segments = match transcribe_window_with_skip_on_no_model(
+            &plan.head_path,
+            0.0,
+            plan.head_end_secs,
+            &locale,
+        )
+        .await?
+        {
+            TranscribeWindowOutcome::Segments(s) => s,
+            TranscribeWindowOutcome::ModelMissing => {
+                queue_locale_install(&ctx.ephemeral, book_id, &locale).await?;
+                return Ok(StageOutcome::Skipped);
+            }
         };
 
         write_transcript_cache(
@@ -202,10 +215,6 @@ pub const CACHE_TYPE_TAIL: &str = "transcript_tail";
 /// `book_field_provenance.source` for the pre-transcribe
 /// language pick (tag text → `NLLanguageRecognizer`).
 pub const SOURCE_NL_LANGUAGE_TAGS: &str = "nl_language_tags";
-
-/// `book_field_provenance.source` for the post-transcribe head
-/// language pick (transcript text past skip → recogniser).
-pub const SOURCE_NL_LANGUAGE_TRANSCRIPT_HEAD: &str = "nl_language_transcript_head";
 
 // ── Planning + idempotency ────────────────────────────────────────
 
@@ -351,21 +360,6 @@ async fn cache_fresh(
     Ok(row.is_some_and(|r| r.model_version.as_deref() == Some(model_version)))
 }
 
-/// Primary BCP-47 subtag (before the first `-`), lowercased.
-/// `"en-US"` → `"en"`, `"de"` → `"de"`, `"zh-Hans"` → `"zh"`.
-fn locale_short(bcp47: &str) -> &str {
-    bcp47.split('-').next().unwrap_or(bcp47)
-}
-
-/// True when two BCP-47 tags share the same primary subtag.
-/// Used by the post-transcribe quality gate: the recogniser's
-/// `NLLanguage` raw value is the primary subtag form ("de",
-/// "en"), while the locale we passed to `SpeechTranscriber` may
-/// be a full tag ("de-DE"). Match on the primary subtag only.
-fn same_primary_subtag(a: &str, b: &str) -> bool {
-    locale_short(a).eq_ignore_ascii_case(locale_short(b))
-}
-
 // ── Pre-transcribe language pick ─────────────────────────────────
 
 /// What the pre-transcribe gate decided.
@@ -408,94 +402,6 @@ async fn pre_transcribe_locale(
     let detection = detect(&joined, language.max_alternatives).await?;
     let detection = detection.filter(|d| d.confidence >= language.min_confidence);
     Ok(PrePick { detection })
-}
-
-// ── Head transcribe + post-transcribe quality gate ──────────────
-
-/// Transcribe the head window, run post-transcribe language
-/// detection, and (when the post-detected language disagrees
-/// with the locale we transcribed in AT HIGH CONFIDENCE)
-/// re-transcribe in the corrected locale.
-///
-/// Writes the post-transcribe language candidate row regardless
-/// of whether the quality gate fires. Returns the
-/// `(segments, locale)` pair that should be persisted to
-/// `ai_cache`, or `None` when the path queued an idle install
-/// and bailed early (caller returns `Skipped`).
-async fn transcribe_head_with_quality_gate(
-    ctx: &StageContext,
-    book_id: BookId,
-    plan: &BookPlan,
-    locale: &str,
-    language: &LanguageTunables,
-) -> Result<Option<(Vec<TranscriptSegment>, String)>> {
-    // Initial head transcribe in the pre-picked locale.
-    let head_segments = match transcribe_window_with_skip_on_no_model(
-        &plan.head_path,
-        0.0,
-        plan.head_end_secs,
-        locale,
-    )
-    .await?
-    {
-        TranscribeWindowOutcome::Segments(s) => s,
-        TranscribeWindowOutcome::ModelMissing => {
-            queue_locale_install(&ctx.ephemeral, book_id, locale).await?;
-            return Ok(None);
-        }
-    };
-
-    // Post-transcribe language detection. Always write the
-    // candidate (consensus may use it even when it agrees with
-    // the pre-pick — multi-source agreement is signal).
-    let post = detect_from_transcript(
-        &head_segments,
-        language.post_transcribe_skip_ms,
-        language.max_alternatives,
-    )
-    .await?;
-    if let Some(d) = post.as_ref() {
-        write_language_candidate(&ctx.library, book_id, SOURCE_NL_LANGUAGE_TRANSCRIPT_HEAD, d)
-            .await?;
-    }
-
-    // Quality gate. Fires when post detection is confident AND
-    // the detected primary subtag differs from the one we just
-    // transcribed in. The recogniser's raw `language` ("de") may
-    // be compared against a full BCP-47 locale ("de-DE"); the
-    // helper handles that.
-    let needs_redo = post.as_ref().is_some_and(|d| {
-        d.confidence >= language.min_confidence && !same_primary_subtag(&d.language, locale)
-    });
-    if !needs_redo {
-        return Ok(Some((head_segments, locale.to_owned())));
-    }
-
-    let new_locale = post
-        .as_ref()
-        .map_or_else(|| locale.to_owned(), |d| d.language.clone());
-    tracing::warn!(
-        book = %book_id,
-        from = %locale_short(locale),
-        to = %new_locale,
-        "transcribe.head.re_transcribe_on_language_disagreement"
-    );
-
-    let new_segments = match transcribe_window_with_skip_on_no_model(
-        &plan.head_path,
-        0.0,
-        plan.head_end_secs,
-        &new_locale,
-    )
-    .await?
-    {
-        TranscribeWindowOutcome::Segments(s) => s,
-        TranscribeWindowOutcome::ModelMissing => {
-            queue_locale_install(&ctx.ephemeral, book_id, &new_locale).await?;
-            return Ok(None);
-        }
-    };
-    Ok(Some((new_segments, new_locale)))
 }
 
 // ── Transcribe wrapper that surfaces "model not installed" ───────
@@ -590,6 +496,19 @@ async fn write_transcript_cache(
     .await
     .map_err(|e| Error::Database(format!("transcribe write cache: {e}")))?;
     Ok(())
+}
+
+/// Cross-module entry point so [`crate::samples_stage`] can
+/// reuse the language-candidate writer (with `normalize` baked
+/// in). The plain `write_language_candidate` stays private to
+/// keep the head/tail call sites short.
+pub(crate) async fn write_language_candidate_for_samples(
+    library: &LibraryDb,
+    book_id: BookId,
+    source: &str,
+    detection: &LanguageDetection,
+) -> Result<()> {
+    write_language_candidate(library, book_id, source, detection).await
 }
 
 async fn write_language_candidate(
@@ -694,28 +613,6 @@ mod tests {
     #[test]
     fn mean_confidence_empty_is_zero() {
         assert!((mean_confidence(&[]) - 0.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn locale_short_extracts_primary_subtag() {
-        assert_eq!(locale_short("en-US"), "en");
-        assert_eq!(locale_short("de"), "de");
-        assert_eq!(locale_short("zh-Hans-CN"), "zh");
-        assert_eq!(locale_short(""), "");
-    }
-
-    #[test]
-    fn same_primary_subtag_matches() {
-        assert!(same_primary_subtag("en", "en-US"));
-        assert!(same_primary_subtag("EN-GB", "en-US"));
-        assert!(same_primary_subtag("de", "de-DE"));
-    }
-
-    #[test]
-    fn same_primary_subtag_rejects_different_languages() {
-        assert!(!same_primary_subtag("en", "de"));
-        assert!(!same_primary_subtag("en-US", "de-DE"));
-        assert!(!same_primary_subtag("zh-Hans", "ja"));
     }
 
     #[test]

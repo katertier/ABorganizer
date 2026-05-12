@@ -117,6 +117,11 @@ async fn library_scan(
             "run-transcript-extractors",
             ab_pipeline::Priority::Interactive,
         ),
+        // Sampled transcribe — Background priority. Three 60-s
+        // windows at 25/50/75%. Provides authoritative
+        // post-transcribe language signal + a representative
+        // DNA-tag corpus before the full-book transcribe lands.
+        ("transcribe-samples", ab_pipeline::Priority::Background),
         // Whole-book transcribe — drains during quiet periods,
         // not in the import-time pipeline.
         ("transcribe-full", ab_pipeline::Priority::Idle),

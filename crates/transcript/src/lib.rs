@@ -19,11 +19,16 @@ pub mod extractors;
 pub mod full_stage;
 pub mod idle_install;
 pub mod language;
+pub mod samples_stage;
 pub mod stage;
 
 pub use extract_stage::{RunExtractorsStage, STAGE_NAME as RUN_EXTRACTORS_STAGE};
 pub use full_stage::{CACHE_TYPE_FULL, STAGE_NAME as TRANSCRIBE_FULL_STAGE, TranscribeFullStage};
 pub use idle_install::run_idle_install_loop;
+pub use samples_stage::{
+    CACHE_TYPE_SAMPLES, SOURCE_NL_LANGUAGE_SAMPLES, STAGE_NAME as TRANSCRIBE_SAMPLES_STAGE,
+    TranscribeSamplesStage,
+};
 
 pub use bridge::{
     BridgeError, TranscriptSegment, install_speech_model, install_speech_model_typed,
@@ -33,7 +38,7 @@ pub use language::{
     LanguageDetection, LanguageHit, detect as detect_language, detect_from_transcript,
 };
 pub use stage::{
-    CACHE_TYPE_HEAD, CACHE_TYPE_TAIL, SOURCE_NL_LANGUAGE_TAGS, SOURCE_NL_LANGUAGE_TRANSCRIPT_HEAD,
+    CACHE_TYPE_HEAD, CACHE_TYPE_TAIL, SOURCE_NL_LANGUAGE_TAGS,
     STAGE_NAME as TRANSCRIBE_HEAD_TAIL_STAGE, TranscribeHeadTailStage,
 };
 
