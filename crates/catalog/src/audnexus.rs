@@ -156,6 +156,59 @@ pub struct AudnexusBook {
     /// Narrators are an ordered array; can be 1..N people.
     #[serde(default)]
     pub narrators: Vec<AudnexusContributor>,
+    /// Genres + sub-categories Audnexus assigns to the book.
+    /// Includes both top-level genres ("Fantasy") and the
+    /// sub-genre tags Audible calls "tags". The `type` field
+    /// differentiates them; we currently treat both as genre
+    /// candidates (the consensus stage can refine later).
+    #[serde(default)]
+    pub genres: Vec<AudnexusGenre>,
+    /// The book's primary series, when it belongs to one.
+    /// Audnexus separates this from `series_secondary` (e.g.
+    /// franchise / shared-universe links). Slice C5.6 ingests
+    /// both into `book_series_candidate` with `is_primary`
+    /// distinguishing them.
+    #[serde(default, rename = "seriesPrimary")]
+    pub series_primary: Option<AudnexusSeries>,
+    /// Secondary series — typically franchise / shared-universe
+    /// rather than reading-order ("Cosmere Universe" when the
+    /// primary is "Mistborn"). Optional; absent for most books.
+    #[serde(default, rename = "seriesSecondary")]
+    pub series_secondary: Option<AudnexusSeries>,
+}
+
+/// One series entry on an Audnexus book response.
+///
+/// `position` arrives as a string ("1", "1.5", "1.0a", "2-3" for
+/// omnibus editions) because Audnexus normalises across decades of
+/// publisher conventions. The catalog writer parses to `f64` for
+/// the simple cases and writes NULL for the rest (logged + still
+/// captured by the candidate row so the name resolves; just no
+/// numeric position).
+#[derive(Debug, Clone, Deserialize)]
+pub struct AudnexusSeries {
+    pub asin: String,
+    pub name: String,
+    #[serde(default)]
+    pub position: String,
+}
+
+/// One genre entry on an Audnexus book response.
+///
+/// Audnexus assigns its own ASINs to genres + sub-genres
+/// (`/genres/{asin}` endpoint). The ASIN goes into
+/// `genres.audible_id`; the name goes through
+/// [`ab_core::genre_code::normalize`] to produce the canonical
+/// slug stored in `book_field_provenance.value`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AudnexusGenre {
+    pub name: String,
+    #[serde(default)]
+    pub asin: Option<String>,
+    /// `"Genres"` for top-level, `"Tags"` for sub-genre tags.
+    /// Retained for future filtering; not currently used.
+    #[serde(default, rename = "type")]
+    pub kind: Option<String>,
 }
 
 /// One author or narrator entry on an Audnexus book response.

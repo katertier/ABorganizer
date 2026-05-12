@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO book_locale_blocks (book_id, locale) VALUES (?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "bbd6a5ee236799681acd49636e0748325835d06a210431dbd790ad89a0a2cc69"
+}

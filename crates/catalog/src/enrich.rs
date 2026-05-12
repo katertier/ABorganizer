@@ -26,8 +26,8 @@
 use async_trait::async_trait;
 
 use ab_core::tunables::NetworkTunables;
-use ab_core::{BookId, Error, Result};
-use ab_pipeline::{Stage, StageContext, StageOutcome};
+use ab_core::{BookId, Error, Field, Result};
+use ab_pipeline::{Stage, StageContext, StageId, StageOutcome};
 
 use crate::AudnexusClient;
 
@@ -67,18 +67,21 @@ impl AudnexusEnrichStage {
     }
 }
 
+/// Typed identifier for this stage.
+pub const STAGE_ID: StageId = StageId::new("audnexus-enrich");
+
 #[async_trait]
 impl Stage for AudnexusEnrichStage {
     fn name(&self) -> &'static str {
-        "audnexus-enrich"
+        STAGE_ID.as_str()
     }
 
-    fn requires(&self) -> &'static [&'static str] {
+    fn requires(&self) -> &'static [StageId] {
         // tag-read writes the tag-supplied ASIN candidate;
         // audible-search writes a fallback ASIN candidate when no
         // tag value exists. We wait for BOTH so the lookup sees
         // whichever source supplied an ASIN.
-        &["tag-read", "audible-search"]
+        &[ab_tag_read::STAGE_ID, crate::audible_search::STAGE_ID]
     }
 
     async fn run(&self, ctx: &StageContext, book_id: BookId) -> Result<StageOutcome> {
@@ -199,6 +202,7 @@ async fn write_provenance(
 
     write_scalar_provenance(&mut tx, book_id, &source, book).await?;
     write_contributor_provenance(&mut tx, book_id, &source, book).await?;
+    write_series_candidates(&mut tx, book_id, &source, book).await?;
 
     tx.commit()
         .await
@@ -216,21 +220,33 @@ async fn write_scalar_provenance(
     source: &str,
     book: &crate::audnexus::AudnexusBook,
 ) -> Result<()> {
-    insert_scalar(tx, book_id, "title", &book.title, source).await?;
+    insert_scalar(tx, book_id, Field::Title, &book.title, source).await?;
     if let Some(v) = book.subtitle.as_deref() {
-        insert_scalar(tx, book_id, "subtitle", v, source).await?;
+        insert_scalar(tx, book_id, Field::Subtitle, v, source).await?;
     }
     if let Some(v) = book.description.as_deref() {
-        insert_scalar(tx, book_id, "description", v, source).await?;
+        insert_scalar(tx, book_id, Field::Description, v, source).await?;
     }
     if let Some(v) = book.language.as_deref() {
-        insert_scalar(tx, book_id, "language", v, source).await?;
+        // Normalise via the central language-code table so this
+        // Audnexus candidate is comparable with tag-read /
+        // Audible / NL detector outputs. Skip + warn on
+        // unparseable input rather than polluting consensus.
+        if let Some(canonical) = ab_core::language_code::normalize(v) {
+            insert_scalar(tx, book_id, Field::Language, &canonical, source).await?;
+        } else {
+            tracing::warn!(
+                raw = %v,
+                book = %book_id,
+                "enrich.language.unparseable"
+            );
+        }
     }
     if let Some(v) = book.publisher_name.as_deref() {
-        insert_scalar(tx, book_id, "publisher", v, source).await?;
+        insert_scalar(tx, book_id, Field::Publisher, v, source).await?;
     }
     if let Some(v) = book.release_date.as_deref() {
-        insert_scalar(tx, book_id, "release_date", v, source).await?;
+        insert_scalar(tx, book_id, Field::ReleaseDate, v, source).await?;
     }
     if let Some(minutes) = book.runtime_length_min {
         // Store as decimal-seconds string so the provenance row's
@@ -240,7 +256,38 @@ async fn write_scalar_provenance(
         // for one numeric field.
         let secs = i64::from(minutes).saturating_mul(60);
         let secs_str = secs.to_string();
-        insert_scalar(tx, book_id, "duration_seconds", &secs_str, source).await?;
+        insert_scalar(tx, book_id, Field::DurationSeconds, &secs_str, source).await?;
+    }
+    // Genres + sub-genre tags. Each entry routes through the
+    // central `genre_code::normalize` (slice 3D.1 pattern) so
+    // tag-read / Audible / future scrapers all converge on the
+    // same canonical slug. Audnexus's per-genre ASIN goes into
+    // `external_id` so the future genre-resolve step can join
+    // against the `genres.audible_id` column.
+    for genre in &book.genres {
+        let raw = genre.name.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        let Some(canonical) = ab_core::genre_code::normalize(raw) else {
+            tracing::warn!(
+                raw = %raw,
+                book = %book_id,
+                "enrich.genre.unparseable"
+            );
+            continue;
+        };
+        insert_row(
+            tx,
+            ProvenanceRow {
+                book_id,
+                field: Field::Genre,
+                value: &canonical,
+                source,
+                external_id: genre.asin.as_deref(),
+            },
+        )
+        .await?;
     }
     Ok(())
 }
@@ -252,7 +299,7 @@ async fn write_scalar_provenance(
 async fn insert_scalar(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     book_id: BookId,
-    field: &'static str,
+    field: Field,
     value: &str,
     source: &str,
 ) -> Result<()> {
@@ -288,7 +335,7 @@ async fn write_contributor_provenance(
             tx,
             ProvenanceRow {
                 book_id,
-                field: "author",
+                field: Field::Author,
                 value: name,
                 source,
                 external_id: author.asin.as_deref(),
@@ -305,7 +352,7 @@ async fn write_contributor_provenance(
             tx,
             ProvenanceRow {
                 book_id,
-                field: "narrator",
+                field: Field::Narrator,
                 value: name,
                 source,
                 external_id: narrator.asin.as_deref(),
@@ -313,6 +360,87 @@ async fn write_contributor_provenance(
         )
         .await?;
     }
+    Ok(())
+}
+
+/// Write `book_series_candidate` rows for Audnexus's primary and
+/// (when present) secondary series. Primary writes with
+/// `is_primary = 1`, secondary with `is_primary = 0`.
+///
+/// Audnexus delivers `position` as a string because publishers
+/// have used every shape imaginable across decades ("1", "1.5",
+/// "1.0a", "2-3" for boxed sets). This writer parses the simple
+/// numeric cases via `f64::from_str`; on parse failure the
+/// candidate row is still written (name resolves via
+/// identity-resolve) but `position` stays NULL. The parse
+/// failure logs a single warn so we can monitor unusual values.
+async fn write_series_candidates(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    book_id: BookId,
+    source: &str,
+    book: &crate::audnexus::AudnexusBook,
+) -> Result<()> {
+    if let Some(primary) = book.series_primary.as_ref() {
+        insert_series_candidate(tx, book_id, source, primary, true).await?;
+    }
+    if let Some(secondary) = book.series_secondary.as_ref() {
+        insert_series_candidate(tx, book_id, source, secondary, false).await?;
+    }
+    Ok(())
+}
+
+async fn insert_series_candidate(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    book_id: BookId,
+    source: &str,
+    series: &crate::audnexus::AudnexusSeries,
+    is_primary: bool,
+) -> Result<()> {
+    let name = series.name.trim();
+    if name.is_empty() {
+        return Ok(());
+    }
+    let id = book_id.0;
+    let asin = if series.asin.is_empty() {
+        None
+    } else {
+        Some(series.asin.as_str())
+    };
+    let trimmed_pos = series.position.trim();
+    // Audnexus stores `position` as a string ("1", "1.5", "1.0a",
+    // "2-3" for omnibus). Parse the simple numeric cases; on
+    // failure keep the candidate row (name still resolves) but
+    // leave position NULL and log so we can monitor unusual
+    // values without it being silent.
+    let position: Option<f64> = if trimmed_pos.is_empty() {
+        None
+    } else if let Ok(v) = trimmed_pos.parse::<f64>() {
+        Some(v)
+    } else {
+        tracing::warn!(
+            book = %book_id,
+            series = %name,
+            position = %series.position,
+            "audnexus.series.position_unparseable"
+        );
+        None
+    };
+    let is_primary_i = i64::from(is_primary);
+    sqlx::query!(
+        "INSERT INTO book_series_candidate \
+         (book_id, source, series_name, series_asin, position, is_primary, confidence) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+        id,
+        source,
+        name,
+        asin,
+        position,
+        is_primary_i,
+        AUDNEXUS_CONFIDENCE,
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| Error::Database(format!("audnexus series candidate {name}: {e}")))?;
     Ok(())
 }
 
@@ -332,7 +460,7 @@ fn format_source(region: &str) -> String {
 /// readable without macro tricks.
 struct ProvenanceRow<'a> {
     book_id: BookId,
-    field: &'a str,
+    field: Field,
     value: &'a str,
     source: &'a str,
     external_id: Option<&'a str>,
@@ -343,12 +471,13 @@ async fn insert_row(
     row: ProvenanceRow<'_>,
 ) -> Result<()> {
     let id = row.book_id.0;
+    let field = row.field.as_str();
     sqlx::query!(
         "INSERT INTO book_field_provenance \
          (book_id, field, value, source, confidence, is_winner, external_id) \
          VALUES (?, ?, ?, ?, ?, 0, ?)",
         id,
-        row.field,
+        field,
         row.value,
         row.source,
         AUDNEXUS_CONFIDENCE,
@@ -356,7 +485,7 @@ async fn insert_row(
     )
     .execute(&mut **tx)
     .await
-    .map_err(|e| Error::Database(format!("audnexus provenance {}: {e}", row.field)))?;
+    .map_err(|e| Error::Database(format!("audnexus provenance {field}: {e}")))?;
     Ok(())
 }
 
@@ -398,7 +527,10 @@ mod tests {
         let client = AudnexusClient::new(&HttpClientTunables::default());
         let stage = AudnexusEnrichStage::new(client, &NetworkTunables::default());
         assert_eq!(stage.name(), "audnexus-enrich");
-        assert_eq!(stage.requires(), &["tag-read", "audible-search"]);
+        assert_eq!(
+            stage.requires(),
+            &[ab_tag_read::STAGE_ID, crate::audible_search::STAGE_ID]
+        );
     }
 
     #[test]

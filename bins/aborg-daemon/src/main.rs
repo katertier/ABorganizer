@@ -52,6 +52,101 @@ struct Args {
     config: Option<std::path::PathBuf>,
 }
 
+/// Build the per-book pipeline stage list. Lives here (not in a
+/// library crate) because it's the daemon's wiring: it picks
+/// concrete stage impls + threads each stage's tunables.
+///
+/// Declaration order = the order stages appear in the DAG's
+/// `iter_topo()`. Actual run-time ordering is enforced by each
+/// stage's `requires()` declaration; the order here is just for
+/// human readability when reading the boot log.
+fn build_pipeline_stages(tunables: &Tunables) -> Vec<Arc<dyn Stage>> {
+    let audnexus_client = ab_catalog::AudnexusClient::new(&tunables.http_client);
+    let audible_client = ab_catalog::AudibleClient::new(&tunables.http_client);
+    vec![
+        // `tag-read` (slice 1B) — lofty MP4-atom / ID3 reader.
+        // Writes title/author/subtitle/description/narrator
+        // candidate rows; no dependencies.
+        Arc::new(ab_tag_read::TagReadStage::new(tunables.tag_read.clone())),
+        // `fingerprint` (slice 1C) — chromaprint whole-book hash.
+        Arc::new(ab_fingerprint::FingerprintStage::new()),
+        // `audible-search` fills in an ASIN candidate for books
+        // with no `CatalogNumber` tag.
+        Arc::new(ab_catalog::AudibleSearchStage::new(
+            audible_client,
+            &tunables.network,
+        )),
+        // `audnexus-enrich` waits for both tag-read AND
+        // audible-search so it sees whichever ASIN source landed
+        // first.
+        Arc::new(ab_catalog::AudnexusEnrichStage::new(
+            audnexus_client,
+            &tunables.network,
+        )),
+        // `consensus` promotes the highest-confidence provenance
+        // value into the corresponding `books` column.
+        Arc::new(ab_catalog::ConsensusStage::new()),
+        // `identity-resolve` promotes author / publisher / narrator
+        // candidates into the identity tables + junctions, after
+        // consensus has settled the scalar columns.
+        Arc::new(ab_catalog::IdentityResolveStage::new()),
+        // `audnexus-chapters` fetches the per-ASIN chapter ToC +
+        // brand intro/outro markers.
+        Arc::new(ab_catalog::AudnexusChaptersStage::new(
+            ab_catalog::AudnexusClient::new(&tunables.http_client),
+            &tunables.network,
+        )),
+        // `embedded-chapters` reads chpl + chapter-track atoms
+        // from .m4b / .m4a files via mp4ameta.
+        Arc::new(ab_catalog::EmbeddedChaptersStage::new()),
+        // `chapter-pick-winner` flips `is_winner` so exactly one
+        // chapter source per book is surfaced to the player.
+        Arc::new(ab_catalog::ChapterWinnerStage::new()),
+        // `transcribe-head-tail` (slice 3A.4) runs the on-device
+        // Speech engine over the first 6 min + last 30 s of the
+        // book, stores both transcripts in `ai_cache` keyed by
+        // `extractor_version`, and seeds the language candidates
+        // (pre- + post-transcribe).
+        Arc::new(ab_transcript::TranscribeHeadTailStage::new(
+            &tunables.transcribe,
+            &tunables.language,
+        )),
+        // `detect-description-lang` (slice 3G) populates
+        // `books.description_lang` once consensus picks the
+        // description. Cheap pure-text NL detection; the UI
+        // uses it for correct directionality / font rendering
+        // when the description language differs from the
+        // library locale.
+        Arc::new(ab_transcript::DetectDescriptionLangStage::new(
+            &tunables.language,
+        )),
+        // `transcribe-samples` (slice 3D.2) transcribes short
+        // windows at 25/50/75% of the book at Background
+        // priority. Provides the authoritative language signal
+        // (deep enough to dodge jingles + non-native intros)
+        // and a fast DNA-tag corpus before the full-book
+        // transcribe completes.
+        Arc::new(ab_transcript::TranscribeSamplesStage::new(
+            &tunables.transcribe,
+            &tunables.language,
+        )),
+        // `transcribe-full` (slice 3B) runs the whole book at
+        // Idle priority — drains only when interactive + bg
+        // queues are quiet. Locale is read from the head-
+        // transcript cache. Chunked in Rust until the Swift
+        // `AVAssetReader` rewrite lands.
+        Arc::new(ab_transcript::TranscribeFullStage::new(
+            &tunables.transcribe,
+        )),
+        // `run-transcript-extractors` (slice 3C) runs every
+        // built-in heuristic extractor (title/author confirm,
+        // tier-4 audiologo, ...) over the cached head transcript
+        // and writes candidates to `book_field_provenance`.
+        // Cheap — pure-text regex / keyword passes; no FFI.
+        Arc::new(ab_transcript::RunExtractorsStage::new()),
+    ]
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -89,57 +184,8 @@ async fn main() -> Result<()> {
     let cancel = CancellationToken::new();
     spawn_signal_handlers(&cancel);
 
-    // Build the pipeline DAG + scheduler. Stages registered so far:
-    // `tag-read` (slice 1B), `fingerprint` (slice 1C),
-    // `audnexus-enrich` (slice 2A). Tag-read + fingerprint have no
-    // declared dependencies; `audnexus-enrich` requires `tag-read`
-    // because tag-read writes the ASIN candidate it uses.
-    let audnexus_client = ab_catalog::AudnexusClient::new(&tunables.http_client);
-    let audible_client = ab_catalog::AudibleClient::new(&tunables.http_client);
-    let stages: Vec<Arc<dyn Stage>> = vec![
-        Arc::new(ab_tag_read::TagReadStage::new(tunables.tag_read.clone())),
-        Arc::new(ab_fingerprint::FingerprintStage::new()),
-        // `audible-search` runs after tag-read, fills in an ASIN
-        // candidate for books with no `CatalogNumber` tag.
-        Arc::new(ab_catalog::AudibleSearchStage::new(
-            audible_client,
-            &tunables.network,
-        )),
-        // `audnexus-enrich` waits for both tag-read AND
-        // audible-search so it sees whichever ASIN source landed
-        // first.
-        Arc::new(ab_catalog::AudnexusEnrichStage::new(
-            audnexus_client,
-            &tunables.network,
-        )),
-        // `consensus` promotes the highest-confidence provenance
-        // value into the corresponding `books` column.
-        Arc::new(ab_catalog::ConsensusStage::new()),
-        // `identity-resolve` promotes author / publisher / narrator
-        // candidates into the identity tables + junctions, after
-        // consensus has settled the scalar columns.
-        Arc::new(ab_catalog::IdentityResolveStage::new()),
-        // `audnexus-chapters` fetches the per-ASIN chapter ToC +
-        // brand intro/outro markers. Runs after audnexus-enrich
-        // (which populates `books.asin`); parallel-safe with
-        // identity-resolve since they touch disjoint columns.
-        Arc::new(ab_catalog::AudnexusChaptersStage::new(
-            ab_catalog::AudnexusClient::new(&tunables.http_client),
-            &tunables.network,
-        )),
-        // `embedded-chapters` reads chpl + chapter-track atoms
-        // from .m4b / .m4a files via mp4ameta. Runs after
-        // tag-read (needs `book_files.duration_ms` for multi-file
-        // offsets) and is parallel-safe with audnexus-chapters
-        // (different `chapters.source` value, UNIQUE includes
-        // source).
-        Arc::new(ab_catalog::EmbeddedChaptersStage::new()),
-        // `chapter-pick-winner` flips `is_winner` so exactly one
-        // chapter source per book is surfaced to the player.
-        // Precedence: audnexus > embedded > cue > epub >
-        // transcript > silence.
-        Arc::new(ab_catalog::ChapterWinnerStage::new()),
-    ];
+    // Build the pipeline DAG + scheduler.
+    let stages = build_pipeline_stages(&tunables);
     let dag = Arc::new(Dag::build(stages).context("build pipeline DAG")?);
     let stage_ctx = StageContext {
         library: library.clone(),
@@ -148,6 +194,18 @@ async fn main() -> Result<()> {
         stage_name: "",
     };
     let scheduler = Arc::new(Scheduler::spawn(dag, stage_ctx, &tunables.scheduler));
+
+    // Idle-priority Speech-model installer. Spawned once at
+    // startup; wakes every `tunables.transcribe.idle_install_check_secs`
+    // to drain `pending_speech_installs` and re-queue any books
+    // that were blocked on the install. Cancellation flows
+    // through the shared `cancel` token alongside SIGTERM.
+    tokio::spawn(ab_transcript::run_idle_install_loop(
+        ephemeral.clone(),
+        Arc::clone(&scheduler),
+        tunables.transcribe.clone(),
+        cancel.clone(),
+    ));
 
     // Shared state for the API router. Carries the scheduler handle
     // so the scan endpoint can submit new BookIds.

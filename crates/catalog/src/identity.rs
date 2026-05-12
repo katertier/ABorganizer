@@ -48,8 +48,8 @@ use std::collections::HashSet;
 
 use async_trait::async_trait;
 
-use ab_core::{BookId, Error, Result};
-use ab_pipeline::{Stage, StageContext, StageOutcome};
+use ab_core::{BookId, Error, Field, Result};
+use ab_pipeline::{Stage, StageContext, StageId, StageOutcome};
 
 /// Stage that resolves identities (authors/narrators/publishers).
 pub struct IdentityResolveStage;
@@ -68,18 +68,21 @@ impl Default for IdentityResolveStage {
     }
 }
 
+/// Typed identifier for this stage.
+pub const STAGE_ID: StageId = StageId::new("identity-resolve");
+
 #[async_trait]
 impl Stage for IdentityResolveStage {
     fn name(&self) -> &'static str {
-        "identity-resolve"
+        STAGE_ID.as_str()
     }
 
-    fn requires(&self) -> &'static [&'static str] {
+    fn requires(&self) -> &'static [StageId] {
         // After consensus runs so the direct-column promotions are
         // already in place. Consensus depends on audnexus-enrich,
         // which writes the contributor candidates this stage needs;
         // transitivity covers the ordering.
-        &["consensus"]
+        &[crate::consensus::STAGE_ID]
     }
 
     async fn run(&self, ctx: &StageContext, book_id: BookId) -> Result<StageOutcome> {
@@ -101,6 +104,10 @@ impl Stage for IdentityResolveStage {
         if narrator_count > 0 {
             updates += 1;
         }
+        let series_count = resolve_series(&mut tx, book_id).await?;
+        if series_count > 0 {
+            updates += 1;
+        }
 
         tx.commit()
             .await
@@ -110,6 +117,7 @@ impl Stage for IdentityResolveStage {
             book = %book_id,
             updates,
             narrator_count,
+            series_count,
             "identity.resolve.done"
         );
         Ok(if updates > 0 {
@@ -126,7 +134,7 @@ async fn resolve_author(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     book_id: BookId,
 ) -> Result<bool> {
-    let Some(candidate) = pick_winner_with_id(tx, book_id, "author").await? else {
+    let Some(candidate) = pick_winner_with_id(tx, book_id, Field::Author).await? else {
         return Ok(false);
     };
     let author_id = find_or_insert_person(
@@ -156,7 +164,7 @@ async fn resolve_publisher(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     book_id: BookId,
 ) -> Result<bool> {
-    let Some(name) = pick_winner_name_only(tx, book_id, "publisher").await? else {
+    let Some(name) = pick_winner_name_only(tx, book_id, Field::Publisher).await? else {
         return Ok(false);
     };
     let publisher_id = find_or_insert_publisher(tx, &name).await?;
@@ -172,6 +180,218 @@ async fn resolve_publisher(
     Ok(true)
 }
 
+/// One distinct series for a book, after collapsing duplicate
+/// `(book_id, lower(series_name))` rows across sources. Built
+/// inside [`resolve_series`] from highest-confidence-first
+/// candidates so the merge rule "fill blanks from lower-confidence
+/// rows" lands in a single pass.
+struct SeriesGroup {
+    display_name: String,
+    asin: Option<String>,
+    position: Option<f64>,
+    is_primary: bool,
+}
+
+/// Resolve series candidates from `book_series_candidate` (slice
+/// C5.6's fallback chain: Audnexus → tag → future filename) into
+/// the `series` table + `book_series` junction.
+///
+/// Match precedence within a series candidate group:
+/// 1. `series_asin` (Audnexus seriesPrimary / seriesSecondary id) →
+///    `series.audible_id` lookup. Wins when present and the
+///    series row was previously seeded by an Audnexus call.
+/// 2. Case-insensitive `series_name` match → `series.name`. Wins
+///    for tag-only candidates and as fallback when ASIN lookup
+///    misses.
+///
+/// Within a `(book_id, lower(series_name))` group:
+/// - Highest-confidence row's ASIN seeds the `series.audible_id`
+///   on first insert (back-fill on later runs is handled by
+///   `find_or_insert_series` when a higher-confidence row arrives
+///   carrying the ASIN).
+/// - Highest-confidence row's `position` becomes the
+///   `book_series.position` for the book.
+/// - `is_primary` is OR'd across the group — if any source called
+///   this series primary for the book, it stays primary.
+///
+/// Clear-then-add for `book_series`: re-runs converge on the
+/// current candidate set (matching `resolve_narrators` shape).
+///
+/// Returns the count of series rows linked.
+async fn resolve_series(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    book_id: BookId,
+) -> Result<usize> {
+    let id = book_id.0;
+    // Read all series candidates for this book, highest confidence
+    // first. Group key is lower(series_name) — same series name
+    // across multiple sources collapses to one group.
+    let rows = sqlx::query!(
+        r#"SELECT
+              series_name  AS "series_name!",
+              series_asin,
+              position,
+              is_primary   AS "is_primary!: i64",
+              confidence   AS "confidence!: f64"
+           FROM book_series_candidate
+           WHERE book_id = ?
+           ORDER BY confidence DESC, recorded_at DESC"#,
+        id,
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|e| Error::Database(format!("identity fetch series candidates: {e}")))?;
+
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    // Group by lower(series_name) preserving the first (highest-
+    // confidence) row's ASIN / position. is_primary OR'd across
+    // the group.
+    let mut groups: Vec<SeriesGroup> = Vec::new();
+    let mut keys: HashSet<String> = HashSet::new();
+    for r in rows {
+        let trimmed = r.series_name.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let key = trimmed.to_lowercase();
+        let primary = r.is_primary != 0;
+        if let Some(existing) = groups
+            .iter_mut()
+            .find(|g| g.display_name.eq_ignore_ascii_case(trimmed))
+        {
+            // Higher-confidence row was already seen (rows arrive
+            // confidence-DESC). Fill in pieces it lacks.
+            if existing.asin.is_none() {
+                if let Some(a) = r.series_asin.as_deref() {
+                    if !a.is_empty() {
+                        existing.asin = Some(a.to_owned());
+                    }
+                }
+            }
+            if existing.position.is_none() {
+                existing.position = r.position;
+            }
+            existing.is_primary = existing.is_primary || primary;
+        } else if keys.insert(key) {
+            groups.push(SeriesGroup {
+                display_name: trimmed.to_owned(),
+                asin: r
+                    .series_asin
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned),
+                position: r.position,
+                is_primary: primary,
+            });
+        }
+    }
+
+    if groups.is_empty() {
+        return Ok(0);
+    }
+
+    // Resolve each group to a series_id BEFORE touching the
+    // junction (matches the narrators flow).
+    let mut entries: Vec<(i64, Option<f64>, bool)> = Vec::with_capacity(groups.len());
+    for g in &groups {
+        let sid = find_or_insert_series(tx, &g.display_name, g.asin.as_deref()).await?;
+        entries.push((sid, g.position, g.is_primary));
+    }
+
+    // Clear-then-add the junction. Same shape as resolve_narrators.
+    sqlx::query!("DELETE FROM book_series WHERE book_id = ?", id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| Error::Database(format!("identity clear book_series: {e}")))?;
+    for (sid, position, is_primary) in &entries {
+        let primary_i = i64::from(*is_primary);
+        sqlx::query!(
+            "INSERT INTO book_series (book_id, series_id, position, is_primary) \
+             VALUES (?, ?, ?, ?)",
+            id,
+            sid,
+            position,
+            primary_i,
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| Error::Database(format!("identity insert book_series: {e}")))?;
+    }
+
+    Ok(entries.len())
+}
+
+/// Find-or-insert a series row by `audible_id` (when supplied)
+/// with case-insensitive name fallback. Back-fills
+/// `series.audible_id` on an existing name-matched row when the
+/// caller now has an ASIN (matches the `find_or_insert_person`
+/// shape used for authors / narrators).
+async fn find_or_insert_series(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    name: &str,
+    audible_id: Option<&str>,
+) -> Result<i64> {
+    // 1) ASIN match wins when we have one.
+    if let Some(asin) = audible_id {
+        let existing: Option<i64> = sqlx::query_scalar!(
+            "SELECT series_id FROM series WHERE audible_id = ? LIMIT 1",
+            asin,
+        )
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| Error::Database(format!("identity lookup series by asin: {e}")))?;
+        if let Some(id) = existing {
+            return Ok(id);
+        }
+    }
+
+    // 2) Case-insensitive name lookup. sqlx's nullability
+    //    inference treats `SELECT pk FROM t WHERE lower(name) = …`
+    //    as `Option<Option<i64>>` (the lower() arg defeats the
+    //    non-null inference); flatten back to Option<i64>.
+    //    Same shape as `find_or_insert_publisher`.
+    let existing: Option<i64> = sqlx::query_scalar!(
+        "SELECT series_id FROM series WHERE lower(name) = lower(?) LIMIT 1",
+        name,
+    )
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|e| Error::Database(format!("identity lookup series by name: {e}")))?
+    .flatten();
+
+    if let Some(id) = existing {
+        // Back-fill audible_id when we now have one and the row
+        // doesn't (e.g. tag-read seeded the row; an Audnexus call
+        // followed).
+        if let Some(asin) = audible_id {
+            sqlx::query!(
+                "UPDATE series SET audible_id = ? \
+                 WHERE series_id = ? AND audible_id IS NULL",
+                asin,
+                id,
+            )
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| Error::Database(format!("identity backfill series audible_id: {e}")))?;
+        }
+        return Ok(id);
+    }
+
+    // 3) Insert new row.
+    let new_id: i64 = sqlx::query_scalar!(
+        "INSERT INTO series (name, audible_id) VALUES (?, ?) RETURNING series_id",
+        name,
+        audible_id,
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|e| Error::Database(format!("identity insert series: {e}")))?;
+    Ok(new_id)
+}
+
 /// Take every distinct narrator candidate for this book, find-or-
 /// insert each into `narrators`, then overwrite `book_narrator` to
 /// exactly that set. Returns the count of narrators linked.
@@ -179,7 +399,7 @@ async fn resolve_narrators(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     book_id: BookId,
 ) -> Result<usize> {
-    let candidates = fetch_all_distinct(tx, book_id, "narrator").await?;
+    let candidates = fetch_all_distinct(tx, book_id, Field::Narrator).await?;
     if candidates.is_empty() {
         return Ok(0);
     }
@@ -236,15 +456,16 @@ struct IdentityCandidate {
 async fn pick_winner_with_id(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     book_id: BookId,
-    field: &str,
+    field: Field,
 ) -> Result<Option<IdentityCandidate>> {
     let id = book_id.0;
+    let field_str = field.as_str();
     let row = sqlx::query!(
         "SELECT value, external_id FROM book_field_provenance \
          WHERE book_id = ? AND field = ? AND value IS NOT NULL \
          ORDER BY confidence DESC, recorded_at DESC LIMIT 1",
         id,
-        field,
+        field_str,
     )
     .fetch_optional(&mut **tx)
     .await
@@ -272,7 +493,7 @@ async fn pick_winner_with_id(
 async fn pick_winner_name_only(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     book_id: BookId,
-    field: &str,
+    field: Field,
 ) -> Result<Option<String>> {
     Ok(pick_winner_with_id(tx, book_id, field)
         .await?
@@ -286,15 +507,16 @@ async fn pick_winner_name_only(
 async fn fetch_all_distinct(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     book_id: BookId,
-    field: &str,
+    field: Field,
 ) -> Result<Vec<IdentityCandidate>> {
     let id = book_id.0;
+    let field_str = field.as_str();
     let rows = sqlx::query!(
         "SELECT value, external_id FROM book_field_provenance \
          WHERE book_id = ? AND field = ? AND value IS NOT NULL \
          ORDER BY confidence DESC, recorded_at DESC",
         id,
-        field,
+        field_str,
     )
     .fetch_all(&mut **tx)
     .await
@@ -456,7 +678,7 @@ mod tests {
     async fn stage_metadata_matches_pipeline_expectations() {
         let stage = IdentityResolveStage::new();
         assert_eq!(stage.name(), "identity-resolve");
-        assert_eq!(stage.requires(), &["consensus"]);
+        assert_eq!(stage.requires(), &[crate::consensus::STAGE_ID]);
     }
 
     #[tokio::test]

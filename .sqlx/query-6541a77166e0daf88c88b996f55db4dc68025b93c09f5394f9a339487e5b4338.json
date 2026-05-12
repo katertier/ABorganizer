@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT locale FROM ai_cache WHERE book_id = ? AND cache_type = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "locale",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "6541a77166e0daf88c88b996f55db4dc68025b93c09f5394f9a339487e5b4338"
+}

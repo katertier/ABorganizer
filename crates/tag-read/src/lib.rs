@@ -24,8 +24,8 @@
 use async_trait::async_trait;
 
 use ab_core::tunables::TagReadTunables;
-use ab_core::{BookId, Error, Result};
-use ab_pipeline::{Stage, StageContext, StageOutcome};
+use ab_core::{BookId, Error, Field, Result};
+use ab_pipeline::{Stage, StageContext, StageId, StageOutcome};
 
 /// Confidence written to `book_field_provenance` for tag-derived values.
 ///
@@ -37,6 +37,11 @@ pub const TAG_CONFIDENCE: f64 = 0.7;
 
 /// Provenance `source` string for values this stage writes.
 pub const PROVENANCE_SOURCE: &str = "tag_file";
+
+/// Typed identifier for this stage. Imported by dependents in
+/// their `Stage::requires()` impls so a rename here surfaces
+/// at compile time everywhere it's referenced.
+pub const STAGE_ID: StageId = StageId::new("tag-read");
 
 /// Stage that probes book files with lofty.
 pub struct TagReadStage {
@@ -59,10 +64,10 @@ impl Default for TagReadStage {
 #[async_trait]
 impl Stage for TagReadStage {
     fn name(&self) -> &'static str {
-        "tag-read"
+        STAGE_ID.as_str()
     }
 
-    fn requires(&self) -> &'static [&'static str] {
+    fn requires(&self) -> &'static [StageId] {
         &[]
     }
 
@@ -128,12 +133,20 @@ async fn process_one_file(
 
     if tunables.write_provenance {
         for candidate in &probe.candidates {
-            if let Err(e) =
-                write_provenance(library, book_id, candidate.field, &candidate.value).await
-            {
+            // Series gets a dedicated candidate table
+            // (`book_series_candidate`) because the shape needs
+            // series_asin + position + is_primary alongside the
+            // name — see ADR-0017 (slice C5.6). Every other
+            // Field variant goes through the
+            // `book_field_provenance` scalar path.
+            let result = match candidate.field {
+                Field::Series => write_series_candidate(library, book_id, &candidate.value).await,
+                _ => write_provenance(library, book_id, candidate.field, &candidate.value).await,
+            };
+            if let Err(e) = result {
                 tracing::warn!(
                     book = %book_id,
-                    field = candidate.field,
+                    field = %candidate.field,
                     error = %e,
                     "tag-read.provenance_write_failed"
                 );
@@ -163,7 +176,7 @@ struct AudioProperties {
 /// Single tag-derived field candidate.
 #[derive(Debug, Clone)]
 struct TagCandidate {
-    field: &'static str,
+    field: Field,
     value: String,
 }
 
@@ -212,13 +225,13 @@ fn tag_candidates_of(tagged: &lofty::file::TaggedFile) -> Vec<TagCandidate> {
 
     let mut out = Vec::with_capacity(8);
     if let Some(title) = tag.title() {
-        push_candidate(&mut out, "title", &title);
+        push_candidate(&mut out, Field::Title, &title);
     }
     if let Some(artist) = tag.artist() {
-        push_candidate(&mut out, "author", &artist);
+        push_candidate(&mut out, Field::Author, &artist);
     }
     if let Some(album) = tag.album() {
-        push_candidate(&mut out, "series", &album);
+        push_candidate(&mut out, Field::Series, &album);
     }
     // Lofty 0.24: `get_string` takes `ItemKey` by value; the
     // catch-all `ItemKey::Unknown(String)` variant was removed.
@@ -227,21 +240,53 @@ fn tag_candidates_of(tagged: &lofty::file::TaggedFile) -> Vec<TagCandidate> {
     // we keep it for the next slice. For slice 1B, the typed accessors
     // cover the common fields.
     if let Some(language) = tag.get_string(ItemKey::Language) {
-        push_candidate(&mut out, "language", language);
+        // Normalise via the central language-code table so this
+        // candidate is comparable to Audnexus / Audible / NL
+        // detector outputs (otherwise tag-read might write
+        // "eng", Audnexus writes "English", and consensus
+        // treats them as different values).
+        if let Some(canonical) = ab_core::language_code::normalize(language) {
+            push_candidate(&mut out, Field::Language, &canonical);
+        } else {
+            tracing::warn!(
+                raw = %language,
+                "tag_read.language.unparseable"
+            );
+        }
+    }
+    if let Some(genre) = tag.get_string(ItemKey::Genre) {
+        // Same normalize-on-write pattern as language: route
+        // through the central `genre_code` table so tag-read
+        // ("Sci-Fi"), Audnexus ("Science Fiction"), and any
+        // future source converge on the canonical slug
+        // ("science-fiction"). Multi-value genre tags split on
+        // common separators (`,` / `;` / `/`) — MP4 / ID3
+        // sometimes pack two genres into one string.
+        for raw in split_multi_value(genre) {
+            let raw = raw.trim();
+            if raw.is_empty() {
+                continue;
+            }
+            if let Some(canonical) = ab_core::genre_code::normalize(raw) {
+                push_candidate(&mut out, Field::Genre, &canonical);
+            } else {
+                tracing::warn!(raw = %raw, "tag_read.genre.unparseable");
+            }
+        }
     }
     if let Some(publisher) = tag.get_string(ItemKey::Publisher) {
-        push_candidate(&mut out, "publisher", publisher);
+        push_candidate(&mut out, Field::Publisher, publisher);
     }
     if let Some(asin) = tag.get_string(ItemKey::CatalogNumber) {
-        push_candidate(&mut out, "asin", asin);
+        push_candidate(&mut out, Field::Asin, asin);
     }
     if let Some(isbn) = tag.get_string(ItemKey::Isrc) {
-        push_candidate(&mut out, "isbn", isbn);
+        push_candidate(&mut out, Field::Isbn, isbn);
     }
     out
 }
 
-fn push_candidate(out: &mut Vec<TagCandidate>, field: &'static str, value: &str) {
+fn push_candidate(out: &mut Vec<TagCandidate>, field: Field, value: &str) {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return;
@@ -250,6 +295,18 @@ fn push_candidate(out: &mut Vec<TagCandidate>, field: &'static str, value: &str)
         field,
         value: trimmed.to_owned(),
     });
+}
+
+/// Split a multi-value tag string on common audiobook
+/// separators. MP4 / ID3 sometimes pack genre lists into one
+/// `;`- or `/`- or `,`-separated string; some encoders use the
+/// `0`-byte separator the spec permits, but lofty returns those
+/// pre-split. We handle the in-string case.
+///
+/// Returns an iterator of substrings (not trimmed — caller
+/// trims).
+fn split_multi_value(value: &str) -> impl Iterator<Item = &str> {
+    value.split([';', '/', ',', '|'])
 }
 
 async fn update_book_file_properties(
@@ -276,19 +333,56 @@ async fn update_book_file_properties(
     Ok(())
 }
 
+/// Write a series candidate row sourced from the audio file's
+/// album tag. Tag-read can't supply a `series_asin` (the album
+/// tag is name-only) or a numeric `position` (the album tag is
+/// just a string); identity-resolve fills in the rest via
+/// case-insensitive name match against `series` (and any
+/// `series.audible_id` if a higher-confidence source like
+/// Audnexus seeded the row).
+///
+/// `is_primary` defaults to `1` — the album tag is conventionally
+/// the book's primary series. Future sources (filename heuristics)
+/// might write `0`.
+async fn write_series_candidate(
+    library: &ab_db::LibraryDb,
+    book_id: BookId,
+    series_name: &str,
+) -> Result<()> {
+    let id = book_id.0;
+    let name = series_name.trim();
+    if name.is_empty() {
+        return Ok(());
+    }
+    sqlx::query!(
+        "INSERT INTO book_series_candidate \
+         (book_id, source, series_name, series_asin, position, is_primary, confidence) \
+         VALUES (?, ?, ?, NULL, NULL, 1, ?)",
+        id,
+        PROVENANCE_SOURCE,
+        name,
+        TAG_CONFIDENCE,
+    )
+    .execute(library.pool())
+    .await
+    .map_err(|e| Error::Database(format!("insert series candidate: {e}")))?;
+    Ok(())
+}
+
 async fn write_provenance(
     library: &ab_db::LibraryDb,
     book_id: BookId,
-    field: &str,
+    field: Field,
     value: &str,
 ) -> Result<()> {
     let id = book_id.0;
+    let field_str = field.as_str();
     sqlx::query!(
         "INSERT INTO book_field_provenance \
          (book_id, field, value, source, confidence, is_winner) \
          VALUES (?, ?, ?, ?, ?, 0)",
         id,
-        field,
+        field_str,
         value,
         PROVENANCE_SOURCE,
         TAG_CONFIDENCE,

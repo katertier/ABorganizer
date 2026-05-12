@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT p.locale, p.status, p.last_error, (SELECT COUNT(*) FROM book_locale_blocks b WHERE b.locale = p.locale) AS \"blocked_book_count!\" FROM pending_speech_installs p WHERE p.status IN ('pending', 'installing', 'failed') ORDER BY p.status, p.queued_at",
+  "describe": {
+    "columns": [
+      {
+        "name": "locale",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "status",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "last_error",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "blocked_book_count!",
+        "ordinal": 3,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "1bdedad6cb9578b098a6c0d8eb1ef3123da229b37ab14225f4f04c941ea6f62f"
+}

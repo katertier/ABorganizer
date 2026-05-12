@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT extractor_version, locale FROM ai_cache WHERE book_id = ? AND cache_type = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "extractor_version",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "locale",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "c5b35498c2d236a8339ae0284a7426805fe4c47cd083e1c319e92d47294df67c"
+}

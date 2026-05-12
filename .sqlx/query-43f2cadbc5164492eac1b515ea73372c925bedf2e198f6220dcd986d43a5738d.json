@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT genre_id AS \"genre_id!\" FROM genres WHERE canonical_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "genre_id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "43f2cadbc5164492eac1b515ea73372c925bedf2e198f6220dcd986d43a5738d"
+}

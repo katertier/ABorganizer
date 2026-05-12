@@ -7,7 +7,10 @@ members = [
     "crates/fingerprint",
     "crates/audiologo",
     "crates/catalog",
+    "crates/speech",
     "crates/transcript",
+    "crates/foundation-models",
+    "crates/llm-extractors",
     "crates/audio",
     "crates/api",
     "crates/shelf",
@@ -126,7 +129,10 @@ ab-pipeline    = { path = "crates/pipeline" }
 ab-fingerprint = { path = "crates/fingerprint" }
 ab-audiologo   = { path = "crates/audiologo" }
 ab-catalog     = { path = "crates/catalog" }
+ab-speech      = { path = "crates/speech" }
 ab-transcript  = { path = "crates/transcript" }
+ab-foundation-models = { path = "crates/foundation-models" }
+ab-llm-extractors = { path = "crates/llm-extractors" }
 ab-audio       = { path = "crates/audio" }
 ab-api         = { path = "crates/api" }
 ab-shelf       = { path = "crates/shelf" }

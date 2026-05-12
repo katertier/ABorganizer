@@ -29,8 +29,8 @@
 use async_trait::async_trait;
 
 use ab_core::tunables::NetworkTunables;
-use ab_core::{BookId, Error, Result};
-use ab_pipeline::{Stage, StageContext, StageOutcome};
+use ab_core::{BookId, Error, Field, Result};
+use ab_pipeline::{Stage, StageContext, StageId, StageOutcome};
 
 use crate::AudibleClient;
 
@@ -60,16 +60,20 @@ impl AudibleSearchStage {
     }
 }
 
+/// Typed identifier for this stage. Imported by dependents
+/// in their `Stage::requires()` impls.
+pub const STAGE_ID: StageId = StageId::new("audible-search");
+
 #[async_trait]
 impl Stage for AudibleSearchStage {
     fn name(&self) -> &'static str {
-        "audible-search"
+        STAGE_ID.as_str()
     }
 
-    fn requires(&self) -> &'static [&'static str] {
+    fn requires(&self) -> &'static [StageId] {
         // tag-read writes title+author candidates. Without those we
         // can't even form a search query.
-        &["tag-read"]
+        &[ab_tag_read::STAGE_ID]
     }
 
     async fn run(&self, ctx: &StageContext, book_id: BookId) -> Result<StageOutcome> {
@@ -88,14 +92,14 @@ impl Stage for AudibleSearchStage {
             return Ok(StageOutcome::Skipped);
         }
 
-        let Some(title) = fetch_text_candidate(&ctx.library, book_id, "title").await? else {
+        let Some(title) = fetch_text_candidate(&ctx.library, book_id, Field::Title).await? else {
             // No title to search on. The book row's filename-derived
             // title is intentionally NOT used here: it tends to be
             // noisy (sample rate, narrator initials, "(Unabridged)"
             // suffixes) and produces poor matches.
             return Ok(StageOutcome::Skipped);
         };
-        let author = fetch_text_candidate(&ctx.library, book_id, "author")
+        let author = fetch_text_candidate(&ctx.library, book_id, Field::Author)
             .await?
             .unwrap_or_default();
 
@@ -137,10 +141,12 @@ impl Stage for AudibleSearchStage {
 /// supplied one.
 async fn has_asin_candidate(library: &ab_db::LibraryDb, book_id: BookId) -> Result<bool> {
     let id = book_id.0;
+    let asin_field = Field::Asin.as_str();
     let row = sqlx::query!(
         "SELECT 1 AS hit FROM book_field_provenance \
-         WHERE book_id = ? AND field = 'asin' AND value IS NOT NULL LIMIT 1",
+         WHERE book_id = ? AND field = ? AND value IS NOT NULL LIMIT 1",
         id,
+        asin_field,
     )
     .fetch_optional(library.pool())
     .await
@@ -152,15 +158,16 @@ async fn has_asin_candidate(library: &ab_db::LibraryDb, book_id: BookId) -> Resu
 async fn fetch_text_candidate(
     library: &ab_db::LibraryDb,
     book_id: BookId,
-    field: &str,
+    field: Field,
 ) -> Result<Option<String>> {
     let id = book_id.0;
+    let field_str = field.as_str();
     let row = sqlx::query!(
         "SELECT value FROM book_field_provenance \
          WHERE book_id = ? AND field = ? AND value IS NOT NULL \
          ORDER BY confidence DESC, recorded_at DESC LIMIT 1",
         id,
-        field,
+        field_str,
     )
     .fetch_optional(library.pool())
     .await
@@ -175,11 +182,13 @@ async fn write_asin_candidate(
     asin: &str,
 ) -> Result<()> {
     let id = book_id.0;
+    let asin_field = Field::Asin.as_str();
     sqlx::query!(
         "INSERT INTO book_field_provenance \
          (book_id, field, value, source, confidence, is_winner) \
-         VALUES (?, 'asin', ?, ?, ?, 0)",
+         VALUES (?, ?, ?, ?, ?, 0)",
         id,
+        asin_field,
         asin,
         PROVENANCE_SOURCE,
         AUDIBLE_SEARCH_CONFIDENCE,
@@ -223,7 +232,7 @@ mod tests {
         let client = AudibleClient::new(&HttpClientTunables::default());
         let stage = AudibleSearchStage::new(client, &NetworkTunables::default());
         assert_eq!(stage.name(), "audible-search");
-        assert_eq!(stage.requires(), &["tag-read"]);
+        assert_eq!(stage.requires(), &[ab_tag_read::STAGE_ID]);
     }
 
     #[tokio::test]

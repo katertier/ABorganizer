@@ -55,6 +55,24 @@ pub struct Tunables {
     /// Tag presentation + export (genre `@`, DNA `#`, spoiler `!`
     /// prefix conventions and how they're surfaced to readers).
     pub tags: TagsTunables,
+
+    /// Language detection (NLLanguageRecognizer) — pre- and
+    /// post-transcribe gates.
+    pub language: LanguageTunables,
+
+    /// Head/tail transcribe stage (`SpeechAnalyzer` window sizes,
+    /// `extractor_version` stamp).
+    pub transcribe: TranscribeTunables,
+
+    /// Apple Intelligence Foundation Models — token budgets +
+    /// `extractor_version` stamp for the LLM-driven extractor stages
+    /// (DNA tags, spoiler-free summary, story arc, characters).
+    pub llm: LlmTunables,
+
+    /// Library UI display locale (language names, genre
+    /// translations, date / number formats). Distinct from any
+    /// per-book language.
+    pub library_display: LibraryDisplayTunables,
 }
 
 impl Default for Tunables {
@@ -72,6 +90,10 @@ impl Default for Tunables {
             scheduler: SchedulerTunables::default(),
             tag_read: TagReadTunables::default(),
             tags: TagsTunables::default(),
+            language: LanguageTunables::default(),
+            transcribe: TranscribeTunables::default(),
+            llm: LlmTunables::default(),
+            library_display: LibraryDisplayTunables::default(),
         }
     }
 }
@@ -395,6 +417,243 @@ impl Default for TagsTunables {
         Self {
             show_spoiler_tags: false,
             export_tag_prefix: true,
+        }
+    }
+}
+
+/// Library-wide locale used for UI display strings.
+///
+/// Covers language names, genre translations (future slice),
+/// date / number formatting. Stored as BCP-47 primary subtag
+/// (e.g. `"en"`, `"de"`); not region-aware in v0. Independent
+/// of any per-book language.
+///
+/// Where it's read:
+///
+/// - `language_code::display_name` will eventually use it to
+///   localise output (v0 always returns English names).
+/// - The future genre-translation slice will key its lookup
+///   table on this value.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LibraryDisplayTunables {
+    /// BCP-47 primary subtag for the library UI language.
+    /// Default `"en"` — most ABorganizer adopters are
+    /// English-speaking. Override in `config.toml` for a German
+    /// / French / etc. library.
+    pub library_locale: String,
+}
+
+impl Default for LibraryDisplayTunables {
+    fn default() -> Self {
+        Self {
+            library_locale: "en".into(),
+        }
+    }
+}
+
+/// Language detection knobs (`NLLanguageRecognizer` via Swift FFI).
+///
+/// Two call paths:
+///
+/// - **Pre-transcribe**: feed concatenated tag text to pick the
+///   `SpeechTranscriber` locale. Doesn't need a skip; tag text
+///   has no jingles.
+/// - **Post-transcribe validation**: feed transcript segments
+///   past the publisher-jingle window. The skip matters here —
+///   Audible + most publishers run an English house jingle in
+///   the first ~30 s regardless of book language, which biases
+///   short non-English samples.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LanguageTunables {
+    /// Drop transcript segments ending before this offset (ms)
+    /// when running post-transcribe language detection. Captures
+    /// the Audible house jingle (~6 s) plus typical publisher
+    /// branding (15–30 s). 30 000 ms is the conservative default
+    /// that covers both. Pre-transcribe detection (tag-text)
+    /// ignores this.
+    pub post_transcribe_skip_ms: u64,
+    /// Number of alternatives to ask `NLLanguageRecognizer` for
+    /// beyond the dominant hit. Stored alongside the chosen
+    /// language so downstream extractors can see how close the
+    /// runner-up was (low margin → less trust in the locale).
+    pub max_alternatives: usize,
+    /// Minimum confidence on the dominant hypothesis before we
+    /// commit to a detected locale. Below this, we fall back to
+    /// the default locale (`default_locale`).
+    pub min_confidence: f64,
+    /// Locale used when detection is inconclusive or unavailable
+    /// (no tag text, framework error, below-threshold confidence).
+    /// BCP-47.
+    pub default_locale: String,
+    /// Minimum input length (chars) before we even attempt
+    /// detection. `NLLanguageRecognizer` is unreliable on <16
+    /// chars; below this we skip and fall back to default.
+    pub min_text_chars: usize,
+}
+
+impl Default for LanguageTunables {
+    fn default() -> Self {
+        Self {
+            // 30 s — Audible jingle ~6 s, publisher branding can
+            // push to 20–25 s on some imprints; 30 is the cushion.
+            post_transcribe_skip_ms: 30_000,
+            max_alternatives: 3,
+            // 0.65 is where NLLanguageRecognizer's separation
+            // between top-2 hypotheses tends to settle into
+            // "actually confident, not coin-flip." Verified on
+            // empirical ABtagger samples — see ROADMAP "Language
+            // detection thresholds."
+            min_confidence: 0.65,
+            default_locale: "en-US".into(),
+            min_text_chars: 16,
+        }
+    }
+}
+
+/// Head/tail transcribe stage knobs.
+///
+/// The stage transcribes two windows per book: `[0, head_secs)`
+/// for downstream extractors (audiologo, language, title/author
+/// confirm, DNA, summary) and `[duration - tail_secs, duration)`
+/// for outro audiologo + last-sentence boundary work. Results
+/// land in `ai_cache` keyed by `(book_id, cache_type)` with
+/// `cache_type` ∈ {`transcript_head`, `transcript_tail`} and
+/// the `extractor_version` stamp below.
+///
+/// Why store `extractor_version`: when Apple ships a new
+/// `SpeechAnalyzer` engine, bump this and the stage re-runs
+/// (the cached row is stale). Derived features that DON'T need
+/// the new engine (e.g. re-running language detection with a
+/// tweaked tunable) re-read the same cached transcript without
+/// re-transcribing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TranscribeTunables {
+    /// Length of the head transcription window in seconds.
+    /// 6 minutes is the sweet spot — covers the Audible jingle
+    /// (~6 s), publisher branding (~30 s), author/title intro
+    /// (typically <2 min), and the start of the prologue/first
+    /// chapter. Past 6 min, marginal extractor value drops.
+    pub head_secs: f64,
+    /// Length of the tail transcription window in seconds.
+    /// 30 s captures the outro publisher jingle + closing
+    /// credits ("This has been an Audible production…")
+    /// without paying for non-jingle book content.
+    pub tail_secs: f64,
+    /// Engine identifier written to `ai_cache.extractor_version`.
+    /// Bump to force re-transcription across the library when
+    /// the Speech framework improves materially. The string is
+    /// opaque to the engine — it's a content-addressable cache
+    /// key on our side. Convention: `speech-<macOS>-v<bump>`.
+    pub extractor_version: String,
+    /// Skip the stage when the active file is shorter than this
+    /// (seconds). Below ~30 s neither head nor tail are useful;
+    /// the file is probably a sample / preview / corrupt entry.
+    pub min_duration_secs: f64,
+    /// Idle-priority Speech-model installer wake interval
+    /// (seconds). The daemon spawns one tokio task at startup
+    /// that wakes every `idle_install_check_secs` to drain
+    /// `pending_speech_installs`. 1800 s (30 min) is the
+    /// default — fast enough that a freshly-imported book in a
+    /// new locale gets transcribed within an hour; slow enough
+    /// that an empty queue costs negligible CPU.
+    pub idle_install_check_secs: u64,
+    /// Positions through the book at which the
+    /// `transcribe-samples` stage takes short windows for
+    /// language confirmation + fast DNA-tag corpus. Fractions
+    /// in `(0.0, 1.0)`. Default `[0.25, 0.50, 0.75]` — deep
+    /// enough that publisher jingles (0%) and outro material
+    /// (≥95%) are clear; spread across the book so a single
+    /// chapter-boundary intro can't bias all three samples.
+    pub sample_positions: Vec<f64>,
+    /// Length of each sample (seconds) the `transcribe-samples`
+    /// stage transcribes. 60 s is plenty for
+    /// `NLLanguageRecognizer` and a representative DNA-tag
+    /// corpus. Total transcribed audio per book =
+    /// `sample_positions.len() * sample_secs`.
+    pub sample_secs: f64,
+}
+
+impl Default for TranscribeTunables {
+    fn default() -> Self {
+        Self {
+            head_secs: 360.0,
+            tail_secs: 30.0,
+            extractor_version: "speech-26.0-v1".into(),
+            min_duration_secs: 30.0,
+            idle_install_check_secs: 1_800,
+            sample_positions: vec![0.25, 0.50, 0.75],
+            sample_secs: 60.0,
+        }
+    }
+}
+
+/// Token budgets + model version stamp for the LLM-driven
+/// extractor stages backed by Apple Intelligence's Foundation
+/// Models framework.
+///
+/// `extractor_version` is the cache-invalidation key written to
+/// `ai_cache.extractor_version` for every row produced by an LLM
+/// stage. Bump it (e.g. `fm-26.0-v1` → `fm-26.0-v2`) to force
+/// every book re-extract — useful after a prompt rewrite, after
+/// Apple ships a major Foundation Models update, or after a
+/// schema change that breaks the cached JSON shape.
+///
+/// The per-stage `*_max_tokens` knobs are soft budgets passed
+/// straight to `GenerationOptions.maximumResponseTokens`. The
+/// framework treats them as upper bounds; EOS can land earlier.
+/// Defaults are tuned for typical first-5-minute transcript
+/// excerpts (DNA tags + summary + arc + characters all fit
+/// comfortably).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LlmTunables {
+    /// Version stamp written to `ai_cache.extractor_version` for
+    /// every LLM-produced row. Opaque to the runtime — it's a
+    /// cache key on our side. Convention: `fm-<macOS>-v<bump>`.
+    pub extractor_version: String,
+    /// Token budget for the DNA-tag extractor (`#`-prefixed
+    /// safe-to-display tags + `!`-prefixed spoiler tags).
+    /// 800 tokens is plenty for a JSON array of 5-10 tags each
+    /// 1-3 words long; bump if you raise the per-list caps.
+    pub dna_max_tokens: usize,
+    /// Maximum `#`-prefixed DNA tags per book. The prompt
+    /// instructs the model to stop at this count; downstream
+    /// also truncates defensively in case the model overruns.
+    /// 8 is the sweet spot — enough for "books like this"
+    /// similarity, few enough to scan visually.
+    pub dna_max_tags: usize,
+    /// Maximum `!`-prefixed spoiler tags. Smaller cap by design
+    /// — most books have one or two real spoilers; the model
+    /// over-eagerly marks anything plot-bearing as a spoiler if
+    /// given a generous budget.
+    pub dna_max_spoiler_tags: usize,
+    /// Token budget for the spoiler-free summary extractor.
+    /// 600 tokens lands a 3-5 paragraph summary in any of the
+    /// five UI locales without truncation.
+    pub summary_max_tokens: usize,
+    /// Token budget for the story-arc extractor. JSON array of
+    /// `{step, label, summary}` rows — 1200 tokens covers a
+    /// typical 5-7 act arc with 1-2 sentence summaries each.
+    pub arc_max_tokens: usize,
+    /// Token budget for the character extractor. JSON array of
+    /// `{name, aliases, role, description}` rows — 1500 tokens
+    /// covers up to ~15 characters with brief descriptions.
+    pub characters_max_tokens: usize,
+}
+
+impl Default for LlmTunables {
+    fn default() -> Self {
+        Self {
+            extractor_version: "fm-26.0-v1".into(),
+            dna_max_tokens: 800,
+            dna_max_tags: 8,
+            dna_max_spoiler_tags: 4,
+            summary_max_tokens: 600,
+            arc_max_tokens: 1_200,
+            characters_max_tokens: 1_500,
         }
     }
 }

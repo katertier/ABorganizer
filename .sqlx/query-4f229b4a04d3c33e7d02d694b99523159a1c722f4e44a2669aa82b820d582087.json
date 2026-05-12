@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT value AS \"locale!\",\n                  COUNT(DISTINCT book_id) AS \"n!\"\n           FROM book_field_provenance\n           WHERE field = 'language' AND value IS NOT NULL\n           GROUP BY value\n           ORDER BY value",
+  "describe": {
+    "columns": [
+      {
+        "name": "locale!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "n!",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "4f229b4a04d3c33e7d02d694b99523159a1c722f4e44a2669aa82b820d582087"
+}

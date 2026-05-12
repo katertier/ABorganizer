@@ -37,7 +37,7 @@
 use async_trait::async_trait;
 
 use ab_core::{BookId, Error, Result};
-use ab_pipeline::{Stage, StageContext, StageOutcome};
+use ab_pipeline::{Stage, StageContext, StageId, StageOutcome};
 
 /// Provenance source tag for chapters this stage writes.
 pub const CHAPTER_SOURCE: &str = "embedded";
@@ -60,18 +60,21 @@ impl Default for EmbeddedChaptersStage {
     }
 }
 
+/// Typed identifier for this stage.
+pub const STAGE_ID: StageId = StageId::new("embedded-chapters");
+
 #[async_trait]
 impl Stage for EmbeddedChaptersStage {
     fn name(&self) -> &'static str {
-        "embedded-chapters"
+        STAGE_ID.as_str()
     }
 
-    fn requires(&self) -> &'static [&'static str] {
+    fn requires(&self) -> &'static [StageId] {
         // tag-read populates `book_files.duration_ms`, which we
         // need to offset multi-file books' chapter positions and
         // to synthesize "Part N" entries for files with no
         // embedded chapters.
-        &["tag-read"]
+        &[ab_tag_read::STAGE_ID]
     }
 
     async fn run(&self, ctx: &StageContext, book_id: BookId) -> Result<StageOutcome> {

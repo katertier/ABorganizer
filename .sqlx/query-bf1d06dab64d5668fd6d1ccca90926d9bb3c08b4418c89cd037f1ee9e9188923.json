@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT book_id FROM book_locale_blocks WHERE locale = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "book_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "bf1d06dab64d5668fd6d1ccca90926d9bb3c08b4418c89cd037f1ee9e9188923"
+}

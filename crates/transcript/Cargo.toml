@@ -6,20 +6,30 @@ rust-version = { workspace = true }
 license      = { workspace = true }
 authors      = { workspace = true }
 repository   = { workspace = true }
-description  = "Modular extractors over a transcript: title/author candidates, publisher detection, narrator detection, language detection, author confirmation."
-build        = "build.rs"
+description  = "Pipeline stages that orchestrate transcription + tag-text extractors. Sits on top of ab-speech (the Apple Speech / NaturalLanguage bridge); contains the head/tail / samples / full transcribe stages, language-normalize, the extractor framework, and the idle-priority Speech-model installer loop."
 
 [lints]
 workspace = true
 
 [dependencies]
-ab-core    = { workspace = true }
-regex      = { workspace = true }
-serde      = { workspace = true }
-serde_json = { workspace = true }
-thiserror  = { workspace = true }
-tokio      = { workspace = true }
-tracing    = { workspace = true }
+ab-core     = { workspace = true }
+ab-db       = { workspace = true }
+ab-pipeline = { workspace = true }
+ab-speech   = { workspace = true }
+# For Stage::requires() typed dependency on tag-read +
+# consensus (description-lang waits for consensus to pick
+# the description winner).
+ab-tag-read = { workspace = true }
+ab-catalog  = { workspace = true }
+async-trait = { workspace = true }
+regex       = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+sqlx        = { workspace = true }
+thiserror   = { workspace = true }
+tokio       = { workspace = true }
+tokio-util  = { workspace = true }
+tracing     = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

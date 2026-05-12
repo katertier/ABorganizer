@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO book_series (book_id, series_id, position, is_primary) VALUES (?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "5e3bee8f84b5626828a6305cdeebdbba2e6addee8c741110c25a6521f8861262"
+}

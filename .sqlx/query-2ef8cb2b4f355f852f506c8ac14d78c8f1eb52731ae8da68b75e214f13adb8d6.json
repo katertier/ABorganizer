@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO book_genre (book_id, genre_id, confidence) VALUES (?, ?, ?) ON CONFLICT(book_id, genre_id) DO UPDATE SET confidence = excluded.confidence",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "2ef8cb2b4f355f852f506c8ac14d78c8f1eb52731ae8da68b75e214f13adb8d6"
+}

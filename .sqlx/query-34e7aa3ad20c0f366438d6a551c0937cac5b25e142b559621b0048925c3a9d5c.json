@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT field, value FROM book_field_provenance WHERE book_id = ? AND value IS NOT NULL AND value <> '' AND field IN ('title', 'author', 'subtitle', 'description', 'narrator')",
+  "describe": {
+    "columns": [
+      {
+        "name": "field",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "value",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "34e7aa3ad20c0f366438d6a551c0937cac5b25e142b559621b0048925c3a9d5c"
+}

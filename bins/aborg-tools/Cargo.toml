@@ -27,17 +27,24 @@ path = "src/bin/schema_snapshot.rs"
 name = "webui-dev"
 path = "src/bin/webui_dev.rs"
 
+[[bin]]
+name = "transcribe-probe"
+path = "src/bin/transcribe_probe.rs"
+
 [dependencies]
 ab-core        = { workspace = true }
 ab-db          = { workspace = true }
 ab-fingerprint = { workspace = true }
 ab-audiologo   = { workspace = true }
+ab-transcript  = { workspace = true }
+ab-speech      = { workspace = true }
 ab-webui-config = { workspace = true }
 ab-webui-player = { workspace = true }
 ab-api         = { workspace = true }
 anyhow         = { workspace = true }
 clap           = { workspace = true }
 axum           = { workspace = true }
+serde_json     = { workspace = true }
 tokio          = { workspace = true }
 tracing        = { workspace = true }
 tracing-subscriber = { workspace = true }

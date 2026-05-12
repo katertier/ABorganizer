@@ -1,0 +1,24 @@
+[package]
+name         = "ab-speech"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+authors      = { workspace = true }
+repository   = { workspace = true }
+description  = "Apple Speech + Natural Language framework bridge: on-device transcription (SpeechAnalyzer / SpeechTranscriber), per-locale model install state, NLLanguageRecognizer language detection. Typed Rust API over the Swift FFI; no database / pipeline dependencies."
+build        = "build.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+ab-core    = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+thiserror  = { workspace = true }
+tokio      = { workspace = true }
+tracing    = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

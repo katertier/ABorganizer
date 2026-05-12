@@ -1,0 +1,27 @@
+[package]
+name         = "ab-llm-extractors"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+authors      = { workspace = true }
+repository   = { workspace = true }
+description  = "Pipeline stages that ask the on-device LLM about audiobook content: DNA tags, spoiler-free summaries, story arcs, characters. Sits on top of ab-foundation-models (the Apple Intelligence bridge); each stage reads the cached transcript, builds a prompt, parses the JSON response, and promotes results into the library DB."
+
+[lints]
+workspace = true
+
+[dependencies]
+ab-core              = { workspace = true }
+ab-db                = { workspace = true }
+ab-foundation-models = { workspace = true }
+ab-pipeline          = { workspace = true }
+# For Stage::requires() typed dependency on transcribe-full.
+ab-transcript        = { workspace = true }
+async-trait          = { workspace = true }
+serde                = { workspace = true }
+serde_json           = { workspace = true }
+sqlx                 = { workspace = true }
+thiserror            = { workspace = true }
+tokio                = { workspace = true }
+tracing              = { workspace = true }

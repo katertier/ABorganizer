@@ -22,7 +22,7 @@ use async_trait::async_trait;
 
 use ab_core::tunables::NetworkTunables;
 use ab_core::{BookId, Error, Result};
-use ab_pipeline::{Stage, StageContext, StageOutcome};
+use ab_pipeline::{Stage, StageContext, StageId, StageOutcome};
 
 use crate::AudnexusClient;
 
@@ -54,17 +54,20 @@ impl AudnexusChaptersStage {
     }
 }
 
+/// Typed identifier for this stage.
+pub const STAGE_ID: StageId = StageId::new("audnexus-chapters");
+
 #[async_trait]
 impl Stage for AudnexusChaptersStage {
     fn name(&self) -> &'static str {
-        "audnexus-chapters"
+        STAGE_ID.as_str()
     }
 
-    fn requires(&self) -> &'static [&'static str] {
+    fn requires(&self) -> &'static [StageId] {
         // audnexus-enrich populates `books.asin` (the join key
         // this stage uses). Without it we'd have no ASIN to look
         // up against the chapters endpoint.
-        &["audnexus-enrich"]
+        &[crate::enrich::STAGE_ID]
     }
 
     async fn run(&self, ctx: &StageContext, book_id: BookId) -> Result<StageOutcome> {
@@ -251,7 +254,7 @@ mod tests {
         let client = AudnexusClient::new(&HttpClientTunables::default());
         let stage = AudnexusChaptersStage::new(client, &NetworkTunables::default());
         assert_eq!(stage.name(), "audnexus-chapters");
-        assert_eq!(stage.requires(), &["audnexus-enrich"]);
+        assert_eq!(stage.requires(), &[crate::enrich::STAGE_ID]);
     }
 
     #[tokio::test]

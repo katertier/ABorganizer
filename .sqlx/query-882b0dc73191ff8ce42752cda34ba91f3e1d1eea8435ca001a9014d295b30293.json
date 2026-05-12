@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT 1 AS hit FROM book_field_provenance WHERE book_id = ? AND field = 'asin' AND value IS NOT NULL LIMIT 1",
+  "query": "SELECT 1 AS hit FROM book_field_provenance WHERE book_id = ? AND field = ? AND value IS NOT NULL LIMIT 1",
   "describe": {
     "columns": [
       {
@@ -10,11 +10,11 @@
       }
     ],
     "parameters": {
-      "Right": 1
+      "Right": 2
     },
     "nullable": [
       false
     ]
   },
-  "hash": "a02c9a0911aeec41090c7f2107cde3c36f67842064ae77ef26e1ebfce5480eba"
+  "hash": "882b0dc73191ff8ce42752cda34ba91f3e1d1eea8435ca001a9014d295b30293"
 }

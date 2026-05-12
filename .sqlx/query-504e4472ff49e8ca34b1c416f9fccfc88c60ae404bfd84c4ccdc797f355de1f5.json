@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT value AS \"v!\"\n                   FROM book_field_provenance\n                   WHERE field = 'language' AND value IS NOT NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "v!",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "504e4472ff49e8ca34b1c416f9fccfc88c60ae404bfd84c4ccdc797f355de1f5"
+}

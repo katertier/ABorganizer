@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE pending_speech_installs SET status = 'pending', last_error = NULL WHERE status = 'failed'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "3ff1b7fcf03c2daf65d75c7cbc7f8b299d1b35e1cae22949aebbd00ef563f33d"
+}

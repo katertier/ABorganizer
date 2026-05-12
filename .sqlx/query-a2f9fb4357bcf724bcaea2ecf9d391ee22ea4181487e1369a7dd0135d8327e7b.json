@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM pending_speech_installs WHERE status = 'installed'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "a2f9fb4357bcf724bcaea2ecf9d391ee22ea4181487e1369a7dd0135d8327e7b"
+}

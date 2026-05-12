@@ -38,8 +38,8 @@
 
 use async_trait::async_trait;
 
-use ab_core::{BookId, Error, Result};
-use ab_pipeline::{Stage, StageContext, StageOutcome};
+use ab_core::{BookId, Error, Field, Result};
+use ab_pipeline::{Stage, StageContext, StageId, StageOutcome};
 
 /// Stage that picks winning candidates per field and updates `books`.
 pub struct ConsensusStage;
@@ -59,53 +59,43 @@ impl Default for ConsensusStage {
     }
 }
 
-/// Fields that consensus knows how to promote directly into the
-/// `books` table. Order is the iteration order at run time. The
-/// `target_column` doubles as the SQL column name; it's safe as
-/// long as we never accept user input here (this list is closed).
-const PROMOTABLE_FIELDS: &[PromotableField] = &[
-    PromotableField {
-        provenance_field: "title",
-        target_column: "title",
-    },
-    PromotableField {
-        provenance_field: "subtitle",
-        target_column: "subtitle",
-    },
-    PromotableField {
-        provenance_field: "description",
-        target_column: "description",
-    },
-    PromotableField {
-        provenance_field: "language",
-        target_column: "language",
-    },
-    PromotableField {
-        provenance_field: "release_date",
-        target_column: "release_date",
-    },
+/// Fields that consensus knows how to promote via direct text
+/// copy. Order is the iteration order at run time. Each entry's
+/// target column comes from `Field::books_column()` — no separate
+/// `target_column` literal here, so the two pieces of information
+/// can't drift (slice C5.2 collapsed the `PromotableField` struct).
+///
+/// `DurationSeconds` is intentionally **not** in this list — it
+/// needs the × 1000 integer transform handled by
+/// `promote_duration`. `Genre` is also intentionally absent — it's
+/// multi-value through the `book_genre` junction, handled by
+/// `promote_genres`. Junction / identity-resolve fields
+/// (`Author`, `Narrator`, `Publisher`, `Series`) return
+/// `Field::books_column() == None` and live in `identity-resolve`.
+const PROMOTABLE_FIELDS: &[Field] = &[
+    Field::Title,
+    Field::Subtitle,
+    Field::Description,
+    Field::Language,
+    Field::ReleaseDate,
 ];
 
-struct PromotableField {
-    /// `book_field_provenance.field` value.
-    provenance_field: &'static str,
-    /// Target column on `books`.
-    target_column: &'static str,
-}
+/// Typed identifier for this stage.
+pub const STAGE_ID: StageId = StageId::new("consensus");
 
 #[async_trait]
 impl Stage for ConsensusStage {
     fn name(&self) -> &'static str {
-        "consensus"
+        STAGE_ID.as_str()
     }
 
-    fn requires(&self) -> &'static [&'static str] {
+    fn requires(&self) -> &'static [StageId] {
         // audnexus-enrich is the highest-confidence source. By
         // requiring it, consensus runs after both tag-read (which
         // audnexus-enrich requires) and audnexus-enrich. Adding
         // more enrichers later: extend this list so consensus
         // waits for them.
-        &["audnexus-enrich"]
+        &[crate::enrich::STAGE_ID]
     }
 
     async fn run(&self, ctx: &StageContext, book_id: BookId) -> Result<StageOutcome> {
@@ -117,12 +107,15 @@ impl Stage for ConsensusStage {
             .map_err(|e| Error::Database(format!("consensus tx begin: {e}")))?;
 
         let mut updates = 0;
-        for field in PROMOTABLE_FIELDS {
+        for &field in PROMOTABLE_FIELDS {
             if promote_text_field(&mut tx, book_id, field).await? {
                 updates += 1;
             }
         }
         if promote_duration(&mut tx, book_id).await? {
+            updates += 1;
+        }
+        if promote_genres(&mut tx, book_id).await? {
             updates += 1;
         }
 
@@ -144,15 +137,33 @@ impl Stage for ConsensusStage {
 }
 
 /// Pick the winning provenance row for `field`, set `is_winner`
-/// flags, and write the value to `books.<target_column>`. Returns
-/// `true` if any change was made.
+/// flags, and write the value to the `books.<col>` column named
+/// by `field.books_column()`. Returns `true` if any change was
+/// made.
+///
+/// Panics on a `Field` whose `books_column()` returns `None` —
+/// the invariant is that `PROMOTABLE_FIELDS` only contains
+/// scalar-direct-copy variants. A non-PROMOTABLE field reaching
+/// this fn is a programmer error.
 async fn promote_text_field(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     book_id: BookId,
-    field: &PromotableField,
+    field: Field,
 ) -> Result<bool> {
     let id = book_id.0;
-    let provenance_field = field.provenance_field;
+    let field_str = field.as_str();
+    let Some(target_column) = field.books_column() else {
+        // Invariant: PROMOTABLE_FIELDS contains only fields whose
+        // `books_column()` returns `Some`. A `None` here is a
+        // programmer error (e.g. someone added `Field::Author`
+        // to the const). Surface it as a stage error so it
+        // can't slip past in production.
+        return Err(Error::stage(
+            STAGE_ID.as_str(),
+            format!("PROMOTABLE_FIELDS contains {field} which has no books_column()"),
+        ));
+    };
+
     let winner = sqlx::query!(
         r#"SELECT provenance_id AS "provenance_id!", value
            FROM book_field_provenance
@@ -160,11 +171,11 @@ async fn promote_text_field(
            ORDER BY confidence DESC, recorded_at DESC
            LIMIT 1"#,
         id,
-        provenance_field,
+        field_str,
     )
     .fetch_optional(&mut **tx)
     .await
-    .map_err(|e| Error::Database(format!("consensus pick {provenance_field}: {e}")))?;
+    .map_err(|e| Error::Database(format!("consensus pick {field}: {e}")))?;
 
     let Some(winner) = winner else {
         return Ok(false);
@@ -184,41 +195,35 @@ async fn promote_text_field(
          SET is_winner = 0 \
          WHERE book_id = ? AND field = ? AND provenance_id != ?",
         id,
-        provenance_field,
+        field_str,
         winner.provenance_id,
     )
     .execute(&mut **tx)
     .await
-    .map_err(|e| Error::Database(format!("consensus clear losers {provenance_field}: {e}")))?;
+    .map_err(|e| Error::Database(format!("consensus clear losers {field}: {e}")))?;
     sqlx::query!(
         "UPDATE book_field_provenance SET is_winner = 1 WHERE provenance_id = ?",
         winner.provenance_id,
     )
     .execute(&mut **tx)
     .await
-    .map_err(|e| Error::Database(format!("consensus set winner {provenance_field}: {e}")))?;
+    .map_err(|e| Error::Database(format!("consensus set winner {field}: {e}")))?;
 
-    // Write to the books column. Column name is a `&'static str` from
-    // PROMOTABLE_FIELDS — never user input — so the format!() here
-    // is safe from injection. (The macros require literal SQL; for
-    // this small fixed dispatch a runtime query is the pragmatic
-    // shape. The closed `PROMOTABLE_FIELDS` list is the implicit
+    // Write to the books column. `target_column` is a
+    // `&'static str` returned by `Field::books_column()` — never
+    // user input — so the `format!()` here is safe from injection.
+    // (The `sqlx::query!` macros require literal SQL; for this
+    // small fixed dispatch a runtime query is the pragmatic
+    // shape. The closed `PROMOTABLE_FIELDS` list × the closed
+    // `Field` enum × `Field::books_column()` is the implicit
     // allowlist.)
-    let sql = format!(
-        "UPDATE books SET {} = ? WHERE book_id = ?",
-        field.target_column
-    );
+    let sql = format!("UPDATE books SET {target_column} = ? WHERE book_id = ?");
     sqlx::query(&sql)
         .bind(&value)
         .bind(id)
         .execute(&mut **tx)
         .await
-        .map_err(|e| {
-            Error::Database(format!(
-                "consensus write books.{}: {e}",
-                field.target_column
-            ))
-        })?;
+        .map_err(|e| Error::Database(format!("consensus write books.{target_column}: {e}")))?;
     Ok(true)
 }
 
@@ -229,13 +234,15 @@ async fn promote_duration(
     book_id: BookId,
 ) -> Result<bool> {
     let id = book_id.0;
+    let field_str = Field::DurationSeconds.as_str();
     let winner = sqlx::query!(
         r#"SELECT provenance_id AS "provenance_id!", value
            FROM book_field_provenance
-           WHERE book_id = ? AND field = 'duration_seconds' AND value IS NOT NULL
+           WHERE book_id = ? AND field = ? AND value IS NOT NULL
            ORDER BY confidence DESC, recorded_at DESC
            LIMIT 1"#,
         id,
+        field_str,
     )
     .fetch_optional(&mut **tx)
     .await
@@ -260,8 +267,9 @@ async fn promote_duration(
     sqlx::query!(
         "UPDATE book_field_provenance \
          SET is_winner = 0 \
-         WHERE book_id = ? AND field = 'duration_seconds' AND provenance_id != ?",
+         WHERE book_id = ? AND field = ? AND provenance_id != ?",
         id,
+        field_str,
         winner.provenance_id,
     )
     .execute(&mut **tx)
@@ -278,6 +286,151 @@ async fn promote_duration(
         .execute(&mut **tx)
         .await
         .map_err(|e| Error::Database(format!("consensus write duration_ms: {e}")))?;
+    Ok(true)
+}
+
+/// Multi-value promotion: every distinct `value` for
+/// `field='genre'` becomes a row in the `book_genre` junction
+/// table. Unlike the scalar promoters above, "winning" here
+/// applies per unique value — the highest-confidence row for
+/// each canonical genre slug gets `is_winner=1`, with that
+/// confidence carried into `book_genre.confidence`.
+///
+/// Side-effect: ensures the `genres` table has a row for each
+/// canonical slug we're inserting (auto-create on first use).
+/// Display name comes from `genre_code::display_name(slug, "en")`
+/// — denormalised English form stored once; the locale-aware
+/// display happens at read time.
+///
+/// Removes `book_genre` rows whose slug no longer has any
+/// provenance candidate (e.g. a misclassified candidate that
+/// got deleted).
+async fn promote_genres(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    book_id: BookId,
+) -> Result<bool> {
+    let id = book_id.0;
+    let genre_field = Field::Genre.as_str();
+    // Distinct genre slugs + their max confidence + winning
+    // provenance_id (the row that supplied the max confidence).
+    // The subquery's `field = ?` repeats the outer bind — sqlite
+    // doesn't allow positional reuse, so the parameter is bound
+    // twice.
+    let rows = sqlx::query!(
+        r#"SELECT value AS "value!",
+                  MAX(confidence) AS "best_confidence!: f64",
+                  (SELECT provenance_id FROM book_field_provenance p2
+                   WHERE p2.book_id = book_field_provenance.book_id
+                     AND p2.field = ?
+                     AND p2.value = book_field_provenance.value
+                   ORDER BY p2.confidence DESC, p2.recorded_at DESC
+                   LIMIT 1) AS "winner_id!"
+           FROM book_field_provenance
+           WHERE book_id = ? AND field = ? AND value IS NOT NULL
+           GROUP BY value"#,
+        genre_field,
+        id,
+        genre_field,
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|e| Error::Database(format!("consensus pick genres: {e}")))?;
+
+    if rows.is_empty() {
+        return Ok(false);
+    }
+
+    // Clear all is_winner flags for genre rows, then set the
+    // winners. Same shape as the scalar promoters; safe order
+    // because all happens in the same tx.
+    sqlx::query!(
+        "UPDATE book_field_provenance SET is_winner = 0 \
+         WHERE book_id = ? AND field = ?",
+        id,
+        genre_field,
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| Error::Database(format!("consensus clear genre losers: {e}")))?;
+
+    let mut current_slugs: Vec<String> = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let slug = &row.value;
+        let confidence = row.best_confidence;
+        let winner_id = row.winner_id;
+        current_slugs.push(slug.clone());
+
+        // Set winner flag.
+        sqlx::query!(
+            "UPDATE book_field_provenance SET is_winner = 1 WHERE provenance_id = ?",
+            winner_id,
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| Error::Database(format!("consensus set genre winner: {e}")))?;
+
+        // Ensure `genres` row exists for this slug. The English
+        // display-name is stored once at first-insert; locale-
+        // aware rendering happens at read time via
+        // `genre_code::display_name(slug, locale)`.
+        let display = ab_core::genre_code::display_name(slug, "en");
+        sqlx::query!(
+            "INSERT OR IGNORE INTO genres (canonical_id, display_name) VALUES (?, ?)",
+            slug,
+            display,
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| Error::Database(format!("consensus upsert genre row: {e}")))?;
+
+        // Resolve the genre_id (separate query — sqlite's
+        // INSERT-OR-IGNORE doesn't return the existing id on
+        // conflict).
+        let genre_row = sqlx::query!(
+            r#"SELECT genre_id AS "genre_id!" FROM genres WHERE canonical_id = ?"#,
+            slug,
+        )
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|e| Error::Database(format!("consensus lookup genre_id: {e}")))?;
+
+        sqlx::query!(
+            "INSERT INTO book_genre (book_id, genre_id, confidence) \
+             VALUES (?, ?, ?) \
+             ON CONFLICT(book_id, genre_id) DO UPDATE SET confidence = excluded.confidence",
+            id,
+            genre_row.genre_id,
+            confidence,
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| Error::Database(format!("consensus upsert book_genre: {e}")))?;
+    }
+
+    // Clean up `book_genre` rows whose slug no longer has any
+    // candidate. Builds a NOT-IN clause from the current slug
+    // list — dynamic SQL, but the slugs themselves come from
+    // the closed `book_field_provenance.value` namespace
+    // (written by normalize() in tag-read / Audnexus) so
+    // injection isn't a concern. Bound parameters anyway for
+    // safety.
+    let placeholders = std::iter::repeat_n("?", current_slugs.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let cleanup_sql = format!(
+        "DELETE FROM book_genre \
+         WHERE book_id = ? AND genre_id NOT IN ( \
+             SELECT genre_id FROM genres WHERE canonical_id IN ({placeholders}) \
+         )"
+    );
+    let mut q = sqlx::query(&cleanup_sql).bind(id);
+    for slug in &current_slugs {
+        q = q.bind(slug);
+    }
+    q.execute(&mut **tx)
+        .await
+        .map_err(|e| Error::Database(format!("consensus cleanup book_genre: {e}")))?;
+
     Ok(true)
 }
 
@@ -313,7 +466,7 @@ mod tests {
     async fn stage_metadata_matches_pipeline_expectations() {
         let stage = ConsensusStage::new();
         assert_eq!(stage.name(), "consensus");
-        assert_eq!(stage.requires(), &["audnexus-enrich"]);
+        assert_eq!(stage.requires(), &[crate::enrich::STAGE_ID]);
     }
 
     #[tokio::test]
