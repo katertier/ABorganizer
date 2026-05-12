@@ -110,6 +110,12 @@ async fn library_scan(
         // language gate + downstream extractors have a
         // transcript by the time the user opens the book.
         ("transcribe-head-tail", ab_pipeline::Priority::Interactive),
+        // Description language detector runs right after
+        // consensus (the description winner is picked there).
+        (
+            "detect-description-lang",
+            ab_pipeline::Priority::Interactive,
+        ),
         // Transcript extractors — cheap pure-text heuristics
         // over the head transcript; runs at Interactive so the
         // user sees its candidates by the time the book opens.

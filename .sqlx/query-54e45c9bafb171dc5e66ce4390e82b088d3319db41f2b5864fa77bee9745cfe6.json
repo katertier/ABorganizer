@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT description, description_lang FROM books WHERE book_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "description",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "description_lang",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "54e45c9bafb171dc5e66ce4390e82b088d3319db41f2b5864fa77bee9745cfe6"
+}

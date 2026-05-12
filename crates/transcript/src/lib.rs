@@ -14,6 +14,7 @@
 //! Add a new extractor: implement [`Extractor`], register it.
 
 pub mod bridge;
+pub mod description_lang_stage;
 pub mod extract_stage;
 pub mod extractors;
 pub mod full_stage;
@@ -22,6 +23,9 @@ pub mod language;
 pub mod samples_stage;
 pub mod stage;
 
+pub use description_lang_stage::{
+    DetectDescriptionLangStage, STAGE_NAME as DETECT_DESCRIPTION_LANG_STAGE,
+};
 pub use extract_stage::{RunExtractorsStage, STAGE_NAME as RUN_EXTRACTORS_STAGE};
 pub use full_stage::{CACHE_TYPE_FULL, STAGE_NAME as TRANSCRIBE_FULL_STAGE, TranscribeFullStage};
 pub use idle_install::run_idle_install_loop;

@@ -111,6 +111,15 @@ fn build_pipeline_stages(tunables: &Tunables) -> Vec<Arc<dyn Stage>> {
             &tunables.transcribe,
             &tunables.language,
         )),
+        // `detect-description-lang` (slice 3G) populates
+        // `books.description_lang` once consensus picks the
+        // description. Cheap pure-text NL detection; the UI
+        // uses it for correct directionality / font rendering
+        // when the description language differs from the
+        // library locale.
+        Arc::new(ab_transcript::DetectDescriptionLangStage::new(
+            &tunables.language,
+        )),
         // `transcribe-samples` (slice 3D.2) transcribes short
         // windows at 25/50/75% of the book at Background
         // priority. Provides the authoritative language signal
