@@ -138,6 +138,17 @@ pub enum BridgeError {
 impl BridgeError {
     /// Map a Swift-side error code to a `BridgeError`. The
     /// numeric values are defined in `swift/aborg_fm.swift`.
+    ///
+    /// Only called from inside the `cfg(aborg_fm_bridge)`-gated
+    /// `ffi` module. On hosts where the bridge isn't built
+    /// (non-macOS, no swiftc, macOS without `FoundationModels` —
+    /// e.g. macos-14 CI), this function has no callers and
+    /// clippy `dead_code` would fire; the `allow` is the
+    /// surgical fix.
+    #[allow(
+        dead_code,
+        reason = "Used only from the cfg(aborg_fm_bridge)-gated ffi module."
+    )]
     fn from_code(code: i32) -> Self {
         match code {
             2 => Self::BridgeUnavailable,
