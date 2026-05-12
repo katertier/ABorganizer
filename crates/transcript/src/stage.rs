@@ -90,16 +90,24 @@ impl Stage for TranscribeHeadTailStage {
     }
 
     async fn run(&self, ctx: &StageContext, book_id: BookId) -> Result<StageOutcome> {
-        let Some(plan) = plan_book(&ctx.library, book_id, &self.transcribe).await? else {
-            return Ok(StageOutcome::Skipped);
-        };
-
-        // Pre-transcribe gate: tag text → locale.
+        // Pre-transcribe gate runs FIRST so the locale it picks
+        // can participate in the cache-freshness check. If the
+        // cached transcript was produced in a different locale
+        // (e.g. tag-read first ran when narrator was empty and
+        // we defaulted to en-US; later enrich filled in the
+        // German narrator and the gate now picks "de"), we want
+        // to re-transcribe — same model_version, different
+        // locale. See PROJECT.md "Language disagreement →
+        // re-transcribe" for the rationale.
         let pre = pre_transcribe_locale(&ctx.library, book_id, &self.language).await?;
         let locale = pre.detection.as_ref().map_or_else(
             || self.language.default_locale.clone(),
             |d| d.language.clone(),
         );
+
+        let Some(plan) = plan_book(&ctx.library, book_id, &self.transcribe, &locale).await? else {
+            return Ok(StageOutcome::Skipped);
+        };
 
         // Persist the pre-transcribe candidate so downstream
         // consensus has the same view of "where the locale came
@@ -247,11 +255,18 @@ struct TailWindow {
 /// Resolve file paths, durations, and head/tail windows.
 /// Returns `None` when the book should be skipped (no active
 /// file, total duration too short, or both cached transcripts
-/// already match the current `model_version`).
+/// already match the current `model_version` AND the locale
+/// they were transcribed in matches `current_locale`).
+///
+/// The locale check is the 3A.4.2 re-transcribe-on-disagreement
+/// gate: if the cached row's embedded `locale` differs from
+/// what the pre-transcribe gate currently picks, we treat the
+/// cached row as stale and re-transcribe.
 async fn plan_book(
     library: &LibraryDb,
     book_id: BookId,
     transcribe: &TranscribeTunables,
+    current_locale: &str,
 ) -> Result<Option<BookPlan>> {
     let id = book_id.0;
     let row = sqlx::query!(
@@ -322,12 +337,28 @@ async fn plan_book(
     });
 
     // Idempotency: skip when both windows are already cached at
-    // this model_version. We check head only when there's no
-    // tail; with a tail, both must match.
-    let head_fresh =
-        cache_fresh(library, book_id, CACHE_TYPE_HEAD, &transcribe.model_version).await?;
+    // this model_version AND the cached locale matches what
+    // the pre-transcribe gate would pick now. Locale mismatch
+    // → re-transcribe; the embedded locale in the cache payload
+    // is the source of truth for "what language did we feed
+    // SpeechTranscriber when we produced this row."
+    let head_fresh = cache_fresh(
+        library,
+        book_id,
+        CACHE_TYPE_HEAD,
+        &transcribe.model_version,
+        current_locale,
+    )
+    .await?;
     let tail_fresh = if tail.is_some() {
-        cache_fresh(library, book_id, CACHE_TYPE_TAIL, &transcribe.model_version).await?
+        cache_fresh(
+            library,
+            book_id,
+            CACHE_TYPE_TAIL,
+            &transcribe.model_version,
+            current_locale,
+        )
+        .await?
     } else {
         true
     };
@@ -342,24 +373,48 @@ async fn plan_book(
     }))
 }
 
-/// Returns true when `ai_cache` already has a row at the
-/// configured `model_version` for `(book_id, cache_type)`.
+/// Minimal `Deserialize` shape used by [`cache_fresh`] to peek
+/// at the embedded `locale` field of a cached transcript payload
+/// without parsing the segment array. Module-scope so clippy
+/// doesn't trip `items_after_statements`.
+#[derive(serde::Deserialize)]
+struct CachedLocale {
+    locale: String,
+}
+
+/// Returns true when `ai_cache` already has a row for
+/// `(book_id, cache_type)` whose `model_version` AND embedded
+/// payload `locale` both match the current run. Either mismatch
+/// makes the cached row stale.
 async fn cache_fresh(
     library: &LibraryDb,
     book_id: BookId,
     cache_type: &str,
     model_version: &str,
+    current_locale: &str,
 ) -> Result<bool> {
     let id = book_id.0;
     let row = sqlx::query!(
-        "SELECT model_version FROM ai_cache WHERE book_id = ? AND cache_type = ?",
+        "SELECT model_version, content FROM ai_cache WHERE book_id = ? AND cache_type = ?",
         id,
         cache_type,
     )
     .fetch_optional(library.pool())
     .await
     .map_err(|e| Error::Database(format!("transcribe cache lookup: {e}")))?;
-    Ok(row.is_some_and(|r| r.model_version.as_deref() == Some(model_version)))
+    let Some(row) = row else { return Ok(false) };
+    if row.model_version.as_deref() != Some(model_version) {
+        return Ok(false);
+    }
+    let Some(bytes) = row.content else {
+        return Ok(false);
+    };
+    // Unparseable cached content → treat as stale; the next run
+    // rewrites it cleanly.
+    let Ok(parsed) = serde_json::from_slice::<CachedLocale>(&bytes) else {
+        return Ok(false);
+    };
+    Ok(parsed.locale == current_locale)
 }
 
 // ── Pre-transcribe language pick ─────────────────────────────────
