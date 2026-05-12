@@ -103,10 +103,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo install --locked sqlx-cli --no-default-features --features sqlite,rustls --version "~0.8" || true
-      - name: Apply schema to a prep DB
+      - name: Apply all migrations to a prep DB
         run: |
+          # Apply every library + ephemeral migration into one prep DB
+          # so every `sqlx::query!()` call's referenced table exists.
+          # Mirrors the loop in `scripts/sqlx-prepare.sh`. The
+          # `IF NOT EXISTS` / `OR IGNORE` rewrite is needed because a
+          # few tables (e.g. `meta`) are declared in both schemas with
+          # the same shape; production runs them against separate DBs
+          # and stays strict — this rewrite never touches source files.
           rm -f /tmp/aborg-prep.db
-          sqlite3 /tmp/aborg-prep.db < crates/db/migrations/library/001_initial.sql
+          for migration in crates/db/migrations/library/*.sql crates/db/migrations/ephemeral/*.sql; do
+            sed -E 's/CREATE (UNIQUE )?(TABLE|INDEX) /CREATE \1\2 IF NOT EXISTS /g; s/INSERT INTO /INSERT OR IGNORE INTO /g' \
+              "$migration" | sqlite3 /tmp/aborg-prep.db
+          done
       - name: Verify `.sqlx/` is up to date
         env:
           DATABASE_URL: "sqlite:///tmp/aborg-prep.db"

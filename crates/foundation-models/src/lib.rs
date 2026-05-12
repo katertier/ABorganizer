@@ -164,6 +164,10 @@ impl BridgeError {
 /// disabled, device not eligible, model still downloading)
 /// arrive in `Ok(StatusReport { available: false, reason: Some(..) })`,
 /// not as `Err` — the doctor wants those split.
+#[allow(
+    clippy::unused_async,
+    reason = "The async signature stays uniform across hosts. On macOS 26 (cfg(aborg_fm_bridge)) the body awaits the FFI impl; on hosts where swiftc / FoundationModels.framework isn't available the body returns synchronously. Clippy only sees the no-bridge branch on the latter (e.g. macos-14 CI) and lints the unused async — but callers depend on the .await for the macOS 26 path."
+)]
 pub async fn status() -> Result<StatusReport, BridgeError> {
     #[cfg(aborg_fm_bridge)]
     {
@@ -195,6 +199,10 @@ pub async fn status() -> Result<StatusReport, BridgeError> {
 /// Variants of [`BridgeError`]: [`BridgeError::BridgeUnavailable`]
 /// when the bridge isn't compiled in — other failure modes
 /// (parse / FFI) come back as [`BridgeError::InvalidPayload`].
+#[allow(
+    clippy::unused_async,
+    reason = "Uniform async surface — see status() for the rationale."
+)]
 pub async fn supported_locales() -> Result<Vec<String>, BridgeError> {
     #[cfg(aborg_fm_bridge)]
     {
@@ -221,6 +229,10 @@ pub async fn supported_locales() -> Result<Vec<String>, BridgeError> {
 /// [`BridgeError::ModelUnavailable`] when the host can't run
 /// the model; [`BridgeError::GenerationFailed`] when the model
 /// raises an error mid-generation.
+#[allow(
+    clippy::unused_async,
+    reason = "Uniform async surface — see status() for the rationale."
+)]
 pub async fn complete(prompt: &str, max_tokens: usize) -> Result<String, BridgeError> {
     #[cfg(aborg_fm_bridge)]
     {
@@ -268,6 +280,10 @@ pub async fn complete(prompt: &str, max_tokens: usize) -> Result<String, BridgeE
 /// parseable JSON / isn't a top-level object;
 /// [`BridgeError::SchemaUnsupportedShape`] when it uses a JSON
 /// Schema feature the bridge doesn't yet handle.
+#[allow(
+    clippy::unused_async,
+    reason = "Uniform async surface — see status() for the rationale."
+)]
 pub async fn complete_structured(
     prompt: &str,
     schema_json: &str,
