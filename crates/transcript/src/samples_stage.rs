@@ -39,7 +39,6 @@
 //!   head/tail stage already queued the locale; idle installer
 //!   re-queues this stage when the model lands).
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -109,22 +108,29 @@ impl Stage for TranscribeSamplesStage {
 
         let mut all_segments = Vec::new();
         for (idx, window) in plan.windows.iter().enumerate() {
+            let file = &plan.files[window.file_index];
             tracing::debug!(
                 book = %book_id,
                 idx,
-                start = window.start_secs,
-                end = window.end_secs,
+                file_idx = window.file_index,
+                in_file_start = window.in_file_start_secs,
+                in_file_end = window.in_file_end_secs,
                 "transcribe.samples.window"
             );
             match transcribe_window_typed(
-                &plan.file_path,
-                window.start_secs,
-                window.end_secs,
+                &file.path,
+                window.in_file_start_secs,
+                window.in_file_end_secs,
                 &plan.locale,
             )
             .await
             {
-                Ok(mut segs) => all_segments.append(&mut segs),
+                Ok(mut segs) => {
+                    // Rebase per-file timestamps into book
+                    // time-base via the cumulative offset.
+                    crate::multi_file::rebase_segments(&mut segs, file.cumulative_offset_secs);
+                    all_segments.append(&mut segs);
+                }
                 Err(BridgeError::ModelNotInstalled) => {
                     tracing::warn!(
                         locale = %plan.locale,
@@ -181,15 +187,23 @@ impl Stage for TranscribeSamplesStage {
 
 // ── Planning ────────────────────────────────────────────────────
 
+/// One sample's resolved coordinates: which file, and where
+/// inside it. Filled in by `plan_samples` via
+/// `multi_file::map_position`.
 #[derive(Debug, Clone)]
 struct SampleWindow {
-    start_secs: f64,
-    end_secs: f64,
+    file_index: usize,
+    in_file_start_secs: f64,
+    in_file_end_secs: f64,
 }
 
 #[derive(Debug)]
 struct SamplePlan {
-    file_path: PathBuf,
+    /// Every active file with cumulative offsets — same data
+    /// the full-stage uses. We need both `path` (for the
+    /// transcribe call) and `cumulative_offset_secs` (for
+    /// segment rebasing).
+    files: Vec<crate::multi_file::FileEntry>,
     locale: String,
     windows: Vec<SampleWindow>,
 }
@@ -238,48 +252,18 @@ async fn plan_samples(
         return Ok(None);
     }
 
-    // Total duration from books.raw_duration_ms.
-    let book_row = sqlx::query!(
-        "SELECT duration_ms, raw_duration_ms FROM books WHERE book_id = ?",
-        id,
-    )
-    .fetch_optional(library.pool())
-    .await
-    .map_err(|e| Error::Database(format!("samples book lookup: {e}")))?;
-    let Some(book_row) = book_row else {
+    // Active files with offsets. Same helper as full_stage.
+    let files = crate::multi_file::active_files(library, book_id).await?;
+    if files.is_empty() {
         return Ok(None);
-    };
-    let total_ms = book_row
-        .raw_duration_ms
-        .or(book_row.duration_ms)
-        .unwrap_or(0)
-        .max(0);
-    #[allow(clippy::cast_precision_loss)]
-    let total_secs = total_ms as f64 / 1000.0;
+    }
+    let total_secs = crate::multi_file::total_duration_secs(&files);
     if total_secs < transcribe.min_duration_secs {
         return Ok(None);
     }
 
-    // File path — first active file. Multi-file books would
-    // need per-file mapping (a 25%-position lands somewhere
-    // inside file N of M); tracked as a follow-up like the
-    // full-book stage.
-    let file_row = sqlx::query!(
-        "SELECT file_path FROM book_files \
-         WHERE book_id = ? AND is_active = 1 ORDER BY file_id LIMIT 1",
-        id,
-    )
-    .fetch_optional(library.pool())
-    .await
-    .map_err(|e| Error::Database(format!("samples file lookup: {e}")))?;
-    let Some(file_row) = file_row else {
-        return Ok(None);
-    };
-
-    // Sample windows. For each position fraction (e.g. 0.25),
-    // window is `[pos * total_secs, pos * total_secs +
-    // sample_secs)`, clamped to the file's end.
     let windows = build_windows(
+        &files,
         total_secs,
         &transcribe.sample_positions,
         transcribe.sample_secs,
@@ -289,28 +273,43 @@ async fn plan_samples(
     }
 
     Ok(Some(SamplePlan {
-        file_path: PathBuf::from(file_row.file_path),
+        files,
         locale,
         windows,
     }))
 }
 
-/// Build sample windows from positions + sample length.
-/// Skips windows that fall outside the file. Returns at least
-/// one window in normal conditions; empty only when
-/// `total_secs` is so short that every position is past the
-/// end.
-fn build_windows(total_secs: f64, positions: &[f64], sample_secs: f64) -> Vec<SampleWindow> {
+/// Build sample windows from position fractions + sample
+/// length, mapping each book-time position to a specific file
+/// + in-file offset.
+///
+/// Windows that would span a file boundary are clamped to the
+/// end of the containing file — the rest is dropped. A 60-s
+/// sample landing 30 s before a chapter boundary becomes a
+/// 30-s sample. Good enough for language detection /
+/// DNA-tag corpus purposes; the wholeness-of-content cost is
+/// minor compared to the complexity of spanning the boundary.
+fn build_windows(
+    files: &[crate::multi_file::FileEntry],
+    total_secs: f64,
+    positions: &[f64],
+    sample_secs: f64,
+) -> Vec<SampleWindow> {
     let mut out = Vec::with_capacity(positions.len());
     for &pos in positions {
-        let start = (pos * total_secs).max(0.0);
-        let end = (start + sample_secs).min(total_secs);
-        if end > start + 1.0 {
+        let target = (pos * total_secs).max(0.0);
+        let Some((file_idx, in_file_start)) = crate::multi_file::map_position(files, target) else {
+            continue;
+        };
+        let file_duration = files[file_idx].duration_secs;
+        let in_file_end = (in_file_start + sample_secs).min(file_duration);
+        if in_file_end > in_file_start + 1.0 {
             // Require at least 1 s of content; sub-second
             // windows aren't useful for any extractor.
             out.push(SampleWindow {
-                start_secs: start,
-                end_secs: end,
+                file_index: file_idx,
+                in_file_start_secs: in_file_start,
+                in_file_end_secs: in_file_end,
             });
         }
     }
@@ -398,38 +397,102 @@ fn mean_confidence(segments: &[TranscriptSegment]) -> f64 {
 mod tests {
     use super::*;
 
+    /// Helper: build a single-file fixture for the test cases
+    /// that don't care about cross-file mapping.
+    fn single_file(duration_secs: f64) -> Vec<crate::multi_file::FileEntry> {
+        vec![crate::multi_file::FileEntry {
+            path: std::path::PathBuf::from("/tmp/test.m4b"),
+            duration_secs,
+            cumulative_offset_secs: 0.0,
+        }]
+    }
+
+    /// Helper: build a multi-file fixture with the given
+    /// per-file durations.
+    fn multi_file(durations: &[f64]) -> Vec<crate::multi_file::FileEntry> {
+        let mut cum = 0.0;
+        durations
+            .iter()
+            .enumerate()
+            .map(|(i, &d)| {
+                let entry = crate::multi_file::FileEntry {
+                    path: std::path::PathBuf::from(format!("/tmp/f{i}.m4b")),
+                    duration_secs: d,
+                    cumulative_offset_secs: cum,
+                };
+                cum += d;
+                entry
+            })
+            .collect()
+    }
+
     #[test]
-    fn build_windows_default_positions() {
-        let w = build_windows(3600.0, &[0.25, 0.50, 0.75], 60.0);
+    fn build_windows_single_file_default_positions() {
+        let files = single_file(3600.0);
+        let w = build_windows(&files, 3600.0, &[0.25, 0.50, 0.75], 60.0);
         assert_eq!(w.len(), 3);
-        assert!((w[0].start_secs - 900.0).abs() < 0.001);
-        assert!((w[0].end_secs - 960.0).abs() < 0.001);
-        assert!((w[1].start_secs - 1800.0).abs() < 0.001);
-        assert!((w[2].start_secs - 2700.0).abs() < 0.001);
+        for win in &w {
+            assert_eq!(win.file_index, 0);
+        }
+        assert!((w[0].in_file_start_secs - 900.0).abs() < 0.001);
+        assert!((w[0].in_file_end_secs - 960.0).abs() < 0.001);
+        assert!((w[1].in_file_start_secs - 1800.0).abs() < 0.001);
+        assert!((w[2].in_file_start_secs - 2700.0).abs() < 0.001);
     }
 
     #[test]
-    fn build_windows_clamps_to_total() {
-        // A position at 0.95 with 60 s sample in a 100 s book
-        // → start=95, end=100 (5 s remaining), still valid.
-        let w = build_windows(100.0, &[0.95], 60.0);
+    fn build_windows_single_file_clamps_to_total() {
+        let files = single_file(100.0);
+        let w = build_windows(&files, 100.0, &[0.95], 60.0);
         assert_eq!(w.len(), 1);
-        assert!((w[0].start_secs - 95.0).abs() < 0.001);
-        assert!((w[0].end_secs - 100.0).abs() < 0.001);
+        assert!((w[0].in_file_start_secs - 95.0).abs() < 0.001);
+        assert!((w[0].in_file_end_secs - 100.0).abs() < 0.001);
     }
 
     #[test]
-    fn build_windows_rejects_too_short() {
-        // Position at 0.999 → start = 99.9, end = 100, only
-        // 0.1 s of content. Filtered out by the 1 s minimum.
-        let w = build_windows(100.0, &[0.999], 60.0);
+    fn build_windows_single_file_rejects_too_short() {
+        let files = single_file(100.0);
+        let w = build_windows(&files, 100.0, &[0.999], 60.0);
         assert!(w.is_empty(), "expected empty, got {w:?}");
     }
 
     #[test]
     fn build_windows_handles_empty_positions() {
-        let w = build_windows(3600.0, &[], 60.0);
+        let files = single_file(3600.0);
+        let w = build_windows(&files, 3600.0, &[], 60.0);
         assert!(w.is_empty());
+    }
+
+    #[test]
+    fn build_windows_multi_file_maps_to_containing_file() {
+        // 3 files of 600 s each → total 1800 s.
+        // 25% = 450 s → file 0, offset 450
+        // 50% = 900 s → file 1, offset 300
+        // 75% = 1350 s → file 2, offset 150
+        let files = multi_file(&[600.0, 600.0, 600.0]);
+        let w = build_windows(&files, 1800.0, &[0.25, 0.50, 0.75], 60.0);
+        assert_eq!(w.len(), 3);
+        assert_eq!(w[0].file_index, 0);
+        assert!((w[0].in_file_start_secs - 450.0).abs() < 0.001);
+        assert_eq!(w[1].file_index, 1);
+        assert!((w[1].in_file_start_secs - 300.0).abs() < 0.001);
+        assert_eq!(w[2].file_index, 2);
+        assert!((w[2].in_file_start_secs - 150.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn build_windows_multi_file_clamps_at_file_boundary() {
+        // 2 files of 100 s each → total 200 s.
+        // Position 0.45 = 90 s → file 0, offset 90.
+        // Sample 60 s would span 90..150 but file 0 ends at
+        // 100 — clamp to 90..100. 10 s of content, > 1 s
+        // minimum, keep.
+        let files = multi_file(&[100.0, 100.0]);
+        let w = build_windows(&files, 200.0, &[0.45], 60.0);
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].file_index, 0);
+        assert!((w[0].in_file_start_secs - 90.0).abs() < 0.001);
+        assert!((w[0].in_file_end_secs - 100.0).abs() < 0.001);
     }
 
     #[test]

@@ -160,7 +160,12 @@ impl Stage for TranscribeHeadTailStage {
             )
             .await?
             {
-                TranscribeWindowOutcome::Segments(segments) => {
+                TranscribeWindowOutcome::Segments(mut segments) => {
+                    // Rebase last-file segments into book time-
+                    // base. No-op for single-file books (offset
+                    // is 0); shifts by cumulative offset for
+                    // multi-file.
+                    crate::multi_file::rebase_segments(&mut segments, tail.cumulative_offset_secs);
                     write_transcript_cache(
                         &ctx.library,
                         book_id,
@@ -231,6 +236,11 @@ struct TailWindow {
     path: PathBuf,
     start_secs: f64,
     end_secs: f64,
+    /// For multi-file books, the last file's offset within the
+    /// book. Segments produced from this window are in last-
+    /// file time-base; rebasing by this offset puts them in
+    /// book time-base. Zero for single-file books.
+    cumulative_offset_secs: f64,
 }
 
 /// Resolve file paths, durations, and head/tail windows.
@@ -248,71 +258,41 @@ async fn plan_book(
     book_id: BookId,
     transcribe: &TranscribeTunables,
 ) -> Result<Option<BookPlan>> {
-    let id = book_id.0;
-    let row = sqlx::query!(
-        "SELECT duration_ms, raw_duration_ms FROM books WHERE book_id = ?",
-        id,
-    )
-    .fetch_optional(library.pool())
-    .await
-    .map_err(|e| Error::Database(format!("transcribe fetch book: {e}")))?;
-    let Some(row) = row else {
+    // Active files via the shared helper. For multi-file
+    // books we need each file's cumulative offset so tail
+    // segments can be rebased into book time-base. The helper
+    // returns everything in one pass.
+    let files = crate::multi_file::active_files(library, book_id).await?;
+    if files.is_empty() {
         return Ok(None);
-    };
-
-    // Prefer raw (untrimmed) duration so jingles fall inside the
-    // head window — the audiologo + language extractors need to
-    // SEE the jingle to detect it.
-    let total_ms = row.raw_duration_ms.or(row.duration_ms).unwrap_or(0).max(0);
-    // i64 → f64 is lossy past 2^53, which is ~285_000 years in
-    // milliseconds. Audiobooks aren't that long.
-    #[allow(clippy::cast_precision_loss)]
-    let total_secs = total_ms as f64 / 1000.0;
+    }
+    let total_secs = crate::multi_file::total_duration_secs(&files);
     if total_secs < transcribe.min_duration_secs {
         return Ok(None);
     }
 
-    // Head file: first active file. For multi-file books the
-    // file-0 contains the publisher intro + first chapter,
-    // which is what the head window targets.
-    let head_row = sqlx::query!(
-        "SELECT file_path, duration_ms FROM book_files \
-         WHERE book_id = ? AND is_active = 1 ORDER BY file_id LIMIT 1",
-        id,
-    )
-    .fetch_optional(library.pool())
-    .await
-    .map_err(|e| Error::Database(format!("transcribe fetch head file: {e}")))?;
-    let Some(head_row) = head_row else {
-        return Ok(None);
-    };
-    #[allow(clippy::cast_precision_loss)]
-    let head_file_secs = head_row.duration_ms.unwrap_or(total_ms).max(0) as f64 / 1000.0;
-    let head_end_secs = transcribe.head_secs.min(head_file_secs);
+    // Head: first file, [0, head_secs) clamped to file 0's
+    // duration. file_0 starts at book offset 0, so the segments
+    // come back already in book time-base — no rebase needed.
+    let head = &files[0];
+    let head_end_secs = transcribe.head_secs.min(head.duration_secs);
 
-    // Tail file: last active file. For single-file books it's
-    // the same as the head file but a different window.
-    let tail_row = sqlx::query!(
-        "SELECT file_path, duration_ms FROM book_files \
-         WHERE book_id = ? AND is_active = 1 ORDER BY file_id DESC LIMIT 1",
-        id,
-    )
-    .fetch_optional(library.pool())
-    .await
-    .map_err(|e| Error::Database(format!("transcribe fetch tail file: {e}")))?;
-
-    let tail = tail_row.and_then(|r| {
-        #[allow(clippy::cast_precision_loss)]
-        let tail_file_secs = r.duration_ms.unwrap_or(0).max(0) as f64 / 1000.0;
-        if tail_file_secs <= transcribe.tail_secs {
-            // Too short to slice — the head transcript already
-            // covers everything we'd want from the tail.
+    // Tail: last file's trailing tail_secs. For single-file
+    // books that's the same file as head; for multi-file it's
+    // the last chapter. Segments from this window are in
+    // last-file time-base; the cumulative_offset_secs goes
+    // into the TailWindow so the run() loop can rebase before
+    // writing to ai_cache.
+    let tail = files.last().and_then(|last| {
+        if last.duration_secs <= transcribe.tail_secs {
+            // Too short to slice — head already covers it.
             return None;
         }
         Some(TailWindow {
-            path: PathBuf::from(r.file_path),
-            start_secs: tail_file_secs - transcribe.tail_secs,
-            end_secs: tail_file_secs,
+            path: last.path.clone(),
+            start_secs: last.duration_secs - transcribe.tail_secs,
+            end_secs: last.duration_secs,
+            cumulative_offset_secs: last.cumulative_offset_secs,
         })
     });
 
@@ -334,7 +314,7 @@ async fn plan_book(
     }
 
     Ok(Some(BookPlan {
-        head_path: PathBuf::from(head_row.file_path),
+        head_path: head.path.clone(),
         head_end_secs,
         tail,
     }))
