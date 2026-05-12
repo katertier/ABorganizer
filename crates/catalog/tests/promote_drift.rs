@@ -180,3 +180,93 @@ async fn no_winner_leaves_books_columns_unchanged() {
         .expect("read title");
     assert_eq!(title, "placeholder");
 }
+
+#[tokio::test]
+async fn check_constraint_rejects_off_vocabulary_field() {
+    // Migration 005 (slice C5.3) pins the `field` vocabulary at
+    // the DB layer with a CHECK constraint matching the
+    // `ab_core::Field` enum. The Rust path can never produce an
+    // off-vocabulary value because every write goes through
+    // `Field::*.as_str()`, but a runtime `sqlx::query()` could
+    // bypass that — the CHECK is the storage-layer net.
+    let tmp = TempDir::new().expect("tmpdir");
+    let (_ctx, library) = fresh_ctx(tmp.path()).await;
+
+    sqlx::query("INSERT INTO books (book_id, title) VALUES (1, 'placeholder')")
+        .execute(library.pool())
+        .await
+        .expect("seed book");
+
+    let res = sqlx::query(
+        "INSERT INTO book_field_provenance \
+         (book_id, field, value, source, confidence) VALUES (1, ?, ?, ?, ?)",
+    )
+    .bind("not_a_field")
+    .bind("anything")
+    .bind("manual")
+    .bind(0.5_f64)
+    .execute(library.pool())
+    .await;
+
+    assert!(
+        res.is_err(),
+        "expected CHECK constraint to reject off-vocabulary field; \
+         got Ok response — migration 005 must have regressed"
+    );
+    let err = format!("{}", res.unwrap_err());
+    assert!(
+        err.to_lowercase().contains("check"),
+        "expected CHECK constraint error, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn check_constraint_accepts_every_field_variant() {
+    // Mirror of the above: every variant of `ab_core::Field`
+    // must be accepted by the CHECK constraint. If a new variant
+    // is added without extending migration 005's `field IN (…)`
+    // list, this test catches it.
+    use ab_core::Field;
+    let tmp = TempDir::new().expect("tmpdir");
+    let (_ctx, library) = fresh_ctx(tmp.path()).await;
+
+    sqlx::query("INSERT INTO books (book_id, title) VALUES (1, 'placeholder')")
+        .execute(library.pool())
+        .await
+        .expect("seed book");
+
+    let all_variants = [
+        Field::Title,
+        Field::Subtitle,
+        Field::Description,
+        Field::Language,
+        Field::ReleaseDate,
+        Field::DurationSeconds,
+        Field::Asin,
+        Field::Isbn,
+        Field::Author,
+        Field::Narrator,
+        Field::Publisher,
+        Field::Series,
+        Field::Genre,
+        Field::CoverUrl,
+        Field::Abridged,
+        Field::Explicit,
+    ];
+    for f in all_variants {
+        let res = sqlx::query(
+            "INSERT INTO book_field_provenance \
+             (book_id, field, value, source, confidence) VALUES (1, ?, ?, ?, ?)",
+        )
+        .bind(f.as_str())
+        .bind("v")
+        .bind("manual")
+        .bind(0.5_f64)
+        .execute(library.pool())
+        .await;
+        assert!(
+            res.is_ok(),
+            "CHECK constraint rejected variant {f:?} — migration 005 IN list out of sync"
+        );
+    }
+}
