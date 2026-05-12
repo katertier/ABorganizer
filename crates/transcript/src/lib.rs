@@ -1,11 +1,21 @@
-//! Transcript-side extractors.
+//! Transcript-side extractors + the Swift FFI bridge for
+//! producing transcripts.
 //!
-//! Each extractor implements [`Extractor`] and produces a typed
-//! [`Candidate`]. The daemon's transcript stage iterates the registered
-//! extractors, persisting each candidate to `book_field_provenance`.
+//! Two surfaces here:
 //!
-//! Add a new extractor: implement [`Extractor`], register it. No
-//! coordinator code changes.
+//! 1. [`bridge::transcribe_window`] — call into Swift /
+//!    `SpeechAnalyzer` (stubbed in slice 3A.2; real engine in
+//!    3A.3). Returns timestamped [`bridge::TranscriptSegment`]s.
+//! 2. [`Extractor`] + [`Candidate`] — pluggable consumers that
+//!    read transcripts and write provenance candidates. The
+//!    daemon's transcript stage iterates registered extractors;
+//!    each writes 0..N candidates to `book_field_provenance`.
+//!
+//! Add a new extractor: implement [`Extractor`], register it.
+
+pub mod bridge;
+
+pub use bridge::{TranscriptSegment, transcribe_window};
 
 use serde::{Deserialize, Serialize};
 

@@ -7,13 +7,19 @@ license      = { workspace = true }
 authors      = { workspace = true }
 repository   = { workspace = true }
 description  = "Modular extractors over a transcript: title/author candidates, publisher detection, narrator detection, language detection, author confirmation."
+build        = "build.rs"
 
 [lints]
 workspace = true
 
 [dependencies]
-ab-core   = { workspace = true }
-regex     = { workspace = true }
-serde     = { workspace = true }
-thiserror = { workspace = true }
-tracing   = { workspace = true }
+ab-core    = { workspace = true }
+regex      = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+thiserror  = { workspace = true }
+tokio      = { workspace = true }
+tracing    = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -143,10 +143,14 @@ tempfile       = "3.13"
 
 # ── Lint policy (applies to every workspace member) ──────────────────────
 # - clippy at `warn` by default; specific lints denied/forbidden below.
-# - `unsafe_code` forbidden globally; the audio crate lifts it locally for
-#   FFI boundaries with `#[expect(unsafe_code, reason = "…")]` per use.
+# - `unsafe_code` is denied (not forbidden) globally: FFI bridge
+#   crates (currently `ab-transcript`, in future `ab-audio`) override
+#   per-FFI-site with `#[expect(unsafe_code, reason = "…")]` + a
+#   `// SAFETY:` comment. `deny` blocks accidental unsafe in
+#   non-FFI code while permitting the deliberate, documented
+#   exceptions. `forbid` would reject `#[expect]` outright.
 [workspace.lints.rust]
-unsafe_code              = "forbid"
+unsafe_code              = "deny"
 missing_docs             = "warn"
 unreachable_pub          = "warn"
 trivial_casts            = "warn"
