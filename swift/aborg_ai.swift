@@ -70,6 +70,68 @@ private func meanConfidence(_ attr: AttributedString) -> Float {
     return count > 0 ? Float(sum / count) : 0
 }
 
+/// Wrap a `CMSampleBuffer`'s audio data in a fresh
+/// `AVAudioPCMBuffer` matching `format`.
+///
+/// Returns `nil` on any of the well-known failure paths
+/// (incomplete sample, missing block buffer, byte-count
+/// mismatch). Copies the bytes (not `bufferListNoCopy`) so the
+/// resulting PCM buffer is independent of the
+/// `CMSampleBuffer`'s lifetime — required because the analyzer
+/// stream yields multiple inputs that mustn't share / overwrite
+/// each other's backing memory.
+///
+/// Format-agnostic: writes into the PCM buffer's first audio
+/// buffer regardless of whether the layout is Int16, Float32,
+/// or anything else. The caller is responsible for matching
+/// the AVAssetReader output settings to `format` so the byte
+/// counts line up.
+@available(macOS 26.0, *)
+private func makePcmBuffer(
+    sample: CMSampleBuffer,
+    format: AVAudioFormat
+) -> AVAudioPCMBuffer? {
+    guard CMSampleBufferDataIsReady(sample) else { return nil }
+    let sampleCount = CMSampleBufferGetNumSamples(sample)
+    if sampleCount <= 0 { return nil }
+    let numFrames = AVAudioFrameCount(sampleCount)
+
+    guard let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: numFrames) else {
+        return nil
+    }
+    pcm.frameLength = numFrames
+
+    guard let dataBuffer = CMSampleBufferGetDataBuffer(sample) else {
+        return nil
+    }
+    var lengthAtOffset = 0
+    var totalLength = 0
+    var dataPointer: UnsafeMutablePointer<CChar>?
+    let status = CMBlockBufferGetDataPointer(
+        dataBuffer,
+        atOffset: 0,
+        lengthAtOffsetOut: &lengthAtOffset,
+        totalLengthOut: &totalLength,
+        dataPointerOut: &dataPointer
+    )
+    guard status == noErr, let src = dataPointer else { return nil }
+
+    let bytesPerFrame = Int(format.streamDescription.pointee.mBytesPerFrame)
+    let byteCount = Int(numFrames) * bytesPerFrame
+    guard byteCount > 0, byteCount <= totalLength else { return nil }
+
+    // Format-agnostic byte copy via the PCMBuffer's underlying
+    // AudioBufferList. Avoids dispatching on commonFormat
+    // (Int16 / Float32 / Int32 each need a different typed
+    // channelData accessor).
+    let abl = pcm.mutableAudioBufferList
+    guard let dst = abl.pointee.mBuffers.mData else { return nil }
+    let dstCapacity = Int(abl.pointee.mBuffers.mDataByteSize)
+    guard byteCount <= dstCapacity else { return nil }
+    memcpy(dst, src, byteCount)
+    return pcm
+}
+
 // MARK: - Transcription pipeline
 
 @available(macOS 26.0, *)
@@ -169,89 +231,102 @@ private func runTranscribe(
         throw AborgAIError.noCompatibleAudioFormat
     }
 
-    // 6. Read the requested window from the file, in the file's
-    //    native processing format, then convert to engine
-    //    format. Slicing in PCM space is bounded — a 6-min
-    //    16kHz mono Float32 buffer is ~12 MB. For the
-    //    future full-book stage we'll switch to chunked
-    //    AVAssetReader to keep RAM bounded.
+    // 6. Open via AVAssetReader and stream the requested window
+    //    to the analyzer as a sequence of small PCM buffers.
+    //    AVAssetReader does decode + windowing (via timeRange)
+    //    + format conversion (via outputSettings) in one
+    //    pipeline. The analyzer sees continuous audio across
+    //    the whole window — no chunk-boundary artifacts that
+    //    the previous Rust-side chunking approach risked.
     let url = URL(fileURLWithPath: pathStr)
-    let file: AVAudioFile
+    let asset = AVURLAsset(url: url)
+    let audioTracks: [AVAssetTrack]
     do {
-        file = try AVAudioFile(forReading: url)
+        audioTracks = try await asset.loadTracks(withMediaType: .audio)
     } catch {
-        throw AborgAIError.readFailure("AVAudioFile open: \(error)")
+        throw AborgAIError.readFailure("loadTracks: \(error)")
     }
-    let nativeFormat = file.processingFormat
-    let nativeSampleRate = nativeFormat.sampleRate
-    let totalFrames = file.length
+    guard let audioTrack = audioTracks.first else {
+        throw AborgAIError.readFailure("no audio track in asset")
+    }
+    let reader: AVAssetReader
+    do {
+        reader = try AVAssetReader(asset: asset)
+    } catch {
+        throw AborgAIError.readFailure("AVAssetReader init: \(error)")
+    }
 
-    let startFrame = AVAudioFramePosition(max(0.0, startSecs * nativeSampleRate))
-    let endFrameRaw = AVAudioFramePosition(endSecs * nativeSampleRate)
-    let endFrame = min(endFrameRaw, totalFrames)
-    if endFrame <= startFrame {
+    // Window via timeRange. CMTimeRange handles the slicing
+    // server-side so we don't have to count frames.
+    let startTime = CMTime(seconds: startSecs, preferredTimescale: 1_000_000)
+    let endTime = CMTime(seconds: endSecs, preferredTimescale: 1_000_000)
+    let duration = CMTimeSubtract(endTime, startTime)
+    if CMTimeCompare(duration, .zero) <= 0 {
         throw AborgAIError.windowEmpty
     }
-    let frameCount = AVAudioFrameCount(endFrame - startFrame)
-    file.framePosition = startFrame
+    reader.timeRange = CMTimeRange(start: startTime, duration: duration)
 
-    guard let nativeBuffer = AVAudioPCMBuffer(
-        pcmFormat: nativeFormat, frameCapacity: frameCount
-    ) else {
-        throw AborgAIError.readFailure("alloc native PCM buffer")
+    // Ask the reader to deliver PCM matching the engine's
+    // expected format exactly — sample rate, channels, bit
+    // depth, float/int, byte order, interleaving. AVAssetReader
+    // does the resampling + channel-collapse + format conversion
+    // in one pass; mirroring the format end-to-end means
+    // makePcmBuffer can do a plain memcpy without per-format
+    // branching, and the analyzer never has to reject a chunk
+    // for layout mismatch. macOS 26's `bestAvailableAudioFormat`
+    // returns Int16 mono 16 kHz at the time of writing — but
+    // the format-derived settings track whatever Apple changes
+    // it to.
+    let asbd = engineFormat.streamDescription.pointee
+    let isFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
+    let isBigEndian = (asbd.mFormatFlags & kAudioFormatFlagIsBigEndian) != 0
+    let isNonInterleaved = (asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
+    let outputSettings: [String: Any] = [
+        AVFormatIDKey: kAudioFormatLinearPCM,
+        AVSampleRateKey: asbd.mSampleRate,
+        AVNumberOfChannelsKey: Int(asbd.mChannelsPerFrame),
+        AVLinearPCMBitDepthKey: Int(asbd.mBitsPerChannel),
+        AVLinearPCMIsFloatKey: isFloat,
+        AVLinearPCMIsBigEndianKey: isBigEndian,
+        AVLinearPCMIsNonInterleaved: isNonInterleaved,
+    ]
+    let trackOutput = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: outputSettings)
+    trackOutput.alwaysCopiesSampleData = true
+    guard reader.canAdd(trackOutput) else {
+        throw AborgAIError.readFailure("reader can't add track output")
     }
-    do {
-        try file.read(into: nativeBuffer, frameCount: frameCount)
-    } catch {
-        throw AborgAIError.readFailure("file.read: \(error)")
-    }
-
-    let analyzerBuffer: AVAudioPCMBuffer
-    if nativeFormat.isEqual(engineFormat) {
-        analyzerBuffer = nativeBuffer
-    } else {
-        guard let converter = AVAudioConverter(from: nativeFormat, to: engineFormat) else {
-            throw AborgAIError.readFailure("AVAudioConverter init failed")
-        }
-        // Output capacity: scale by sample-rate ratio + slack
-        // for resampling lookahead.
-        let ratio = engineFormat.sampleRate / nativeFormat.sampleRate
-        let outCap = AVAudioFrameCount(Double(nativeBuffer.frameLength) * ratio) + 512
-        guard let outBuffer = AVAudioPCMBuffer(
-            pcmFormat: engineFormat, frameCapacity: outCap
-        ) else {
-            throw AborgAIError.readFailure("alloc engine PCM buffer")
-        }
-        var hasFed = false
-        var convertError: NSError?
-        let convStatus = converter.convert(to: outBuffer, error: &convertError) {
-            _, status in
-            if hasFed {
-                status.pointee = .endOfStream
-                return nil
-            }
-            hasFed = true
-            status.pointee = .haveData
-            return nativeBuffer
-        }
-        if convStatus == .error {
-            throw AborgAIError.readFailure(
-                "AVAudioConverter.convert: \(convertError?.localizedDescription ?? "unknown")"
-            )
-        }
-        analyzerBuffer = outBuffer
+    reader.add(trackOutput)
+    if !reader.startReading() {
+        let detail = reader.error.map { "\($0)" } ?? "unknown"
+        throw AborgAIError.readFailure("AVAssetReader.startReading: \(detail)")
     }
 
-    // 7. Build the input AsyncSequence with one buffer at the
-    //    window's absolute start time, then finish. The
-    //    transcriber's results will carry `range` values in
-    //    that same absolute time-base.
-    let windowStart = CMTime(
-        seconds: startSecs, preferredTimescale: 1_000_000
-    )
+    // 7. Bridge CMSampleBuffer → AVAudioPCMBuffer → AnalyzerInput
+    //    one chunk at a time. Each CMSampleBuffer is typically
+    //    a few thousand frames (~100 ms at 16 kHz); we forward
+    //    them as-is so the analyzer's internal buffering is the
+    //    only place audio piles up.
     let (inputs, continuation) = AsyncStream.makeStream(of: AnalyzerInput.self)
-    continuation.yield(AnalyzerInput(buffer: analyzerBuffer, bufferStartTime: windowStart))
-    continuation.finish()
+
+    // Spawn the producer task so feeding overlaps with
+    // transcriber result drain (see resultsTask below).
+    let producer = Task {
+        defer { continuation.finish() }
+        while !Task.isCancelled {
+            guard let sample = trackOutput.copyNextSampleBuffer() else {
+                return
+            }
+            guard let pcm = makePcmBuffer(sample: sample, format: engineFormat) else {
+                // Skip the chunk on conversion failure;
+                // aggregate-level errors surface via
+                // reader.status when the producer ends.
+                continue
+            }
+            let pts = CMSampleBufferGetPresentationTimeStamp(sample)
+            continuation.yield(AnalyzerInput(buffer: pcm, bufferStartTime: pts))
+        }
+    }
+    _ = producer  // hold the task alive; the defer fires on completion
 
     // 8. Drain results concurrently with feeding the analyzer.
     let resultsTask = Task { () throws -> [AborgSegment] in

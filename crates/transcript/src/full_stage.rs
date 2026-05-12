@@ -106,54 +106,39 @@ impl Stage for TranscribeFullStage {
             return Ok(StageOutcome::Skipped);
         };
 
-        let mut all_segments: Vec<TranscriptSegment> = Vec::new();
-        // Integer chunk count avoids the float-comparison loop
-        // clippy correctly flags as fragile near boundaries.
-        // `chunks_total = ceil(total_secs / chunk_secs)`.
-        let chunk_secs = self.transcribe.full_chunk_secs;
-        // f64 → u64 floor cast: total_secs is non-negative and
-        // bounded above by the longest plausible audiobook
-        // (~30 hr = 108_000 s, well inside u64). The +1 handles
-        // the trailing partial chunk.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let chunks_total = (plan.total_secs / chunk_secs).ceil().max(0.0) as u64;
-        for chunk_idx in 0..chunks_total {
-            // u64 → f64: chunk_idx is bounded by chunks_total,
-            // which we just computed from total_secs / chunk_secs;
-            // the multiplication won't exceed total_secs and so
-            // can't overflow the f64 mantissa for any reasonable
-            // book length.
-            #[allow(clippy::cast_precision_loss)]
-            let chunk_start = chunk_idx as f64 * chunk_secs;
-            let chunk_end = (chunk_start + chunk_secs).min(plan.total_secs);
-            tracing::debug!(
-                book = %book_id,
-                chunk_start,
-                chunk_end,
-                total = plan.total_secs,
-                "transcribe.full.chunk"
-            );
-            match transcribe_window_typed(&plan.file_path, chunk_start, chunk_end, &plan.locale)
-                .await
-            {
-                Ok(mut segs) => {
-                    all_segments.append(&mut segs);
-                }
-                Err(BridgeError::ModelNotInstalled) => {
-                    // The head/tail stage already queued this
-                    // locale for the idle installer (3A.4.1); a
-                    // second insert is a no-op. Just bail and
-                    // wait for the install loop to re-queue us.
-                    tracing::warn!(
-                        locale = %plan.locale,
-                        book = %book_id,
-                        "transcribe.full.skip.model_not_installed"
-                    );
-                    return Ok(StageOutcome::Skipped);
-                }
-                Err(e) => return Err(e.into()),
+        // Single transcribe call for the whole book — the Swift
+        // bridge (3D.3) uses `AVAssetReader` to stream PCM into
+        // `SpeechAnalyzer` chunk-by-chunk; there's no Rust-side
+        // chunking needed. One analyzer session per book =
+        // continuous context across the whole transcript =
+        // no chunk-boundary artifacts.
+        tracing::debug!(
+            book = %book_id,
+            total = plan.total_secs,
+            "transcribe.full.start"
+        );
+        let all_segments = match transcribe_window_typed(
+            &plan.file_path,
+            0.0,
+            plan.total_secs,
+            &plan.locale,
+        )
+        .await
+        {
+            Ok(segs) => segs,
+            Err(BridgeError::ModelNotInstalled) => {
+                // Idle installer already queued this locale via
+                // head/tail (3A.4.1). Bail; we get re-queued
+                // when the model lands.
+                tracing::warn!(
+                    locale = %plan.locale,
+                    book = %book_id,
+                    "transcribe.full.skip.model_not_installed"
+                );
+                return Ok(StageOutcome::Skipped);
             }
-        }
+            Err(e) => return Err(e.into()),
+        };
 
         if all_segments.is_empty() {
             // Engine returned nothing for the whole file —

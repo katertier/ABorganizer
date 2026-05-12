@@ -554,13 +554,6 @@ pub struct TranscribeTunables {
     /// new locale gets transcribed within an hour; slow enough
     /// that an empty queue costs negligible CPU.
     pub idle_install_check_secs: u64,
-    /// Per-chunk window size (seconds) for the full-book
-    /// transcribe stage. Retained for the Rust-side chunking
-    /// path until the Swift `AVAssetReader` rewrite lands;
-    /// after that, the rewrite drops Rust-side chunks entirely
-    /// and this field can be removed. 300 s (5 min) keeps peak
-    /// PCM RAM ~20 MB.
-    pub full_chunk_secs: f64,
     /// Positions through the book at which the
     /// `transcribe-samples` stage takes short windows for
     /// language confirmation + fast DNA-tag corpus. Fractions
@@ -585,7 +578,6 @@ impl Default for TranscribeTunables {
             model_version: "speech-26.0-v1".into(),
             min_duration_secs: 30.0,
             idle_install_check_secs: 1_800,
-            full_chunk_secs: 300.0,
             sample_positions: vec![0.25, 0.50, 0.75],
             sample_secs: 60.0,
         }
