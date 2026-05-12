@@ -53,6 +53,13 @@ jobs:
           prefix-key: "v1-rust"
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
+  # Every rust-cache step uses `prefix-key: v1-rust` to invalidate
+  # the v0-rust-* slots that hit partial-restore corruption
+  # (cargo symlink replaced with rustup-init). See the clippy job
+  # above for the diagnostic. Applying uniformly across the matrix
+  # because PR #29 surfaced the same symptom on the audit job
+  # after PR #28 fixed only clippy + sqlx.
+
   test:
     name: cargo test
     runs-on: macos-14
@@ -60,6 +67,8 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-rust"
       - run: cargo test --workspace --all-targets
 
   xtask:
@@ -69,6 +78,8 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-rust"
       - run: cargo xtask check
 
   deny:
@@ -78,6 +89,8 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-rust"
       # Run cargo-deny directly. The official action is Docker-based
       # (Linux-only); we want to keep the entire CI matrix on macOS so
       # toolchain assumptions match the target.
@@ -91,6 +104,8 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-rust"
       - run: cargo install --locked cargo-audit || true
       # `--ignore` mirrors the ignore list in deny.toml. Keep in sync.
       # Ignores:
