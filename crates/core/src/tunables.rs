@@ -55,6 +55,10 @@ pub struct Tunables {
     /// Tag presentation + export (genre `@`, DNA `#`, spoiler `!`
     /// prefix conventions and how they're surfaced to readers).
     pub tags: TagsTunables,
+
+    /// Language detection (NLLanguageRecognizer) — pre- and
+    /// post-transcribe gates.
+    pub language: LanguageTunables,
 }
 
 impl Default for Tunables {
@@ -72,6 +76,7 @@ impl Default for Tunables {
             scheduler: SchedulerTunables::default(),
             tag_read: TagReadTunables::default(),
             tags: TagsTunables::default(),
+            language: LanguageTunables::default(),
         }
     }
 }
@@ -395,6 +400,66 @@ impl Default for TagsTunables {
         Self {
             show_spoiler_tags: false,
             export_tag_prefix: true,
+        }
+    }
+}
+
+/// Language detection knobs (`NLLanguageRecognizer` via Swift FFI).
+///
+/// Two call paths:
+///
+/// - **Pre-transcribe**: feed concatenated tag text to pick the
+///   `SpeechTranscriber` locale. Doesn't need a skip; tag text
+///   has no jingles.
+/// - **Post-transcribe validation**: feed transcript segments
+///   past the publisher-jingle window. The skip matters here —
+///   Audible + most publishers run an English house jingle in
+///   the first ~30 s regardless of book language, which biases
+///   short non-English samples.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LanguageTunables {
+    /// Drop transcript segments ending before this offset (ms)
+    /// when running post-transcribe language detection. Captures
+    /// the Audible house jingle (~6 s) plus typical publisher
+    /// branding (15–30 s). 30 000 ms is the conservative default
+    /// that covers both. Pre-transcribe detection (tag-text)
+    /// ignores this.
+    pub post_transcribe_skip_ms: u64,
+    /// Number of alternatives to ask `NLLanguageRecognizer` for
+    /// beyond the dominant hit. Stored alongside the chosen
+    /// language so downstream extractors can see how close the
+    /// runner-up was (low margin → less trust in the locale).
+    pub max_alternatives: usize,
+    /// Minimum confidence on the dominant hypothesis before we
+    /// commit to a detected locale. Below this, we fall back to
+    /// the default locale (`default_locale`).
+    pub min_confidence: f64,
+    /// Locale used when detection is inconclusive or unavailable
+    /// (no tag text, framework error, below-threshold confidence).
+    /// BCP-47.
+    pub default_locale: String,
+    /// Minimum input length (chars) before we even attempt
+    /// detection. `NLLanguageRecognizer` is unreliable on <16
+    /// chars; below this we skip and fall back to default.
+    pub min_text_chars: usize,
+}
+
+impl Default for LanguageTunables {
+    fn default() -> Self {
+        Self {
+            // 30 s — Audible jingle ~6 s, publisher branding can
+            // push to 20–25 s on some imprints; 30 is the cushion.
+            post_transcribe_skip_ms: 30_000,
+            max_alternatives: 3,
+            // 0.65 is where NLLanguageRecognizer's separation
+            // between top-2 hypotheses tends to settle into
+            // "actually confident, not coin-flip." Verified on
+            // empirical ABtagger samples — see ROADMAP "Language
+            // detection thresholds."
+            min_confidence: 0.65,
+            default_locale: "en-US".into(),
+            min_text_chars: 16,
         }
     }
 }

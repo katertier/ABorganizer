@@ -14,8 +14,12 @@
 //! Add a new extractor: implement [`Extractor`], register it.
 
 pub mod bridge;
+pub mod language;
 
-pub use bridge::{TranscriptSegment, transcribe_window};
+pub use bridge::{TranscriptSegment, install_speech_model, transcribe_window};
+pub use language::{
+    LanguageDetection, LanguageHit, detect as detect_language, detect_from_transcript,
+};
 
 use serde::{Deserialize, Serialize};
 

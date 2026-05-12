@@ -85,15 +85,15 @@ fn main() {
             target,
             "-framework",
             "Foundation",
-            // Speech + AVFoundation are listed even though the
-            // 3A.2 stub doesn't use them — that way 3A.3 can
-            // swap the stub body without touching the build
-            // script. The link is cheap; no symbols pulled in
-            // for the stub.
             "-framework",
             "Speech",
             "-framework",
             "AVFoundation",
+            // NaturalLanguage for `NLLanguageRecognizer`
+            // (`aborg_detect_language` entry point — pre + post-
+            // transcribe language detection).
+            "-framework",
+            "NaturalLanguage",
         ])
         .arg("-o")
         .arg(&lib_path)
@@ -123,17 +123,16 @@ fn main() {
     println!("cargo:rustc-link-lib=framework=Foundation");
     println!("cargo:rustc-link-lib=framework=Speech");
     println!("cargo:rustc-link-lib=framework=AVFoundation");
+    println!("cargo:rustc-link-lib=framework=NaturalLanguage");
 
-    // 6. Tell the final binary's dynamic loader where Swift's
-    //    runtime libraries live. swiftc -emit-library -static
-    //    statically links our code but leaves swift_Concurrency
-    //    and other runtime libs as dynamic refs; without an
-    //    rpath the binary fails to launch with
+    // 6. The Swift runtime rpath that downstream binaries need
+    //    lives in `.cargo/config.toml` (the per-target
+    //    `rustflags` block). `cargo:rustc-link-arg=` from a
+    //    build script only applies to its own crate's
+    //    targets — not to downstream binaries that link the
+    //    static lib. Tested: without the config-level rpath,
+    //    `aborg-tools::transcribe-probe` fails to launch with
     //    "Library not loaded: @rpath/libswift_Concurrency.dylib".
-    //    `/usr/lib/swift` is the system-shipped Swift runtime
-    //    on macOS 12+ (the OS bakes the ABI-stable Swift
-    //    runtime into the system).
-    println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
 
     // 7. Flag the bridge as available so the Rust side compiles
     //    its `extern "C"` block.

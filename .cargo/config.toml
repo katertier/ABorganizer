@@ -19,4 +19,16 @@ rustflags = [
     "-C", "target-cpu=apple-m1",
     # Backtraces stay legible after `strip = "symbols"`.
     "-C", "force-frame-pointers=yes",
+    # Swift FFI bridge (crates/transcript) statically links a
+    # Swift archive that depends on `libswift_Concurrency.dylib`
+    # et al. macOS 12+ ships the Swift runtime at `/usr/lib/swift`;
+    # the rpath lets dyld find it at launch. Without it, any
+    # binary that pulls in `ab-transcript` fails with
+    # "Library not loaded: @rpath/libswift_Concurrency.dylib".
+    # `cargo:rustc-link-arg=` from the bridge crate's build.rs
+    # only applies to its own crate's targets — not transitively
+    # to downstream binaries — so it must live here.
+    # Harmless for binaries that don't link the bridge: just an
+    # extra unused rpath search path.
+    "-C", "link-arg=-Wl,-rpath,/usr/lib/swift",
 ]

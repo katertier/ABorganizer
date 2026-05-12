@@ -64,13 +64,18 @@ mod ffi {
 
     use super::TranscriptSegment;
 
-    // Symbol exported by `swift/aborg_ai.swift` (see the
-    // `@_cdecl("aborg_transcribe_window")` annotation there).
+    // Symbols exported by `swift/aborg_ai.swift` (see the
+    // `@_cdecl(...)` annotations there).
     unsafe extern "C" {
         fn aborg_transcribe_window(
             input_path: *const c_char,
             start_secs: f64,
             end_secs: f64,
+            locale: *const c_char,
+            ctx: *mut c_void,
+            callback: unsafe extern "C" fn(*mut c_void, *const c_char, usize),
+        );
+        fn aborg_install_speech_model(
             locale: *const c_char,
             ctx: *mut c_void,
             callback: unsafe extern "C" fn(*mut c_void, *const c_char, usize),
@@ -106,6 +111,43 @@ mod ffi {
                 .map_err(|e| Error::stage("transcribe", format!("non-utf8 buffer: {e}")))
         };
         let _ = sender.send(outcome);
+    }
+
+    /// C ABI callback for the install entry point. Swift fires
+    /// with a non-null one-byte buffer on success, null on
+    /// failure. We just need success/failure, not the payload.
+    unsafe extern "C" fn on_install_result(ctx: *mut c_void, ptr: *const c_char, _len: usize) {
+        if ctx.is_null() {
+            return;
+        }
+        // SAFETY: paired with `Box::into_raw` in
+        // `install_speech_model_impl`; Swift returns ctx
+        // unchanged exactly once.
+        let sender = unsafe { Box::from_raw(ctx.cast::<oneshot::Sender<Result<()>>>()) };
+        let outcome: Result<()> = if ptr.is_null() {
+            Err(Error::stage(
+                "transcribe",
+                "Swift install callback returned null (see stderr for detail)",
+            ))
+        } else {
+            Ok(())
+        };
+        let _ = sender.send(outcome);
+    }
+
+    pub(super) async fn install_speech_model_impl(locale: &str) -> Result<()> {
+        let locale_c = std::ffi::CString::new(locale)
+            .map_err(|e| Error::stage("transcribe", format!("locale has NUL byte: {e}")))?;
+        let (tx, rx) = oneshot::channel::<Result<()>>();
+        let ctx = Box::into_raw(Box::new(tx)).cast::<c_void>();
+        // SAFETY: `locale_c` outlives the synchronous Swift
+        // call; the install Task runs detached on the Swift
+        // side and only fires `on_install_result` exactly once.
+        unsafe {
+            aborg_install_speech_model(locale_c.as_ptr(), ctx, on_install_result);
+        }
+        rx.await
+            .map_err(|_| Error::stage("transcribe", "Swift dropped install callback"))?
     }
 
     pub(super) async fn transcribe_window_impl(
@@ -146,6 +188,35 @@ mod ffi {
         })??;
         serde_json::from_str(&json)
             .map_err(|e| Error::stage("transcribe", format!("segment-array parse: {e}")))
+    }
+}
+
+/// Ensure the on-device Speech model for `locale` is installed.
+/// Idempotent: returns Ok immediately if already installed.
+///
+/// First-time installs can take multiple minutes — the daemon
+/// should call this at Idle priority (or behind an explicit user
+/// action), not in the middle of an interactive transcribe.
+///
+/// # Errors
+///
+/// - `Error::Stage("transcribe", ...)` when the bridge isn't
+///   linked (non-macOS / no-swiftc build).
+/// - `Error::Stage("transcribe", ...)` when the locale isn't
+///   supported on this host, Apple Intelligence is disabled, or
+///   the download fails.
+pub async fn install_speech_model(locale: &str) -> Result<()> {
+    #[cfg(aborg_ai_bridge)]
+    {
+        ffi::install_speech_model_impl(locale).await
+    }
+    #[cfg(not(aborg_ai_bridge))]
+    {
+        let _ = locale;
+        Err(Error::stage(
+            "transcribe",
+            "Speech FFI bridge not linked (non-macOS host or swiftc unavailable)",
+        ))
     }
 }
 
