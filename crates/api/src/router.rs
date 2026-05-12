@@ -17,6 +17,10 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/version", get(version))
         .route("/library/scan", post(library_scan))
         .route("/library/duplicates", get(library_duplicates))
+        .route(
+            "/library/pending_speech_installs",
+            get(library_pending_speech_installs),
+        )
         .route("/books", get(books_list))
         .with_state(state)
 }
@@ -238,6 +242,54 @@ async fn library_duplicates(
     groups.sort_by_key(|g| std::cmp::Reverse(g.matching_offsets));
 
     Ok(Json(DuplicatesResponse { groups }))
+}
+
+/// Response shape for `GET /library/pending_speech_installs`.
+/// One row per locale that books are waiting on; the daemon's
+/// idle install loop drains these in the background.
+#[derive(Serialize)]
+struct PendingSpeechInstall {
+    locale: String,
+    status: String,
+    blocked_book_count: i64,
+    last_error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct PendingSpeechInstallsResponse {
+    installs: Vec<PendingSpeechInstall>,
+}
+
+/// Surface the speech-model install backlog to clients so
+/// interactive scans can show "this book is waiting on
+/// <locale> model install" instead of silently leaving the
+/// stage at `Skipped`. The idle install loop is what drives
+/// the actual download; this endpoint is read-only.
+async fn library_pending_speech_installs(
+    State(state): State<ApiState>,
+) -> Result<Json<PendingSpeechInstallsResponse>, ApiError> {
+    let rows = sqlx::query!(
+        "SELECT p.locale, p.status, p.last_error, \
+                (SELECT COUNT(*) FROM book_locale_blocks b \
+                 WHERE b.locale = p.locale) AS \"blocked_book_count!\" \
+         FROM pending_speech_installs p \
+         WHERE p.status IN ('pending', 'installing', 'failed') \
+         ORDER BY p.status, p.queued_at",
+    )
+    .fetch_all(state.inner.ephemeral.pool())
+    .await
+    .map_err(|e| ab_core::Error::Database(format!("pending speech installs: {e}")))?;
+
+    let installs = rows
+        .into_iter()
+        .map(|r| PendingSpeechInstall {
+            locale: r.locale,
+            status: r.status,
+            blocked_book_count: r.blocked_book_count,
+            last_error: r.last_error,
+        })
+        .collect();
+    Ok(Json(PendingSpeechInstallsResponse { installs }))
 }
 
 async fn books_list(State(state): State<ApiState>) -> Result<Json<BooksResponse>, ApiError> {
