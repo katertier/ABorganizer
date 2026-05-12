@@ -151,7 +151,7 @@ impl Stage for TranscribeFullStage {
             book_id,
             &all_segments,
             &plan.locale,
-            &self.transcribe.model_version,
+            &self.transcribe.extractor_version,
         )
         .await?;
         Ok(StageOutcome::Done)
@@ -195,7 +195,7 @@ async fn plan_full(
     };
 
     // Idempotency.
-    if full_cache_fresh(library, book_id, &transcribe.model_version, &locale).await? {
+    if full_cache_fresh(library, book_id, &transcribe.extractor_version, &locale).await? {
         return Ok(None);
     }
 

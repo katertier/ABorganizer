@@ -14,14 +14,14 @@
 //!    caps, and writes one row per tag to `book_tags` with
 //!    `source = "dna_llm"` and the prefix convention
 //!    (`#<tag>` for DNA, `!<tag>` for spoilers).
-//! 5. Caches the raw response payload (model_version-stamped)
+//! 5. Caches the raw response payload (extractor_version-stamped)
 //!    in `ai_cache` keyed `(book_id, "dna_tags")` so a re-run
 //!    at the same model version is idempotent.
 //!
 //! ## Idempotency
 //!
 //! Skip when an `ai_cache` row exists at the current
-//! `model_version`. Bump the version (`LlmTunables::model_version`)
+//! `extractor_version`. Bump the version (`LlmTunables::extractor_version`)
 //! to force re-extract across the library.
 //!
 //! ## Failure modes
@@ -36,7 +36,7 @@
 //!   not silent skips.
 //! - Model returned malformed JSON → log warning + `Err`. The
 //!   executor records the failure; rerun after a prompt fix
-//!   or `model_version` bump.
+//!   or `extractor_version` bump.
 
 use std::sync::Arc;
 
@@ -91,7 +91,7 @@ impl Stage for ExtractDnaTagsStage {
 
     async fn run(&self, ctx: &StageContext, book_id: BookId) -> Result<StageOutcome> {
         // 1. Idempotency.
-        if dna_cache_fresh(&ctx.library, book_id, &self.tunables.model_version).await? {
+        if dna_cache_fresh(&ctx.library, book_id, &self.tunables.extractor_version).await? {
             return Ok(StageOutcome::Skipped);
         }
 
@@ -148,7 +148,7 @@ impl Stage for ExtractDnaTagsStage {
             book_id,
             &raw,
             &transcript.locale,
-            &self.tunables.model_version,
+            &self.tunables.extractor_version,
         )
         .await?;
 

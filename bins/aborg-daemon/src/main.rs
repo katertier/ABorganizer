@@ -105,7 +105,7 @@ fn build_pipeline_stages(tunables: &Tunables) -> Vec<Arc<dyn Stage>> {
         // `transcribe-head-tail` (slice 3A.4) runs the on-device
         // Speech engine over the first 6 min + last 30 s of the
         // book, stores both transcripts in `ai_cache` keyed by
-        // `model_version`, and seeds the language candidates
+        // `extractor_version`, and seeds the language candidates
         // (pre- + post-transcribe).
         Arc::new(ab_transcript::TranscribeHeadTailStage::new(
             &tunables.transcribe,

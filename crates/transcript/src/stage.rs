@@ -15,7 +15,7 @@
 //!    array is tiny) in `ai_cache` keyed by
 //!    `(book_id, cache_type)` with `cache_type` ∈
 //!    {`transcript_head`, `transcript_tail`} and the
-//!    `model_version` tunable stamped on the row.
+//!    `extractor_version` tunable stamped on the row.
 //! 4. Runs post-transcribe `NLLanguageRecognizer` on the head
 //!    transcript past `LanguageTunables.post_transcribe_skip_ms`
 //!    (skips the publisher jingle window), writes a language
@@ -26,7 +26,7 @@
 //! ## Idempotency
 //!
 //! The stage skips a book when both head and tail rows already
-//! exist in `ai_cache` at the configured `model_version`. Bump
+//! exist in `ai_cache` at the configured `extractor_version`. Bump
 //! the version (or wipe rows manually) to force re-transcribe.
 //!
 //! ## Failure modes
@@ -91,7 +91,7 @@ impl Stage for TranscribeHeadTailStage {
 
     async fn run(&self, ctx: &StageContext, book_id: BookId) -> Result<StageOutcome> {
         // Pre-transcribe gate picks the locale from tag text. The
-        // cache freshness check below uses model_version ONLY (no
+        // cache freshness check below uses extractor_version ONLY (no
         // locale comparison): pre-transcribe locale changing
         // between scans isn't enough to re-transcribe by itself.
         // The re-transcribe trigger is the post-transcribe quality
@@ -142,7 +142,7 @@ impl Stage for TranscribeHeadTailStage {
             CacheWrite {
                 segments: &head_segments,
                 locale: &locale,
-                extractor_version: &self.transcribe.model_version,
+                extractor_version: &self.transcribe.extractor_version,
             },
         )
         .await?;
@@ -173,7 +173,7 @@ impl Stage for TranscribeHeadTailStage {
                         CacheWrite {
                             segments: &segments,
                             locale: &locale,
-                            extractor_version: &self.transcribe.model_version,
+                            extractor_version: &self.transcribe.extractor_version,
                         },
                     )
                     .await?;
@@ -239,12 +239,12 @@ struct TailWindow {
 /// Resolve file paths, durations, and head/tail windows.
 /// Returns `None` when the book should be skipped (no active
 /// file, total duration too short, or both cached transcripts
-/// already match the current `model_version`).
+/// already match the current `extractor_version`).
 ///
-/// Idempotency is `model_version`-only. The 3A.4.2 re-transcribe
+/// Idempotency is `extractor_version`-only. The 3A.4.2 re-transcribe
 /// trigger is the in-stage post-transcribe disagreement quality
 /// gate, not freshness here — re-running the stage doesn't
-/// repeat the transcribe unless the `model_version` bumped or the
+/// repeat the transcribe unless the `extractor_version` bumped or the
 /// quality gate fires after the head transcript is produced.
 async fn plan_book(
     library: &LibraryDb,
@@ -290,7 +290,7 @@ async fn plan_book(
     });
 
     // Idempotency: skip when both windows are already cached at
-    // this model_version. Locale of the cached row is NOT a
+    // this extractor_version. Locale of the cached row is NOT a
     // freshness signal — pre-transcribe locale can change
     // between runs without invalidating the cache. The quality
     // gate after head transcription is what re-runs on
@@ -299,7 +299,7 @@ async fn plan_book(
         library,
         book_id,
         CacheKey::TranscriptHead,
-        &transcribe.model_version,
+        &transcribe.extractor_version,
     )
     .await?;
     let tail_fresh = if tail.is_some() {
@@ -307,7 +307,7 @@ async fn plan_book(
             library,
             book_id,
             CacheKey::TranscriptTail,
-            &transcribe.model_version,
+            &transcribe.extractor_version,
         )
         .await?
     } else {

@@ -154,7 +154,7 @@ impl Stage for TranscribeSamplesStage {
             book_id,
             &all_segments,
             &plan.locale,
-            &self.transcribe.model_version, // ai_cache.extractor_version
+            &self.transcribe.extractor_version, // ai_cache.extractor_version
         )
         .await?;
 
@@ -231,7 +231,7 @@ async fn plan_samples(
     };
 
     // Idempotency.
-    if samples_cache_fresh(library, book_id, &transcribe.model_version, &locale).await? {
+    if samples_cache_fresh(library, book_id, &transcribe.extractor_version, &locale).await? {
         return Ok(None);
     }
 

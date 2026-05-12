@@ -61,11 +61,11 @@ pub struct Tunables {
     pub language: LanguageTunables,
 
     /// Head/tail transcribe stage (`SpeechAnalyzer` window sizes,
-    /// `model_version` stamp).
+    /// `extractor_version` stamp).
     pub transcribe: TranscribeTunables,
 
     /// Apple Intelligence Foundation Models — token budgets +
-    /// `model_version` stamp for the LLM-driven extractor stages
+    /// `extractor_version` stamp for the LLM-driven extractor stages
     /// (DNA tags, spoiler-free summary, story arc, characters).
     pub llm: LlmTunables,
 
@@ -520,9 +520,9 @@ impl Default for LanguageTunables {
 /// for outro audiologo + last-sentence boundary work. Results
 /// land in `ai_cache` keyed by `(book_id, cache_type)` with
 /// `cache_type` ∈ {`transcript_head`, `transcript_tail`} and
-/// the `model_version` stamp below.
+/// the `extractor_version` stamp below.
 ///
-/// Why store `model_version`: when Apple ships a new
+/// Why store `extractor_version`: when Apple ships a new
 /// `SpeechAnalyzer` engine, bump this and the stage re-runs
 /// (the cached row is stale). Derived features that DON'T need
 /// the new engine (e.g. re-running language detection with a
@@ -542,12 +542,12 @@ pub struct TranscribeTunables {
     /// credits ("This has been an Audible production…")
     /// without paying for non-jingle book content.
     pub tail_secs: f64,
-    /// Engine identifier written to `ai_cache.model_version`.
+    /// Engine identifier written to `ai_cache.extractor_version`.
     /// Bump to force re-transcription across the library when
     /// the Speech framework improves materially. The string is
     /// opaque to the engine — it's a content-addressable cache
     /// key on our side. Convention: `speech-<macOS>-v<bump>`.
-    pub model_version: String,
+    pub extractor_version: String,
     /// Skip the stage when the active file is shorter than this
     /// (seconds). Below ~30 s neither head nor tail are useful;
     /// the file is probably a sample / preview / corrupt entry.
@@ -581,7 +581,7 @@ impl Default for TranscribeTunables {
         Self {
             head_secs: 360.0,
             tail_secs: 30.0,
-            model_version: "speech-26.0-v1".into(),
+            extractor_version: "speech-26.0-v1".into(),
             min_duration_secs: 30.0,
             idle_install_check_secs: 1_800,
             sample_positions: vec![0.25, 0.50, 0.75],
@@ -594,8 +594,8 @@ impl Default for TranscribeTunables {
 /// extractor stages backed by Apple Intelligence's Foundation
 /// Models framework.
 ///
-/// `model_version` is the cache-invalidation key written to
-/// `ai_cache.model_version` for every row produced by an LLM
+/// `extractor_version` is the cache-invalidation key written to
+/// `ai_cache.extractor_version` for every row produced by an LLM
 /// stage. Bump it (e.g. `fm-26.0-v1` → `fm-26.0-v2`) to force
 /// every book re-extract — useful after a prompt rewrite, after
 /// Apple ships a major Foundation Models update, or after a
@@ -610,10 +610,10 @@ impl Default for TranscribeTunables {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LlmTunables {
-    /// Version stamp written to `ai_cache.model_version` for
+    /// Version stamp written to `ai_cache.extractor_version` for
     /// every LLM-produced row. Opaque to the runtime — it's a
     /// cache key on our side. Convention: `fm-<macOS>-v<bump>`.
-    pub model_version: String,
+    pub extractor_version: String,
     /// Token budget for the DNA-tag extractor (`#`-prefixed
     /// safe-to-display tags + `!`-prefixed spoiler tags).
     /// 800 tokens is plenty for a JSON array of 5-10 tags each
@@ -647,7 +647,7 @@ pub struct LlmTunables {
 impl Default for LlmTunables {
     fn default() -> Self {
         Self {
-            model_version: "fm-26.0-v1".into(),
+            extractor_version: "fm-26.0-v1".into(),
             dna_max_tokens: 800,
             dna_max_tags: 8,
             dna_max_spoiler_tags: 4,

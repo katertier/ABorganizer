@@ -20,7 +20,7 @@
 //! - Characters into the `characters` table.
 //!
 //! All four follow the same pattern: idempotent re-runs
-//! keyed by `LlmTunables.model_version` stamped on the
+//! keyed by `LlmTunables.extractor_version` stamped on the
 //! `ai_cache` row; user-fixable Foundation-Models failures
 //! (Apple Intelligence disabled, device not eligible, model
 //! not ready) propagate as `Err` so `aborg doctor llm` can
