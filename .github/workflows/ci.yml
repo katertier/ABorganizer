@@ -103,9 +103,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: "v1-rust"
+      # No rust-cache: the cache occasionally restored a state
+      # where `cargo` resolved to `rustup-init` (see PR #28's
+      # diagnostic threads). The `cargo install --locked
+      # cargo-audit` step rebuilds cargo-audit in ~30s; saving
+      # the cache isn't worth chasing the partial-restore
+      # corruption.
       - run: cargo install --locked cargo-audit || true
       # `--ignore` mirrors the ignore list in deny.toml. Keep in sync.
       # Ignores:
@@ -127,13 +130,17 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      # `prefix-key: v1-rust` invalidates the prior `v0-rust-sqlx-…`
-      # slot which hit the same partial-restore corruption as the
-      # clippy job (`cargo` symlink replaced with `rustup-init`).
-      # See the clippy job above for the diagnostic + rationale.
-      - uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: "v1-rust"
+      # No rust-cache: this job hit a partial-restore corruption
+      # where the cached `~/.cargo/bin/cargo` shim resolved to
+      # `rustup-init` after restore, so subsequent `cargo install`
+      # / `cargo sqlx prepare` failed with
+      # `error: unexpected argument 'install' found`. The bump
+      # to `prefix-key: v1-rust` (commit on this branch) didn't
+      # help because the same failure pattern repopulated the
+      # new slot. Removing the cache is the surgical fix; the
+      # `cargo install --locked sqlx-cli` step rebuilds in
+      # ~30 s and the prepare step verifies a tiny `.sqlx/`
+      # cache against the prep DB.
       - run: cargo install --locked sqlx-cli --no-default-features --features sqlite,rustls --version "~0.8" || true
       - name: Apply all migrations to a prep DB
         run: |
