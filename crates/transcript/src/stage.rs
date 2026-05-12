@@ -90,22 +90,20 @@ impl Stage for TranscribeHeadTailStage {
     }
 
     async fn run(&self, ctx: &StageContext, book_id: BookId) -> Result<StageOutcome> {
-        // Pre-transcribe gate runs FIRST so the locale it picks
-        // can participate in the cache-freshness check. If the
-        // cached transcript was produced in a different locale
-        // (e.g. tag-read first ran when narrator was empty and
-        // we defaulted to en-US; later enrich filled in the
-        // German narrator and the gate now picks "de"), we want
-        // to re-transcribe — same model_version, different
-        // locale. See PROJECT.md "Language disagreement →
-        // re-transcribe" for the rationale.
+        // Pre-transcribe gate picks the locale from tag text. The
+        // cache freshness check below uses model_version ONLY (no
+        // locale comparison): pre-transcribe locale changing
+        // between scans isn't enough to re-transcribe by itself.
+        // The re-transcribe trigger is the post-transcribe quality
+        // signal — see the disagreement check after head_segments
+        // are produced.
         let pre = pre_transcribe_locale(&ctx.library, book_id, &self.language).await?;
         let locale = pre.detection.as_ref().map_or_else(
             || self.language.default_locale.clone(),
             |d| d.language.clone(),
         );
 
-        let Some(plan) = plan_book(&ctx.library, book_id, &self.transcribe, &locale).await? else {
+        let Some(plan) = plan_book(&ctx.library, book_id, &self.transcribe).await? else {
             return Ok(StageOutcome::Skipped);
         };
 
@@ -116,23 +114,14 @@ impl Stage for TranscribeHeadTailStage {
             write_language_candidate(&ctx.library, book_id, SOURCE_NL_LANGUAGE_TAGS, d).await?;
         }
 
-        // Head window. On `ModelMissing`, queue the locale for
-        // idle install and stop; the idle loop re-submits this
-        // book once the model lands.
-        let head_segments = match transcribe_window_with_skip_on_no_model(
-            &plan.head_path,
-            0.0,
-            plan.head_end_secs,
-            &locale,
-        )
-        .await?
-        {
-            TranscribeWindowOutcome::Segments(s) => s,
-            TranscribeWindowOutcome::ModelMissing => {
-                queue_locale_install(&ctx.ephemeral, book_id, &locale).await?;
-                return Ok(StageOutcome::Skipped);
-            }
+        // Head window + post-transcribe quality gate. Returns
+        // `None` when the path queued an idle install + bailed.
+        let Some((head_segments, locale)) =
+            transcribe_head_with_quality_gate(ctx, book_id, &plan, &locale, &self.language).await?
+        else {
+            return Ok(StageOutcome::Skipped);
         };
+
         write_transcript_cache(
             &ctx.library,
             book_id,
@@ -144,23 +133,6 @@ impl Stage for TranscribeHeadTailStage {
             },
         )
         .await?;
-
-        // Post-transcribe language candidate (head, with skip).
-        if let Some(d) = detect_from_transcript(
-            &head_segments,
-            self.language.post_transcribe_skip_ms,
-            self.language.max_alternatives,
-        )
-        .await?
-        {
-            write_language_candidate(
-                &ctx.library,
-                book_id,
-                SOURCE_NL_LANGUAGE_TRANSCRIPT_HEAD,
-                &d,
-            )
-            .await?;
-        }
 
         // Tail window (skipped on short books). On `ModelMissing`
         // the head path already queued the locale; we just skip
@@ -255,18 +227,17 @@ struct TailWindow {
 /// Resolve file paths, durations, and head/tail windows.
 /// Returns `None` when the book should be skipped (no active
 /// file, total duration too short, or both cached transcripts
-/// already match the current `model_version` AND the locale
-/// they were transcribed in matches `current_locale`).
+/// already match the current `model_version`).
 ///
-/// The locale check is the 3A.4.2 re-transcribe-on-disagreement
-/// gate: if the cached row's embedded `locale` differs from
-/// what the pre-transcribe gate currently picks, we treat the
-/// cached row as stale and re-transcribe.
+/// Idempotency is `model_version`-only. The 3A.4.2 re-transcribe
+/// trigger is the in-stage post-transcribe disagreement quality
+/// gate, not freshness here — re-running the stage doesn't
+/// repeat the transcribe unless the `model_version` bumped or the
+/// quality gate fires after the head transcript is produced.
 async fn plan_book(
     library: &LibraryDb,
     book_id: BookId,
     transcribe: &TranscribeTunables,
-    current_locale: &str,
 ) -> Result<Option<BookPlan>> {
     let id = book_id.0;
     let row = sqlx::query!(
@@ -337,28 +308,15 @@ async fn plan_book(
     });
 
     // Idempotency: skip when both windows are already cached at
-    // this model_version AND the cached locale matches what
-    // the pre-transcribe gate would pick now. Locale mismatch
-    // → re-transcribe; the embedded locale in the cache payload
-    // is the source of truth for "what language did we feed
-    // SpeechTranscriber when we produced this row."
-    let head_fresh = cache_fresh(
-        library,
-        book_id,
-        CACHE_TYPE_HEAD,
-        &transcribe.model_version,
-        current_locale,
-    )
-    .await?;
+    // this model_version. Locale of the cached row is NOT a
+    // freshness signal — pre-transcribe locale can change
+    // between runs without invalidating the cache. The quality
+    // gate after head transcription is what re-runs on
+    // language disagreement.
+    let head_fresh =
+        cache_fresh(library, book_id, CACHE_TYPE_HEAD, &transcribe.model_version).await?;
     let tail_fresh = if tail.is_some() {
-        cache_fresh(
-            library,
-            book_id,
-            CACHE_TYPE_TAIL,
-            &transcribe.model_version,
-            current_locale,
-        )
-        .await?
+        cache_fresh(library, book_id, CACHE_TYPE_TAIL, &transcribe.model_version).await?
     } else {
         true
     };
@@ -373,48 +331,39 @@ async fn plan_book(
     }))
 }
 
-/// Minimal `Deserialize` shape used by [`cache_fresh`] to peek
-/// at the embedded `locale` field of a cached transcript payload
-/// without parsing the segment array. Module-scope so clippy
-/// doesn't trip `items_after_statements`.
-#[derive(serde::Deserialize)]
-struct CachedLocale {
-    locale: String,
-}
-
-/// Returns true when `ai_cache` already has a row for
-/// `(book_id, cache_type)` whose `model_version` AND embedded
-/// payload `locale` both match the current run. Either mismatch
-/// makes the cached row stale.
+/// Returns true when `ai_cache` already has a row at the
+/// configured `model_version` for `(book_id, cache_type)`.
 async fn cache_fresh(
     library: &LibraryDb,
     book_id: BookId,
     cache_type: &str,
     model_version: &str,
-    current_locale: &str,
 ) -> Result<bool> {
     let id = book_id.0;
     let row = sqlx::query!(
-        "SELECT model_version, content FROM ai_cache WHERE book_id = ? AND cache_type = ?",
+        "SELECT model_version FROM ai_cache WHERE book_id = ? AND cache_type = ?",
         id,
         cache_type,
     )
     .fetch_optional(library.pool())
     .await
     .map_err(|e| Error::Database(format!("transcribe cache lookup: {e}")))?;
-    let Some(row) = row else { return Ok(false) };
-    if row.model_version.as_deref() != Some(model_version) {
-        return Ok(false);
-    }
-    let Some(bytes) = row.content else {
-        return Ok(false);
-    };
-    // Unparseable cached content → treat as stale; the next run
-    // rewrites it cleanly.
-    let Ok(parsed) = serde_json::from_slice::<CachedLocale>(&bytes) else {
-        return Ok(false);
-    };
-    Ok(parsed.locale == current_locale)
+    Ok(row.is_some_and(|r| r.model_version.as_deref() == Some(model_version)))
+}
+
+/// Primary BCP-47 subtag (before the first `-`), lowercased.
+/// `"en-US"` → `"en"`, `"de"` → `"de"`, `"zh-Hans"` → `"zh"`.
+fn locale_short(bcp47: &str) -> &str {
+    bcp47.split('-').next().unwrap_or(bcp47)
+}
+
+/// True when two BCP-47 tags share the same primary subtag.
+/// Used by the post-transcribe quality gate: the recogniser's
+/// `NLLanguage` raw value is the primary subtag form ("de",
+/// "en"), while the locale we passed to `SpeechTranscriber` may
+/// be a full tag ("de-DE"). Match on the primary subtag only.
+fn same_primary_subtag(a: &str, b: &str) -> bool {
+    locale_short(a).eq_ignore_ascii_case(locale_short(b))
 }
 
 // ── Pre-transcribe language pick ─────────────────────────────────
@@ -459,6 +408,94 @@ async fn pre_transcribe_locale(
     let detection = detect(&joined, language.max_alternatives).await?;
     let detection = detection.filter(|d| d.confidence >= language.min_confidence);
     Ok(PrePick { detection })
+}
+
+// ── Head transcribe + post-transcribe quality gate ──────────────
+
+/// Transcribe the head window, run post-transcribe language
+/// detection, and (when the post-detected language disagrees
+/// with the locale we transcribed in AT HIGH CONFIDENCE)
+/// re-transcribe in the corrected locale.
+///
+/// Writes the post-transcribe language candidate row regardless
+/// of whether the quality gate fires. Returns the
+/// `(segments, locale)` pair that should be persisted to
+/// `ai_cache`, or `None` when the path queued an idle install
+/// and bailed early (caller returns `Skipped`).
+async fn transcribe_head_with_quality_gate(
+    ctx: &StageContext,
+    book_id: BookId,
+    plan: &BookPlan,
+    locale: &str,
+    language: &LanguageTunables,
+) -> Result<Option<(Vec<TranscriptSegment>, String)>> {
+    // Initial head transcribe in the pre-picked locale.
+    let head_segments = match transcribe_window_with_skip_on_no_model(
+        &plan.head_path,
+        0.0,
+        plan.head_end_secs,
+        locale,
+    )
+    .await?
+    {
+        TranscribeWindowOutcome::Segments(s) => s,
+        TranscribeWindowOutcome::ModelMissing => {
+            queue_locale_install(&ctx.ephemeral, book_id, locale).await?;
+            return Ok(None);
+        }
+    };
+
+    // Post-transcribe language detection. Always write the
+    // candidate (consensus may use it even when it agrees with
+    // the pre-pick — multi-source agreement is signal).
+    let post = detect_from_transcript(
+        &head_segments,
+        language.post_transcribe_skip_ms,
+        language.max_alternatives,
+    )
+    .await?;
+    if let Some(d) = post.as_ref() {
+        write_language_candidate(&ctx.library, book_id, SOURCE_NL_LANGUAGE_TRANSCRIPT_HEAD, d)
+            .await?;
+    }
+
+    // Quality gate. Fires when post detection is confident AND
+    // the detected primary subtag differs from the one we just
+    // transcribed in. The recogniser's raw `language` ("de") may
+    // be compared against a full BCP-47 locale ("de-DE"); the
+    // helper handles that.
+    let needs_redo = post.as_ref().is_some_and(|d| {
+        d.confidence >= language.min_confidence && !same_primary_subtag(&d.language, locale)
+    });
+    if !needs_redo {
+        return Ok(Some((head_segments, locale.to_owned())));
+    }
+
+    let new_locale = post
+        .as_ref()
+        .map_or_else(|| locale.to_owned(), |d| d.language.clone());
+    tracing::warn!(
+        book = %book_id,
+        from = %locale_short(locale),
+        to = %new_locale,
+        "transcribe.head.re_transcribe_on_language_disagreement"
+    );
+
+    let new_segments = match transcribe_window_with_skip_on_no_model(
+        &plan.head_path,
+        0.0,
+        plan.head_end_secs,
+        &new_locale,
+    )
+    .await?
+    {
+        TranscribeWindowOutcome::Segments(s) => s,
+        TranscribeWindowOutcome::ModelMissing => {
+            queue_locale_install(&ctx.ephemeral, book_id, &new_locale).await?;
+            return Ok(None);
+        }
+    };
+    Ok(Some((new_segments, new_locale)))
 }
 
 // ── Transcribe wrapper that surfaces "model not installed" ───────
@@ -642,6 +679,28 @@ mod tests {
     #[test]
     fn mean_confidence_empty_is_zero() {
         assert!((mean_confidence(&[]) - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn locale_short_extracts_primary_subtag() {
+        assert_eq!(locale_short("en-US"), "en");
+        assert_eq!(locale_short("de"), "de");
+        assert_eq!(locale_short("zh-Hans-CN"), "zh");
+        assert_eq!(locale_short(""), "");
+    }
+
+    #[test]
+    fn same_primary_subtag_matches() {
+        assert!(same_primary_subtag("en", "en-US"));
+        assert!(same_primary_subtag("EN-GB", "en-US"));
+        assert!(same_primary_subtag("de", "de-DE"));
+    }
+
+    #[test]
+    fn same_primary_subtag_rejects_different_languages() {
+        assert!(!same_primary_subtag("en", "de"));
+        assert!(!same_primary_subtag("en-US", "de-DE"));
+        assert!(!same_primary_subtag("zh-Hans", "ja"));
     }
 
     #[test]
