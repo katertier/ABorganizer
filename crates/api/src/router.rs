@@ -106,6 +106,13 @@ async fn library_scan(
         // language gate + downstream extractors have a
         // transcript by the time the user opens the book.
         ("transcribe-head-tail", ab_pipeline::Priority::Interactive),
+        // Transcript extractors — cheap pure-text heuristics
+        // over the head transcript; runs at Interactive so the
+        // user sees its candidates by the time the book opens.
+        (
+            "run-transcript-extractors",
+            ab_pipeline::Priority::Interactive,
+        ),
         // Whole-book transcribe — drains during quiet periods,
         // not in the import-time pipeline.
         ("transcribe-full", ab_pipeline::Priority::Idle),

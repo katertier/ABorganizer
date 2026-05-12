@@ -120,6 +120,12 @@ fn build_pipeline_stages(tunables: &Tunables) -> Vec<Arc<dyn Stage>> {
         Arc::new(ab_transcript::TranscribeFullStage::new(
             &tunables.transcribe,
         )),
+        // `run-transcript-extractors` (slice 3C) runs every
+        // built-in heuristic extractor (title/author confirm,
+        // tier-4 audiologo, ...) over the cached head transcript
+        // and writes candidates to `book_field_provenance`.
+        // Cheap — pure-text regex / keyword passes; no FFI.
+        Arc::new(ab_transcript::RunExtractorsStage::new()),
     ]
 }
 
