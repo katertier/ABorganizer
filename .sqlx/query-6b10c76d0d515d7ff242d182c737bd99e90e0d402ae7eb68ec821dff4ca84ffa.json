@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE books SET summary_spoiler_free = ?, summary_spoiler_free_lang = ? WHERE book_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "6b10c76d0d515d7ff242d182c737bd99e90e0d402ae7eb68ec821dff4ca84ffa"
+}

@@ -634,6 +634,18 @@ pub struct LlmTunables {
     /// 600 tokens lands a 3-5 paragraph summary in any of the
     /// five UI locales without truncation.
     pub summary_max_tokens: usize,
+    /// Soft floor for the summary word count. The prompt tells
+    /// the model to target this many words minimum; the actual
+    /// floor is enforced loosely (we don't reject sub-floor
+    /// outputs — too dry but still useful). Empirically 100 is
+    /// the point below which summaries lose tone signal.
+    pub summary_target_words_low: usize,
+    /// Soft cap for the summary word count. The prompt tells
+    /// the model to target this many words maximum; output is
+    /// not truncated post-generation (the model decides where to
+    /// stop). Empirically 150 is the point above which summaries
+    /// start drifting into spoiler territory.
+    pub summary_target_words_high: usize,
     /// Token budget for the story-arc extractor. JSON array of
     /// `{step, label, summary}` rows — 1200 tokens covers a
     /// typical 5-7 act arc with 1-2 sentence summaries each.
@@ -652,6 +664,8 @@ impl Default for LlmTunables {
             dna_max_tags: 8,
             dna_max_spoiler_tags: 4,
             summary_max_tokens: 600,
+            summary_target_words_low: 100,
+            summary_target_words_high: 150,
             arc_max_tokens: 1_200,
             characters_max_tokens: 1_500,
         }
