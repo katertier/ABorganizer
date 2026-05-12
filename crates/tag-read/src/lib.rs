@@ -25,7 +25,7 @@ use async_trait::async_trait;
 
 use ab_core::tunables::TagReadTunables;
 use ab_core::{BookId, Error, Result};
-use ab_pipeline::{Stage, StageContext, StageOutcome};
+use ab_pipeline::{Stage, StageContext, StageId, StageOutcome};
 
 /// Confidence written to `book_field_provenance` for tag-derived values.
 ///
@@ -37,6 +37,11 @@ pub const TAG_CONFIDENCE: f64 = 0.7;
 
 /// Provenance `source` string for values this stage writes.
 pub const PROVENANCE_SOURCE: &str = "tag_file";
+
+/// Typed identifier for this stage. Imported by dependents in
+/// their `Stage::requires()` impls so a rename here surfaces
+/// at compile time everywhere it's referenced.
+pub const STAGE_ID: StageId = StageId::new("tag-read");
 
 /// Stage that probes book files with lofty.
 pub struct TagReadStage {
@@ -59,10 +64,10 @@ impl Default for TagReadStage {
 #[async_trait]
 impl Stage for TagReadStage {
     fn name(&self) -> &'static str {
-        "tag-read"
+        STAGE_ID.as_str()
     }
 
-    fn requires(&self) -> &'static [&'static str] {
+    fn requires(&self) -> &'static [StageId] {
         &[]
     }
 

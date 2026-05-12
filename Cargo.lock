@@ -54,6 +54,7 @@ dependencies = [
  "ab-core",
  "ab-db",
  "ab-pipeline",
+ "ab-tag-read",
  "async-trait",
  "mp4ameta",
  "reqwest",
@@ -138,6 +139,7 @@ dependencies = [
  "ab-db",
  "ab-foundation-models",
  "ab-pipeline",
+ "ab-transcript",
  "async-trait",
  "serde",
  "serde_json",
@@ -240,10 +242,12 @@ dependencies = [
 name = "ab-transcript"
 version = "0.1.0"
 dependencies = [
+ "ab-catalog",
  "ab-core",
  "ab-db",
  "ab-pipeline",
  "ab-speech",
+ "ab-tag-read",
  "async-trait",
  "regex",
  "serde",

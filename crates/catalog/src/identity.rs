@@ -49,7 +49,7 @@ use std::collections::HashSet;
 use async_trait::async_trait;
 
 use ab_core::{BookId, Error, Result};
-use ab_pipeline::{Stage, StageContext, StageOutcome};
+use ab_pipeline::{Stage, StageContext, StageId, StageOutcome};
 
 /// Stage that resolves identities (authors/narrators/publishers).
 pub struct IdentityResolveStage;
@@ -68,18 +68,21 @@ impl Default for IdentityResolveStage {
     }
 }
 
+/// Typed identifier for this stage.
+pub const STAGE_ID: StageId = StageId::new("identity-resolve");
+
 #[async_trait]
 impl Stage for IdentityResolveStage {
     fn name(&self) -> &'static str {
-        "identity-resolve"
+        STAGE_ID.as_str()
     }
 
-    fn requires(&self) -> &'static [&'static str] {
+    fn requires(&self) -> &'static [StageId] {
         // After consensus runs so the direct-column promotions are
         // already in place. Consensus depends on audnexus-enrich,
         // which writes the contributor candidates this stage needs;
         // transitivity covers the ordering.
-        &["consensus"]
+        &[crate::consensus::STAGE_ID]
     }
 
     async fn run(&self, ctx: &StageContext, book_id: BookId) -> Result<StageOutcome> {
@@ -456,7 +459,7 @@ mod tests {
     async fn stage_metadata_matches_pipeline_expectations() {
         let stage = IdentityResolveStage::new();
         assert_eq!(stage.name(), "identity-resolve");
-        assert_eq!(stage.requires(), &["consensus"]);
+        assert_eq!(stage.requires(), &[crate::consensus::STAGE_ID]);
     }
 
     #[tokio::test]

@@ -39,18 +39,20 @@ use async_trait::async_trait;
 
 use ab_core::{BookId, Error, Result};
 use ab_db::LibraryDb;
-use ab_pipeline::{Stage, StageContext, StageOutcome};
+use ab_pipeline::{Stage, StageContext, StageId, StageOutcome};
 use serde::Deserialize;
 
 use crate::extractors::built_in_extractors;
-use crate::stage::STAGE_NAME as HEAD_TAIL_STAGE;
+use crate::stage::STAGE_ID as HEAD_TAIL_STAGE_ID;
 use crate::{Candidate, Extractor};
 use ab_core::CacheKey;
 use ab_speech::TranscriptSegment;
 
-/// Stage name written to `pipeline_progress` and registered with
-/// the daemon.
-pub const STAGE_NAME: &str = "run-transcript-extractors";
+/// Typed identifier for this stage.
+pub const STAGE_ID: StageId = StageId::new("run-transcript-extractors");
+
+/// Stage name written to `pipeline_progress`. Derives from `STAGE_ID`.
+pub const STAGE_NAME: &str = STAGE_ID.as_str();
 
 /// Runs every built-in [`Extractor`] over the cached head
 /// transcript.
@@ -87,8 +89,8 @@ impl Stage for RunExtractorsStage {
         STAGE_NAME
     }
 
-    fn requires(&self) -> &'static [&'static str] {
-        &[HEAD_TAIL_STAGE]
+    fn requires(&self) -> &'static [StageId] {
+        &[HEAD_TAIL_STAGE_ID]
     }
 
     async fn run(&self, ctx: &StageContext, book_id: BookId) -> Result<StageOutcome> {

@@ -61,10 +61,10 @@ impl Dag {
         // Verify all `requires()` references exist.
         for entry in by_name.values() {
             for dep in entry.stage.requires() {
-                if !by_name.contains_key(dep) {
+                if !by_name.contains_key(dep.as_str()) {
                     return Err(DagBuildError::UnknownDependency {
                         stage: entry.stage.name(),
-                        missing: dep,
+                        missing: dep.as_str(),
                     });
                 }
             }
@@ -95,7 +95,7 @@ impl Dag {
             // in-degree; if it hits 0, mark ready.
             let names: Vec<&'static str> = by_name
                 .values()
-                .filter(|e| e.stage.requires().contains(&name))
+                .filter(|e| e.stage.requires().iter().any(|d| d.as_str() == name))
                 .map(|e| e.stage.name())
                 .collect();
             for s in names {
@@ -150,14 +150,17 @@ mod tests {
     use async_trait::async_trait;
 
     use ab_core::{BookId, Result};
+    // StageId lives in the sibling `stage` module — needed for the
+    // typed-requires() in the test stages below.
+    use crate::stage::StageId;
 
-    struct S(&'static str, &'static [&'static str]);
+    struct S(&'static str, &'static [StageId]);
     #[async_trait]
     impl Stage for S {
         fn name(&self) -> &'static str {
             self.0
         }
-        fn requires(&self) -> &'static [&'static str] {
+        fn requires(&self) -> &'static [StageId] {
             self.1
         }
         async fn run(
@@ -169,21 +172,30 @@ mod tests {
         }
     }
 
+    // Test-only stage IDs. Declared as `const` so the slice
+    // literals below can reference them statically.
+    const SCAN: StageId = StageId::new("scan");
+    const FP: StageId = StageId::new("fingerprint");
+    const TR: StageId = StageId::new("tag-read");
+    const A: StageId = StageId::new("a");
+    const B: StageId = StageId::new("b");
+
     #[test]
     fn linear_dag_orders_correctly() {
         let stages: Vec<Arc<dyn Stage>> = vec![
             Arc::new(S("scan", &[])),
-            Arc::new(S("fingerprint", &["scan"])),
-            Arc::new(S("tag-read", &["fingerprint"])),
+            Arc::new(S("fingerprint", &[SCAN])),
+            Arc::new(S("tag-read", &[FP])),
         ];
         let dag = Dag::build(stages).expect("valid");
         let order: Vec<&str> = dag.iter_topo().map(|(n, _)| n).collect();
         assert_eq!(order, vec!["scan", "fingerprint", "tag-read"]);
+        let _ = TR;
     }
 
     #[test]
     fn detects_cycle() {
-        let stages: Vec<Arc<dyn Stage>> = vec![Arc::new(S("a", &["b"])), Arc::new(S("b", &["a"]))];
+        let stages: Vec<Arc<dyn Stage>> = vec![Arc::new(S("a", &[B])), Arc::new(S("b", &[A]))];
         // `expect_err` requires `T: Debug` on the Ok branch; our Dag
         // can't easily derive Debug because it holds `Arc<dyn Stage>`.
         // Match instead.
@@ -195,7 +207,8 @@ mod tests {
 
     #[test]
     fn detects_missing_dep() {
-        let stages: Vec<Arc<dyn Stage>> = vec![Arc::new(S("a", &["missing"]))];
+        const MISSING: StageId = StageId::new("missing");
+        let stages: Vec<Arc<dyn Stage>> = vec![Arc::new(S("a", &[MISSING]))];
         match Dag::build(stages) {
             Ok(_) => panic!("expected unknown-dep error"),
             Err(e) => assert!(matches!(e, DagBuildError::UnknownDependency { .. })),

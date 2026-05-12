@@ -33,7 +33,7 @@
 use async_trait::async_trait;
 
 use ab_core::{BookId, Error, Result};
-use ab_pipeline::{Stage, StageContext, StageOutcome};
+use ab_pipeline::{Stage, StageContext, StageId, StageOutcome};
 
 /// Source precedence — highest priority first. The first source
 /// that has any chapter rows for the book wins.
@@ -65,17 +65,23 @@ impl Default for ChapterWinnerStage {
     }
 }
 
+/// Typed identifier for this stage.
+pub const STAGE_ID: StageId = StageId::new("chapter-pick-winner");
+
 #[async_trait]
 impl Stage for ChapterWinnerStage {
     fn name(&self) -> &'static str {
-        "chapter-pick-winner"
+        STAGE_ID.as_str()
     }
 
-    fn requires(&self) -> &'static [&'static str] {
+    fn requires(&self) -> &'static [StageId] {
         // Both chapter-writing stages need to have finished
         // (regardless of whether they each found anything) before
         // we know what sources are available to choose between.
-        &["audnexus-chapters", "embedded-chapters"]
+        &[
+            crate::chapters::STAGE_ID,
+            crate::embedded_chapters::STAGE_ID,
+        ]
     }
 
     async fn run(&self, ctx: &StageContext, book_id: BookId) -> Result<StageOutcome> {
@@ -209,7 +215,10 @@ mod tests {
         assert_eq!(stage.name(), "chapter-pick-winner");
         assert_eq!(
             stage.requires(),
-            &["audnexus-chapters", "embedded-chapters"]
+            &[
+                crate::chapters::STAGE_ID,
+                crate::embedded_chapters::STAGE_ID,
+            ]
         );
     }
 

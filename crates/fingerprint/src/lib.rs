@@ -55,7 +55,11 @@ use symphonia::core::probe::Hint;
 
 use ab_core::{BookId, Error, Result};
 use ab_db::LibraryDb;
-use ab_pipeline::{Stage, StageContext, StageOutcome};
+use ab_pipeline::{Stage, StageContext, StageId, StageOutcome};
+
+/// Typed stage identifier for this stage. Imported by dependents
+/// in their `Stage::requires()` impls.
+pub const STAGE_ID: StageId = StageId::new("fingerprint");
 
 /// Window length per fingerprint (seconds). Chromaprint v2 is tuned
 /// for ~30s; shorter windows give noisier hashes.
@@ -377,10 +381,10 @@ impl Default for FingerprintStage {
 #[async_trait]
 impl Stage for FingerprintStage {
     fn name(&self) -> &'static str {
-        "fingerprint"
+        STAGE_ID.as_str()
     }
 
-    fn requires(&self) -> &'static [&'static str] {
+    fn requires(&self) -> &'static [StageId] {
         &[]
     }
 

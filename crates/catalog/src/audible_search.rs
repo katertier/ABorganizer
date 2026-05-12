@@ -30,7 +30,7 @@ use async_trait::async_trait;
 
 use ab_core::tunables::NetworkTunables;
 use ab_core::{BookId, Error, Result};
-use ab_pipeline::{Stage, StageContext, StageOutcome};
+use ab_pipeline::{Stage, StageContext, StageId, StageOutcome};
 
 use crate::AudibleClient;
 
@@ -60,16 +60,20 @@ impl AudibleSearchStage {
     }
 }
 
+/// Typed identifier for this stage. Imported by dependents
+/// in their `Stage::requires()` impls.
+pub const STAGE_ID: StageId = StageId::new("audible-search");
+
 #[async_trait]
 impl Stage for AudibleSearchStage {
     fn name(&self) -> &'static str {
-        "audible-search"
+        STAGE_ID.as_str()
     }
 
-    fn requires(&self) -> &'static [&'static str] {
+    fn requires(&self) -> &'static [StageId] {
         // tag-read writes title+author candidates. Without those we
         // can't even form a search query.
-        &["tag-read"]
+        &[ab_tag_read::STAGE_ID]
     }
 
     async fn run(&self, ctx: &StageContext, book_id: BookId) -> Result<StageOutcome> {
@@ -223,7 +227,7 @@ mod tests {
         let client = AudibleClient::new(&HttpClientTunables::default());
         let stage = AudibleSearchStage::new(client, &NetworkTunables::default());
         assert_eq!(stage.name(), "audible-search");
-        assert_eq!(stage.requires(), &["tag-read"]);
+        assert_eq!(stage.requires(), &[ab_tag_read::STAGE_ID]);
     }
 
     #[tokio::test]

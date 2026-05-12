@@ -16,6 +16,8 @@ ab-core              = { workspace = true }
 ab-db                = { workspace = true }
 ab-foundation-models = { workspace = true }
 ab-pipeline          = { workspace = true }
+# For Stage::requires() typed dependency on transcribe-full.
+ab-transcript        = { workspace = true }
 async-trait          = { workspace = true }
 serde                = { workspace = true }
 serde_json           = { workspace = true }

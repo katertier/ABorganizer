@@ -27,7 +27,7 @@ use async_trait::async_trait;
 
 use ab_core::tunables::NetworkTunables;
 use ab_core::{BookId, Error, Result};
-use ab_pipeline::{Stage, StageContext, StageOutcome};
+use ab_pipeline::{Stage, StageContext, StageId, StageOutcome};
 
 use crate::AudnexusClient;
 
@@ -67,18 +67,21 @@ impl AudnexusEnrichStage {
     }
 }
 
+/// Typed identifier for this stage.
+pub const STAGE_ID: StageId = StageId::new("audnexus-enrich");
+
 #[async_trait]
 impl Stage for AudnexusEnrichStage {
     fn name(&self) -> &'static str {
-        "audnexus-enrich"
+        STAGE_ID.as_str()
     }
 
-    fn requires(&self) -> &'static [&'static str] {
+    fn requires(&self) -> &'static [StageId] {
         // tag-read writes the tag-supplied ASIN candidate;
         // audible-search writes a fallback ASIN candidate when no
         // tag value exists. We wait for BOTH so the lookup sees
         // whichever source supplied an ASIN.
-        &["tag-read", "audible-search"]
+        &[ab_tag_read::STAGE_ID, crate::audible_search::STAGE_ID]
     }
 
     async fn run(&self, ctx: &StageContext, book_id: BookId) -> Result<StageOutcome> {
@@ -441,7 +444,7 @@ mod tests {
         let client = AudnexusClient::new(&HttpClientTunables::default());
         let stage = AudnexusEnrichStage::new(client, &NetworkTunables::default());
         assert_eq!(stage.name(), "audnexus-enrich");
-        assert_eq!(stage.requires(), &["tag-read", "audible-search"]);
+        assert_eq!(stage.requires(), &[ab_tag_read::STAGE_ID, crate::audible_search::STAGE_ID]);
     }
 
     #[test]

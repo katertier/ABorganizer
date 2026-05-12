@@ -46,13 +46,15 @@ use serde::{Deserialize, Serialize};
 use ab_core::tunables::LlmTunables;
 use ab_core::{BookId, CacheKey, Error, Result, TagKind};
 use ab_db::LibraryDb;
-use ab_pipeline::{Stage, StageContext, StageOutcome};
+use ab_pipeline::{Stage, StageContext, StageId, StageOutcome};
 
 use ab_foundation_models::{BridgeError, complete};
 
-/// Stage name written to `pipeline_progress` and registered with
-/// the daemon scheduler.
-pub const STAGE_NAME: &str = "extract-dna-tags";
+/// Typed identifier for this stage.
+pub const STAGE_ID: StageId = StageId::new("extract-dna-tags");
+
+/// Stage name written to `pipeline_progress`. Derives from `STAGE_ID`.
+pub const STAGE_NAME: &str = STAGE_ID.as_str();
 
 /// `book_tags.source` for rows produced by this stage.
 pub const TAG_SOURCE_DNA_LLM: &str = "dna_llm";
@@ -79,14 +81,11 @@ impl Stage for ExtractDnaTagsStage {
         STAGE_NAME
     }
 
-    fn requires(&self) -> &'static [&'static str] {
-        // The full transcript is the input. We don't redeclare
-        // its name here — depending on the daemon wiring this
-        // stage runs after the `transcribe-full` stage by
-        // dependency, the executor reads transcript_full out of
-        // ai_cache (a content-addressable hand-off rather than a
-        // direct cargo crate dependency).
-        &["transcribe-full"]
+    fn requires(&self) -> &'static [StageId] {
+        // The full transcript is the input. The stage reads
+        // transcript_full out of ai_cache — typed dep ensures the
+        // transcribe-full stage's STAGE_ID stays in sync.
+        &[ab_transcript::full_stage::STAGE_ID]
     }
 
     async fn run(&self, ctx: &StageContext, book_id: BookId) -> Result<StageOutcome> {

@@ -225,7 +225,7 @@ mod tests {
     use ab_db::{EphemeralDb, LibraryDb};
 
     use super::*;
-    use crate::stage::{Stage, StageOutcome};
+    use crate::stage::{Stage, StageId, StageOutcome};
 
     /// Test-only stage that records dispatch order so tests can
     /// assert "interactive happened before idle" without timing.
@@ -240,7 +240,7 @@ mod tests {
         fn name(&self) -> &'static str {
             self.name_str
         }
-        fn requires(&self) -> &'static [&'static str] {
+        fn requires(&self) -> &'static [StageId] {
             &[]
         }
         async fn run(&self, _ctx: &StageContext, _id: BookId) -> Result<StageOutcome> {

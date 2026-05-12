@@ -57,15 +57,17 @@ use serde::Serialize;
 use ab_core::tunables::TranscribeTunables;
 use ab_core::{BookId, Error, Result};
 use ab_db::LibraryDb;
-use ab_pipeline::{Stage, StageContext, StageOutcome};
+use ab_pipeline::{Stage, StageContext, StageId, StageOutcome};
 
-use crate::stage::STAGE_NAME as HEAD_TAIL_STAGE;
+use crate::stage::STAGE_ID as HEAD_TAIL_STAGE_ID;
 use ab_core::CacheKey;
 use ab_speech::{BridgeError, TranscriptSegment, transcribe_window_typed};
 
-/// Stage name written to `pipeline_progress` and registered with
-/// the daemon.
-pub const STAGE_NAME: &str = "transcribe-full";
+/// Typed identifier for this stage.
+pub const STAGE_ID: StageId = StageId::new("transcribe-full");
+
+/// Stage name written to `pipeline_progress`. Derives from `STAGE_ID`.
+pub const STAGE_NAME: &str = STAGE_ID.as_str();
 
 /// Idle-priority full-book transcribe stage.
 pub struct TranscribeFullStage {
@@ -88,12 +90,12 @@ impl Stage for TranscribeFullStage {
         STAGE_NAME
     }
 
-    fn requires(&self) -> &'static [&'static str] {
-        // We pull `locale` out of the head row's embedded JSON;
+    fn requires(&self) -> &'static [StageId] {
+        // We pull `locale` out of the head row's `locale` column;
         // declaring the dep makes the requirement explicit + lets
         // future scheduler features (e.g. gap analysis) flag the
         // ordering.
-        &[HEAD_TAIL_STAGE]
+        &[HEAD_TAIL_STAGE_ID]
     }
 
     async fn run(&self, ctx: &StageContext, book_id: BookId) -> Result<StageOutcome> {

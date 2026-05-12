@@ -39,7 +39,7 @@
 use async_trait::async_trait;
 
 use ab_core::{BookId, Error, Result};
-use ab_pipeline::{Stage, StageContext, StageOutcome};
+use ab_pipeline::{Stage, StageContext, StageId, StageOutcome};
 
 /// Stage that picks winning candidates per field and updates `books`.
 pub struct ConsensusStage;
@@ -93,19 +93,22 @@ struct PromotableField {
     target_column: &'static str,
 }
 
+/// Typed identifier for this stage.
+pub const STAGE_ID: StageId = StageId::new("consensus");
+
 #[async_trait]
 impl Stage for ConsensusStage {
     fn name(&self) -> &'static str {
-        "consensus"
+        STAGE_ID.as_str()
     }
 
-    fn requires(&self) -> &'static [&'static str] {
+    fn requires(&self) -> &'static [StageId] {
         // audnexus-enrich is the highest-confidence source. By
         // requiring it, consensus runs after both tag-read (which
         // audnexus-enrich requires) and audnexus-enrich. Adding
         // more enrichers later: extend this list so consensus
         // waits for them.
-        &["audnexus-enrich"]
+        &[crate::enrich::STAGE_ID]
     }
 
     async fn run(&self, ctx: &StageContext, book_id: BookId) -> Result<StageOutcome> {
@@ -454,7 +457,7 @@ mod tests {
     async fn stage_metadata_matches_pipeline_expectations() {
         let stage = ConsensusStage::new();
         assert_eq!(stage.name(), "consensus");
-        assert_eq!(stage.requires(), &["audnexus-enrich"]);
+        assert_eq!(stage.requires(), &[crate::enrich::STAGE_ID]);
     }
 
     #[tokio::test]

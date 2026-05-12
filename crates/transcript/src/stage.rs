@@ -51,7 +51,7 @@ use serde::Serialize;
 use ab_core::tunables::{LanguageTunables, TranscribeTunables};
 use ab_core::{BookId, CacheKey, Error, Result};
 use ab_db::{EphemeralDb, LibraryDb};
-use ab_pipeline::{Stage, StageContext, StageOutcome};
+use ab_pipeline::{Stage, StageContext, StageId, StageOutcome};
 
 use ab_speech::{BridgeError, TranscriptSegment, transcribe_window_typed};
 use ab_speech::{LanguageDetection, detect};
@@ -80,13 +80,13 @@ impl Stage for TranscribeHeadTailStage {
         STAGE_NAME
     }
 
-    fn requires(&self) -> &'static [&'static str] {
+    fn requires(&self) -> &'static [StageId] {
         // tag-read writes the title/author/subtitle/description/
         // narrator provenance rows the pre-transcribe gate reads.
         // Without it the gate degrades to default_locale; with it
         // the engine usually picks the correct locale on the
         // first try.
-        &["tag-read"]
+        &[ab_tag_read::STAGE_ID]
     }
 
     async fn run(&self, ctx: &StageContext, book_id: BookId) -> Result<StageOutcome> {
@@ -205,10 +205,13 @@ impl Stage for TranscribeHeadTailStage {
 
 // ── Stage metadata ────────────────────────────────────────────────
 
+/// Typed identifier for this stage. Imported by dependents in
+/// their `Stage::requires()` impls.
+pub const STAGE_ID: StageId = StageId::new("transcribe-head-tail");
+
 /// Stage name written to `pipeline_progress` and registered with
-/// the daemon. Held as a `pub const` so call sites (API router,
-/// docs, tests) can refer to one source of truth.
-pub const STAGE_NAME: &str = "transcribe-head-tail";
+/// the daemon. Derives from `STAGE_ID` — single source of truth.
+pub const STAGE_NAME: &str = STAGE_ID.as_str();
 
 /// `book_field_provenance.source` for the pre-transcribe
 /// language pick (tag text → `NLLanguageRecognizer`).

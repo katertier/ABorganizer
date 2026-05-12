@@ -47,16 +47,18 @@ use serde::Serialize;
 use ab_core::tunables::{LanguageTunables, TranscribeTunables};
 use ab_core::{BookId, Error, Result};
 use ab_db::LibraryDb;
-use ab_pipeline::{Stage, StageContext, StageOutcome};
+use ab_pipeline::{Stage, StageContext, StageId, StageOutcome};
 
-use crate::stage::STAGE_NAME as TRANSCRIBE_HEAD_TAIL_STAGE;
+use crate::stage::STAGE_ID as TRANSCRIBE_HEAD_TAIL_STAGE_ID;
 use ab_core::CacheKey;
 use ab_speech::detect;
 use ab_speech::{BridgeError, TranscriptSegment, transcribe_window_typed};
 
-/// Stage name written to `pipeline_progress` + registered with
-/// the daemon.
-pub const STAGE_NAME: &str = "transcribe-samples";
+/// Typed identifier for this stage.
+pub const STAGE_ID: StageId = StageId::new("transcribe-samples");
+
+/// Stage name written to `pipeline_progress`. Derives from `STAGE_ID`.
+pub const STAGE_NAME: &str = STAGE_ID.as_str();
 
 /// `book_field_provenance.source` value for the language
 /// candidate produced from the samples.
@@ -90,13 +92,13 @@ impl Stage for TranscribeSamplesStage {
         STAGE_NAME
     }
 
-    fn requires(&self) -> &'static [&'static str] {
+    fn requires(&self) -> &'static [StageId] {
         // We read locale from the head transcript's embedded
         // payload to avoid re-running the pre-transcribe gate.
         // If the head re-transcribed on its own quality signal
         // (still in place during 3D.2 transition), the cached
         // locale reflects the corrected choice.
-        &[TRANSCRIBE_HEAD_TAIL_STAGE]
+        &[TRANSCRIBE_HEAD_TAIL_STAGE_ID]
     }
 
     async fn run(&self, ctx: &StageContext, book_id: BookId) -> Result<StageOutcome> {

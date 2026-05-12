@@ -7,6 +7,51 @@ use async_trait::async_trait;
 use ab_core::{BookId, Result};
 use ab_db::{EphemeralDb, LibraryDb};
 
+/// Typed stage identifier.
+///
+/// Every pipeline stage exposes a `pub const STAGE_ID: StageId`
+/// constant. [`Stage::requires`] returns `&'static [StageId]`,
+/// so cross-stage dependencies are stored as the typed
+/// identifier rather than the loose `&'static str` the old API
+/// used. Renaming a stage now means changing its `STAGE_ID`
+/// once; dependents either compile against the new symbol or
+/// fail at compile time. The previous "rename a string and
+/// silently break the DAG" failure mode is gone.
+///
+/// The wrapped string is the canonical name written to
+/// `pipeline_progress.stage` and surfaced in `tracing` fields.
+/// Convert with [`StageId::as_str`] / `Display` / `AsRef<str>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StageId(&'static str);
+
+impl StageId {
+    /// Construct from a static string. `const`, so stages can
+    /// `pub const STAGE_ID: StageId = StageId::new("…")`.
+    #[must_use]
+    pub const fn new(name: &'static str) -> Self {
+        Self(name)
+    }
+
+    /// The wrapped name as it lives in `pipeline_progress` /
+    /// tracing / job submission.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
+impl std::fmt::Display for StageId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl AsRef<str> for StageId {
+    fn as_ref(&self) -> &str {
+        self.0
+    }
+}
+
 /// What every stage gets at run time. Shared, cheap to clone.
 #[derive(Clone)]
 pub struct StageContext {
@@ -41,11 +86,16 @@ pub enum StageOutcome {
 #[async_trait]
 pub trait Stage: Send + Sync + 'static {
     /// Unique stage name. Used as a key in `pipeline_progress`.
+    /// Typically `Self::STAGE_ID.as_str()` — each stage exposes a
+    /// `pub const STAGE_ID: StageId` constant.
     fn name(&self) -> &'static str;
 
-    /// Names of stages whose completion this one depends on. Empty
-    /// vector means no dependencies (root stage).
-    fn requires(&self) -> &'static [&'static str];
+    /// Stages whose completion this one depends on. Empty
+    /// vector means no dependencies (root stage). Returning
+    /// [`StageId`]s (not free strings) means renaming a stage
+    /// in one place propagates as a compile-time check at every
+    /// dependent.
+    fn requires(&self) -> &'static [StageId];
 
     /// Run the stage for one book.
     ///

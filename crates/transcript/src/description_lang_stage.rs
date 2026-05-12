@@ -38,17 +38,19 @@ use async_trait::async_trait;
 use ab_core::tunables::LanguageTunables;
 use ab_core::{BookId, Error, Result};
 use ab_db::LibraryDb;
-use ab_pipeline::{Stage, StageContext, StageOutcome};
+use ab_pipeline::{Stage, StageContext, StageId, StageOutcome};
 
 use ab_speech::detect;
 
-/// Stage name written to `pipeline_progress` and registered
-/// with the daemon.
-pub const STAGE_NAME: &str = "detect-description-lang";
+/// Typed identifier for this stage.
+pub const STAGE_ID: StageId = StageId::new("detect-description-lang");
+
+/// Stage name written to `pipeline_progress`. Derives from `STAGE_ID`.
+pub const STAGE_NAME: &str = STAGE_ID.as_str();
 
 /// `consensus` is the canonical writer of `books.description`;
 /// we depend on it so the column is populated before we read.
-const REQUIRES: &[&str] = &["consensus"];
+const REQUIRES: &[StageId] = &[ab_catalog::consensus::STAGE_ID];
 
 /// Per-book description language detector.
 pub struct DetectDescriptionLangStage {
@@ -71,7 +73,7 @@ impl Stage for DetectDescriptionLangStage {
         STAGE_NAME
     }
 
-    fn requires(&self) -> &'static [&'static str] {
+    fn requires(&self) -> &'static [StageId] {
         REQUIRES
     }
 
