@@ -598,6 +598,21 @@ async fn write_language_candidate(
     source: &str,
     detection: &LanguageDetection,
 ) -> Result<()> {
+    // Normalise via the central language-code table.
+    // `NLLanguageRecognizer` returns BCP-47-ish primary subtags
+    // already (`"en"`, `"de"`, `"zh-Hans"`) so this is usually a
+    // no-op — but going through `normalize` guards against
+    // future Apple format changes and skips on unparseable input
+    // rather than polluting consensus.
+    let Some(canonical) = ab_core::language_code::normalize(&detection.language) else {
+        tracing::warn!(
+            raw = %detection.language,
+            book = %book_id,
+            source,
+            "transcribe.language.unparseable"
+        );
+        return Ok(());
+    };
     let id = book_id.0;
     let conf = detection.confidence;
     sqlx::query!(
@@ -605,7 +620,7 @@ async fn write_language_candidate(
          (book_id, field, value, source, confidence, is_winner) \
          VALUES (?, 'language', ?, ?, ?, 0)",
         id,
-        detection.language,
+        canonical,
         source,
         conf,
     )

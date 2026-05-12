@@ -224,7 +224,19 @@ async fn write_scalar_provenance(
         insert_scalar(tx, book_id, "description", v, source).await?;
     }
     if let Some(v) = book.language.as_deref() {
-        insert_scalar(tx, book_id, "language", v, source).await?;
+        // Normalise via the central language-code table so this
+        // Audnexus candidate is comparable with tag-read /
+        // Audible / NL detector outputs. Skip + warn on
+        // unparseable input rather than polluting consensus.
+        if let Some(canonical) = ab_core::language_code::normalize(v) {
+            insert_scalar(tx, book_id, "language", &canonical, source).await?;
+        } else {
+            tracing::warn!(
+                raw = %v,
+                book = %book_id,
+                "enrich.language.unparseable"
+            );
+        }
     }
     if let Some(v) = book.publisher_name.as_deref() {
         insert_scalar(tx, book_id, "publisher", v, source).await?;

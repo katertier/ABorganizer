@@ -227,7 +227,19 @@ fn tag_candidates_of(tagged: &lofty::file::TaggedFile) -> Vec<TagCandidate> {
     // we keep it for the next slice. For slice 1B, the typed accessors
     // cover the common fields.
     if let Some(language) = tag.get_string(ItemKey::Language) {
-        push_candidate(&mut out, "language", language);
+        // Normalise via the central language-code table so this
+        // candidate is comparable to Audnexus / Audible / NL
+        // detector outputs (otherwise tag-read might write
+        // "eng", Audnexus writes "English", and consensus
+        // treats them as different values).
+        if let Some(canonical) = ab_core::language_code::normalize(language) {
+            push_candidate(&mut out, "language", &canonical);
+        } else {
+            tracing::warn!(
+                raw = %language,
+                "tag_read.language.unparseable"
+            );
+        }
     }
     if let Some(publisher) = tag.get_string(ItemKey::Publisher) {
         push_candidate(&mut out, "publisher", publisher);

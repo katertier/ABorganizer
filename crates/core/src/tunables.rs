@@ -63,6 +63,11 @@ pub struct Tunables {
     /// Head/tail transcribe stage (`SpeechAnalyzer` window sizes,
     /// `model_version` stamp).
     pub transcribe: TranscribeTunables,
+
+    /// Library UI display locale (language names, genre
+    /// translations, date / number formats). Distinct from any
+    /// per-book language.
+    pub library_display: LibraryDisplayTunables,
 }
 
 impl Default for Tunables {
@@ -82,6 +87,7 @@ impl Default for Tunables {
             tags: TagsTunables::default(),
             language: LanguageTunables::default(),
             transcribe: TranscribeTunables::default(),
+            library_display: LibraryDisplayTunables::default(),
         }
     }
 }
@@ -405,6 +411,37 @@ impl Default for TagsTunables {
         Self {
             show_spoiler_tags: false,
             export_tag_prefix: true,
+        }
+    }
+}
+
+/// Library-wide locale used for UI display strings.
+///
+/// Covers language names, genre translations (future slice),
+/// date / number formatting. Stored as BCP-47 primary subtag
+/// (e.g. `"en"`, `"de"`); not region-aware in v0. Independent
+/// of any per-book language.
+///
+/// Where it's read:
+///
+/// - `language_code::display_name` will eventually use it to
+///   localise output (v0 always returns English names).
+/// - The future genre-translation slice will key its lookup
+///   table on this value.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LibraryDisplayTunables {
+    /// BCP-47 primary subtag for the library UI language.
+    /// Default `"en"` — most ABorganizer adopters are
+    /// English-speaking. Override in `config.toml` for a German
+    /// / French / etc. library.
+    pub library_locale: String,
+}
+
+impl Default for LibraryDisplayTunables {
+    fn default() -> Self {
+        Self {
+            library_locale: "en".into(),
         }
     }
 }
