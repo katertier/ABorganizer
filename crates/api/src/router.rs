@@ -491,7 +491,7 @@ async fn doctor_speech(
     // is the same across all locales (it's a host-wide gate).
     let mut framework_available = true;
     for row in locales.values_mut() {
-        match ab_transcript::speech_locale_status(&row.locale).await {
+        match ab_speech::speech_locale_status(&row.locale).await {
             Ok(report) => {
                 framework_available = framework_available && report.framework_available;
                 row.sdk_installed = report.status == "installed";
@@ -570,7 +570,7 @@ async fn doctor_speech_install(
     let mut failed: Vec<(String, String)> = Vec::new();
     for locale in &locales {
         // Skip when already installed — saves the round trip.
-        match ab_transcript::speech_locale_status(locale).await {
+        match ab_speech::speech_locale_status(locale).await {
             Ok(report) if report.status == "installed" => {
                 already_installed.push(locale.clone());
                 continue;
@@ -581,7 +581,7 @@ async fn doctor_speech_install(
                 continue;
             }
         }
-        match ab_transcript::install_speech_model_typed(locale).await {
+        match ab_speech::install_speech_model_typed(locale).await {
             Ok(()) => installed.push(locale.clone()),
             Err(e) => failed.push((locale.clone(), e.to_string())),
         }

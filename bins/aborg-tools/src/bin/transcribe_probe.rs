@@ -1,6 +1,6 @@
 //! Manual probe for the Swift FFI transcribe path.
 //!
-//! Calls `ab_transcript::transcribe_window` directly against a
+//! Calls `ab_speech::transcribe_window` directly against a
 //! user-provided audio file + window, then prints the resulting
 //! `[TranscriptSegment]` as pretty JSON. Used to validate the
 //! end-to-end Speech FFI stack (build script + Swift bridge +
@@ -22,7 +22,7 @@ use clap::Parser;
 #[derive(Parser, Debug)]
 #[command(
     name = "transcribe-probe",
-    about = "Call ab_transcript::transcribe_window once and print the JSON result."
+    about = "Call ab_speech::transcribe_window once and print the JSON result."
 )]
 struct Args {
     /// Audio file to transcribe (m4a, m4b, mp3, wav, aiff — anything
@@ -74,7 +74,7 @@ async fn main() -> ExitCode {
             "probe: install_speech_model(locale={}) — may take minutes on first call",
             args.locale,
         );
-        if let Err(e) = ab_transcript::install_speech_model(&args.locale).await {
+        if let Err(e) = ab_speech::install_speech_model(&args.locale).await {
             eprintln!("probe: install_speech_model failed: {e}");
             return ExitCode::from(1);
         }
@@ -87,7 +87,7 @@ async fn main() -> ExitCode {
             "probe: detect_language(text=<{} chars>, max_alternatives=3)",
             text.chars().count(),
         );
-        match ab_transcript::detect_language(text, 3).await {
+        match ab_speech::detect_language(text, 3).await {
             Ok(Some(d)) => match serde_json::to_string_pretty(&d) {
                 Ok(s) => {
                     println!("{s}");
@@ -129,7 +129,7 @@ async fn main() -> ExitCode {
         args.locale,
     );
     let segments =
-        match ab_transcript::transcribe_window(&path, args.start_secs, args.end_secs, &args.locale)
+        match ab_speech::transcribe_window(&path, args.start_secs, args.end_secs, &args.locale)
             .await
         {
             Ok(s) => s,
@@ -152,7 +152,7 @@ async fn main() -> ExitCode {
             "probe: detect_from_transcript(skip_ms={}, max_alternatives=3)",
             args.lang_skip_ms,
         );
-        match ab_transcript::detect_from_transcript(&segments, args.lang_skip_ms, 3).await {
+        match ab_speech::detect_from_transcript(&segments, args.lang_skip_ms, 3).await {
             Ok(Some(d)) => match serde_json::to_string_pretty(&d) {
                 Ok(s) => println!("---\n{s}"),
                 Err(e) => {

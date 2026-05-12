@@ -59,8 +59,8 @@ use ab_core::{BookId, Error, Result};
 use ab_db::LibraryDb;
 use ab_pipeline::{Stage, StageContext, StageOutcome};
 
-use crate::bridge::{BridgeError, TranscriptSegment, transcribe_window_typed};
 use crate::stage::{CACHE_TYPE_HEAD, STAGE_NAME as HEAD_TAIL_STAGE};
+use ab_speech::{BridgeError, TranscriptSegment, transcribe_window_typed};
 
 /// Stage name written to `pipeline_progress` and registered with
 /// the daemon.

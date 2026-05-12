@@ -11,6 +11,7 @@ dependencies = [
  "ab-fingerprint",
  "ab-pipeline",
  "ab-scan",
+ "ab-speech",
  "ab-transcript",
  "axum",
  "serde",
@@ -193,6 +194,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ab-speech"
+version = "0.1.0"
+dependencies = [
+ "ab-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ab-tag-read"
 version = "0.1.0"
 dependencies = [
@@ -216,6 +230,7 @@ dependencies = [
  "ab-core",
  "ab-db",
  "ab-pipeline",
+ "ab-speech",
  "async-trait",
  "regex",
  "serde",
@@ -306,6 +321,7 @@ dependencies = [
  "ab-core",
  "ab-db",
  "ab-fingerprint",
+ "ab-speech",
  "ab-transcript",
  "ab-webui-config",
  "ab-webui-player",

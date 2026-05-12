@@ -36,7 +36,7 @@ use std::path::PathBuf;
 use ab_core::{BookId, Error, Result};
 use ab_db::LibraryDb;
 
-use crate::bridge::TranscriptSegment;
+use ab_speech::TranscriptSegment;
 
 /// One active audio file belonging to a book.
 #[derive(Debug, Clone)]

@@ -37,6 +37,7 @@ ab-db          = { workspace = true }
 ab-fingerprint = { workspace = true }
 ab-audiologo   = { workspace = true }
 ab-transcript  = { workspace = true }
+ab-speech      = { workspace = true }
 ab-webui-config = { workspace = true }
 ab-webui-player = { workspace = true }
 ab-api         = { workspace = true }

@@ -53,8 +53,8 @@ use ab_core::{BookId, Error, Result};
 use ab_db::{EphemeralDb, LibraryDb};
 use ab_pipeline::{Stage, StageContext, StageOutcome};
 
-use crate::bridge::{BridgeError, TranscriptSegment, transcribe_window_typed};
-use crate::language::{LanguageDetection, detect};
+use ab_speech::{BridgeError, TranscriptSegment, transcribe_window_typed};
+use ab_speech::{LanguageDetection, detect};
 
 /// Stage that runs head + tail transcription and seeds the
 /// language candidates.

@@ -42,10 +42,10 @@ use ab_db::LibraryDb;
 use ab_pipeline::{Stage, StageContext, StageOutcome};
 use serde::Deserialize;
 
-use crate::bridge::TranscriptSegment;
 use crate::extractors::built_in_extractors;
 use crate::stage::{CACHE_TYPE_HEAD, STAGE_NAME as HEAD_TAIL_STAGE};
 use crate::{Candidate, Extractor};
+use ab_speech::TranscriptSegment;
 
 /// Stage name written to `pipeline_progress` and registered with
 /// the daemon.

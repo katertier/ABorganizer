@@ -40,7 +40,7 @@ use ab_core::{BookId, Error, Result};
 use ab_db::LibraryDb;
 use ab_pipeline::{Stage, StageContext, StageOutcome};
 
-use crate::language::detect;
+use ab_speech::detect;
 
 /// Stage name written to `pipeline_progress` and registered
 /// with the daemon.

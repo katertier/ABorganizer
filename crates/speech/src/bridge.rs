@@ -19,7 +19,7 @@
 //!
 //! # Non-macOS / no-swiftc fallback
 //!
-//! When `cfg(aborg_ai_bridge)` isn't set (non-macOS target or
+//! When `cfg(aborg_speech_bridge)` isn't set (non-macOS target or
 //! swiftc missing at build time), the wrapper returns an
 //! `Unavailable`-flavoured error at runtime so the crate still
 //! compiles on Linux CI and the upstream caller can degrade
@@ -170,7 +170,7 @@ pub struct TranscriptSegment {
     pub confidence: f32,
 }
 
-#[cfg(aborg_ai_bridge)]
+#[cfg(aborg_speech_bridge)]
 #[expect(
     unsafe_code,
     reason = "FFI to Swift requires unsafe extern blocks and raw-pointer round-trips through the C callback; safe wrappers exposed by the parent module are the public surface."
@@ -343,11 +343,11 @@ mod ffi {
 ///
 /// See [`BridgeError`] for the variants.
 pub async fn speech_locale_status(locale: &str) -> Result<LocaleStatusReport, BridgeError> {
-    #[cfg(aborg_ai_bridge)]
+    #[cfg(aborg_speech_bridge)]
     {
         ffi::locale_status_impl(locale).await
     }
-    #[cfg(not(aborg_ai_bridge))]
+    #[cfg(not(aborg_speech_bridge))]
     {
         let _ = locale;
         Err(BridgeError::BridgeUnavailable)
@@ -364,11 +364,11 @@ pub async fn speech_locale_status(locale: &str) -> Result<LocaleStatusReport, Br
 ///
 /// See [`BridgeError`].
 pub async fn install_speech_model_typed(locale: &str) -> Result<(), BridgeError> {
-    #[cfg(aborg_ai_bridge)]
+    #[cfg(aborg_speech_bridge)]
     {
         ffi::install_speech_model_impl(locale).await
     }
-    #[cfg(not(aborg_ai_bridge))]
+    #[cfg(not(aborg_speech_bridge))]
     {
         let _ = locale;
         Err(BridgeError::BridgeUnavailable)
@@ -402,11 +402,11 @@ pub async fn transcribe_window_typed(
     end_secs: f64,
     locale: &str,
 ) -> Result<Vec<TranscriptSegment>, BridgeError> {
-    #[cfg(aborg_ai_bridge)]
+    #[cfg(aborg_speech_bridge)]
     {
         ffi::transcribe_window_impl(input_path, start_secs, end_secs, locale).await
     }
-    #[cfg(not(aborg_ai_bridge))]
+    #[cfg(not(aborg_speech_bridge))]
     {
         let _ = (input_path, start_secs, end_secs, locale);
         Err(BridgeError::BridgeUnavailable)

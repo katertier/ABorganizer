@@ -36,8 +36,8 @@ use ab_db::EphemeralDb;
 use ab_pipeline::{Priority, Scheduler};
 use tokio_util::sync::CancellationToken;
 
-use crate::bridge::{BridgeError, install_speech_model_typed};
 use crate::stage::STAGE_NAME;
+use ab_speech::{BridgeError, install_speech_model_typed};
 
 /// Spawnable idle install loop. Wakes every
 /// `tunables.idle_install_check_secs`; on each wake:

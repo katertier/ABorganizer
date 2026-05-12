@@ -61,7 +61,7 @@ pub struct LanguageDetection {
     pub alternatives: Vec<LanguageHit>,
 }
 
-#[cfg(aborg_ai_bridge)]
+#[cfg(aborg_speech_bridge)]
 #[expect(
     unsafe_code,
     reason = "FFI to Swift requires unsafe extern blocks and raw-pointer round-trips; safe wrappers exposed by the parent module are the public surface."
@@ -160,11 +160,11 @@ mod ffi {
 ///   linked (non-macOS / no-swiftc build).
 /// - `Error::Stage("language", ...)` for FFI / parse failures.
 pub async fn detect(text: &str, max_alternatives: usize) -> Result<Option<LanguageDetection>> {
-    #[cfg(aborg_ai_bridge)]
+    #[cfg(aborg_speech_bridge)]
     {
         ffi::detect_impl(text, max_alternatives).await
     }
-    #[cfg(not(aborg_ai_bridge))]
+    #[cfg(not(aborg_speech_bridge))]
     {
         let _ = (text, max_alternatives);
         Err(ab_core::Error::stage(

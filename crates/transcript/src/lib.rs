@@ -1,25 +1,34 @@
-//! Transcript-side extractors + the Swift FFI bridge for
-//! producing transcripts.
+//! Pipeline stages that orchestrate transcription + transcript-
+//! reading extractors.
 //!
-//! Two surfaces here:
+//! The Apple Speech / `NaturalLanguage` FFI lives in the
+//! [`ab_speech`] crate (separate so a CLI tool or test harness
+//! can use the bridge without dragging the DB / pipeline
+//! machinery along). This crate composes that surface with
+//! `ab_db` writes + `ab_pipeline::Stage` impls.
 //!
-//! 1. [`bridge::transcribe_window`] — call into Swift /
-//!    `SpeechAnalyzer` (stubbed in slice 3A.2; real engine in
-//!    3A.3). Returns timestamped [`bridge::TranscriptSegment`]s.
-//! 2. [`Extractor`] + [`Candidate`] — pluggable consumers that
-//!    read transcripts and write provenance candidates. The
-//!    daemon's transcript stage iterates registered extractors;
-//!    each writes 0..N candidates to `book_field_provenance`.
+//! Surfaces:
 //!
-//! Add a new extractor: implement [`Extractor`], register it.
+//! - [`TranscribeHeadTailStage`] / [`TranscribeSamplesStage`] /
+//!   [`TranscribeFullStage`] — the three transcribe stages,
+//!   each cached by `ai_cache.cache_type`.
+//! - [`DetectDescriptionLangStage`] — runs
+//!   `NLLanguageRecognizer` over the catalog description text
+//!   and writes `books.description_lang`.
+//! - [`RunExtractorsStage`] — iterates registered
+//!   [`Extractor`]s over the cached head transcript, writes
+//!   candidates to `book_field_provenance`.
+//! - [`run_idle_install_loop`] — daemon-side tokio loop that
+//!   drains `pending_speech_installs` at idle priority.
+//!
+//! Add a new transcript-text extractor: implement [`Extractor`]
+//! + register it in [`extractors::built_in_extractors`].
 
-pub mod bridge;
 pub mod description_lang_stage;
 pub mod extract_stage;
 pub mod extractors;
 pub mod full_stage;
 pub mod idle_install;
-pub mod language;
 pub mod multi_file;
 pub mod samples_stage;
 pub mod stage;
@@ -33,14 +42,6 @@ pub use idle_install::run_idle_install_loop;
 pub use samples_stage::{
     CACHE_TYPE_SAMPLES, SOURCE_NL_LANGUAGE_SAMPLES, STAGE_NAME as TRANSCRIBE_SAMPLES_STAGE,
     TranscribeSamplesStage,
-};
-
-pub use bridge::{
-    BridgeError, LocaleStatusReport, TranscriptSegment, install_speech_model,
-    install_speech_model_typed, speech_locale_status, transcribe_window, transcribe_window_typed,
-};
-pub use language::{
-    LanguageDetection, LanguageHit, detect as detect_language, detect_from_transcript,
 };
 pub use stage::{
     CACHE_TYPE_HEAD, CACHE_TYPE_TAIL, SOURCE_NL_LANGUAGE_TAGS,
