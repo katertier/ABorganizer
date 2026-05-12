@@ -8,6 +8,7 @@ members = [
     "crates/audiologo",
     "crates/catalog",
     "crates/transcript",
+    "crates/foundation-models",
     "crates/audio",
     "crates/api",
     "crates/shelf",
@@ -127,6 +128,7 @@ ab-fingerprint = { path = "crates/fingerprint" }
 ab-audiologo   = { path = "crates/audiologo" }
 ab-catalog     = { path = "crates/catalog" }
 ab-transcript  = { path = "crates/transcript" }
+ab-foundation-models = { path = "crates/foundation-models" }
 ab-audio       = { path = "crates/audio" }
 ab-api         = { path = "crates/api" }
 ab-shelf       = { path = "crates/shelf" }

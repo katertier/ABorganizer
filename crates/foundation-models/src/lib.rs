@@ -1,0 +1,389 @@
+//! Apple Intelligence Foundation Models bridge.
+//!
+//! Thin wrapper over the Swift FFI in `swift/aborg_fm.swift`.
+//! Two public surfaces:
+//!
+//! 1. [`status`] — checks whether the on-device model is usable
+//!    on this host (Apple Intelligence enabled, device
+//!    eligible, model ready). Used by `aborg doctor llm` and by
+//!    extractor stages that fail fast when the model can't run.
+//! 2. [`complete`] — single-shot prompt → text completion. The
+//!    extractor side is responsible for prompt shape (system /
+//!    few-shot / user) and for parsing the response (typically
+//!    JSON we ask the model to emit).
+//!
+//! Both calls return typed [`BridgeError`] variants — no string-
+//! matching at call sites. The bridge degrades to
+//! `BridgeUnavailable` when:
+//!
+//! * compiled on a non-macOS target,
+//! * built on macOS with no `swiftc` on PATH,
+//! * built on a macOS SDK without `FoundationModels.framework`,
+//! * run on a macOS host below 26.0.
+//!
+//! The build script (`build.rs`) emits `cfg(aborg_fm_bridge)`
+//! when the static lib is produced; otherwise the Rust impls
+//! degrade to `Err(BridgeUnavailable)` at runtime, matching the
+//! pattern in `ab-transcript`.
+
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+/// Reason the on-device LLM isn't usable.
+///
+/// Mirrors `SystemLanguageModel.Availability.UnavailabilityReason`
+/// from `FoundationModels.framework` plus a small set of
+/// bridge-level reasons (framework missing, OS below 26, etc.)
+/// that don't have a one-to-one Apple equivalent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnavailableReason {
+    /// User has Apple Intelligence disabled in System Settings.
+    AppleIntelligenceNotEnabled,
+    /// Mac model / chip can't run the on-device model at all.
+    DeviceNotEligible,
+    /// SDK present, hardware eligible, but model assets not
+    /// downloaded yet (the system downloads them on first
+    /// enable; can take ten or twenty minutes on a fresh
+    /// install).
+    ModelNotReady,
+    /// `FoundationModels.framework` was missing at build time
+    /// or `swiftc` couldn't compile the bridge.
+    FrameworkNotBuilt,
+    /// macOS version is below 26.0 (Tahoe). Foundation Models
+    /// is macOS 26+ only.
+    MacosBelow26,
+    /// SDK returned an availability case we don't yet handle.
+    /// Treated as unavailable; the bridge logs the raw token
+    /// to stderr.
+    UnknownAvailability,
+}
+
+/// Result of [`status`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusReport {
+    /// `true` only when `SystemLanguageModel.default.availability`
+    /// is `.available`.
+    pub available: bool,
+    /// When `available == false`, this carries the typed reason.
+    /// `None` when `available == true`.
+    pub reason: Option<UnavailableReason>,
+}
+
+/// Typed errors from the Foundation Models bridge.
+///
+/// The numeric codes are kept in sync with `swift/aborg_fm.swift`
+/// — change them there too if you renumber.
+#[derive(Debug, Error)]
+pub enum BridgeError {
+    /// The bridge isn't compiled in (non-macOS, no swiftc, or
+    /// `FoundationModels.framework` missing from the SDK).
+    #[error("Foundation Models bridge unavailable")]
+    BridgeUnavailable,
+    /// The host doesn't have an Apple-Intelligence-capable
+    /// model state. Use [`status`] for the typed reason.
+    #[error("model unavailable: {0}")]
+    ModelUnavailable(&'static str),
+    /// User disabled Apple Intelligence.
+    #[error("Apple Intelligence is not enabled in System Settings")]
+    AppleIntelligenceDisabled,
+    /// Hardware can't run the model.
+    #[error("device not eligible for Apple Intelligence")]
+    DeviceNotEligible,
+    /// Caller passed an empty prompt.
+    #[error("empty prompt")]
+    PromptEmpty,
+    /// The model returned an error during generation.
+    #[error("generation failed: {0}")]
+    GenerationFailed(String),
+    /// The bridge couldn't parse / encode the FFI payload.
+    #[error("invalid payload: {0}")]
+    InvalidPayload(String),
+    /// Generic Swift-side error we don't have a typed variant for.
+    /// Detail goes to the Swift stderr log; this end gets only
+    /// the code.
+    #[error("Foundation Models bridge: generic error")]
+    Generic,
+    /// Input held a NUL byte (CString conversion rejected it).
+    #[error("NUL byte in input: {0}")]
+    NulInInput(String),
+    /// FFI callback was dropped without firing — should be
+    /// impossible per contract; if it happens, it's a Swift bug.
+    #[error("callback dropped without firing")]
+    CallbackDropped,
+}
+
+impl BridgeError {
+    /// Map a Swift-side error code to a `BridgeError`. The
+    /// numeric values are defined in `swift/aborg_fm.swift`.
+    fn from_code(code: i32) -> Self {
+        match code {
+            2 => Self::BridgeUnavailable,
+            20 => Self::ModelUnavailable("modelNotReady"),
+            21 => Self::AppleIntelligenceDisabled,
+            22 => Self::DeviceNotEligible,
+            23 => Self::PromptEmpty,
+            24 => Self::GenerationFailed("(see Swift stderr)".into()),
+            _ => Self::Generic,
+        }
+    }
+}
+
+/// Probe the on-device LLM's availability. Returns a typed
+/// [`StatusReport`] without committing to a generation round-trip.
+///
+/// # Errors
+///
+/// Returns [`BridgeError::BridgeUnavailable`] when the Swift
+/// bridge wasn't compiled in (non-macOS, no swiftc, or framework
+/// missing). All "user-fixable" reasons (Apple Intelligence
+/// disabled, device not eligible, model still downloading)
+/// arrive in `Ok(StatusReport { available: false, reason: Some(..) })`,
+/// not as `Err` — the doctor wants those split.
+pub async fn status() -> Result<StatusReport, BridgeError> {
+    #[cfg(aborg_fm_bridge)]
+    {
+        ffi::status_impl().await
+    }
+    #[cfg(not(aborg_fm_bridge))]
+    {
+        Ok(StatusReport {
+            available: false,
+            reason: Some(UnavailableReason::FrameworkNotBuilt),
+        })
+    }
+}
+
+/// Run a one-shot text completion against the on-device LLM.
+///
+/// `max_tokens` is a soft budget passed straight to
+/// `GenerationOptions.maximumResponseTokens` — the framework may
+/// stop earlier on its own EOS signal.
+///
+/// # Errors
+///
+/// Variants of [`BridgeError`]: [`BridgeError::BridgeUnavailable`]
+/// when the bridge isn't compiled in;
+/// [`BridgeError::AppleIntelligenceDisabled`] /
+/// [`BridgeError::DeviceNotEligible`] /
+/// [`BridgeError::ModelUnavailable`] when the host can't run
+/// the model; [`BridgeError::GenerationFailed`] when the model
+/// raises an error mid-generation.
+pub async fn complete(prompt: &str, max_tokens: usize) -> Result<String, BridgeError> {
+    #[cfg(aborg_fm_bridge)]
+    {
+        ffi::complete_impl(prompt, max_tokens).await
+    }
+    #[cfg(not(aborg_fm_bridge))]
+    {
+        let _ = (prompt, max_tokens);
+        Err(BridgeError::BridgeUnavailable)
+    }
+}
+
+// ── FFI ─────────────────────────────────────────────────────────────
+//
+// The whole `ffi` module is gated on `cfg(aborg_fm_bridge)`. When
+// the bridge isn't compiled in, the `extern "C"` block + the
+// `_impl` fns aren't defined and the wrappers above return
+// `BridgeUnavailable` synchronously.
+
+#[cfg(aborg_fm_bridge)]
+#[expect(
+    unsafe_code,
+    reason = "FFI to Swift requires unsafe extern blocks and raw-pointer round-trips through the C callback; safe wrappers exposed by the parent module are the public surface."
+)]
+mod ffi {
+    //! Raw FFI surface. See `swift/aborg_fm.swift` for the
+    //! callback contract. Each Rust wrapper:
+    //!
+    //!   1. Allocates a oneshot channel,
+    //!   2. Boxes the Sender into a raw pointer (`ctx`),
+    //!   3. Hands the C callback to the Swift entry,
+    //!   4. Awaits the result on the Receiver,
+    //!   5. Decodes the (code, payload) pair into a typed result.
+
+    use std::ffi::{CStr, CString, c_char, c_void};
+
+    use tokio::sync::oneshot;
+
+    use super::{BridgeError, StatusReport};
+
+    /// One-shot result shipped through the boxed sender.
+    /// `buffer` is `None` for error or success-with-no-payload.
+    struct FfiResult {
+        code: i32,
+        buffer: Option<Vec<u8>>,
+    }
+
+    /// Common C callback: deserialise (ptr, len, code) → FfiResult,
+    /// then send through the boxed oneshot sender (which we
+    /// retake ownership of from the ctx pointer).
+    ///
+    /// # Safety
+    ///
+    /// `ctx` must be a pointer produced by
+    /// `Box::into_raw(Box::new(tx))` where `tx` is a
+    /// `oneshot::Sender<FfiResult>`. Swift calls this exactly
+    /// once per FFI entry per contract.
+    extern "C" fn on_result(ctx: *mut c_void, ptr: *const c_char, len: usize, code: i32) {
+        // SAFETY: ctx is a raw pointer to a Box<Sender>. We
+        // take ownership back so the Sender gets dropped after
+        // .send() — the Swift side is contractually one-shot.
+        let tx = unsafe { Box::from_raw(ctx.cast::<oneshot::Sender<FfiResult>>()) };
+        let buffer = if ptr.is_null() || len == 0 {
+            None
+        } else {
+            // SAFETY: Swift hands us a UTF-8-encoded buffer that
+            // lives until the callback returns. Copy out before
+            // the call site frees its Data backing.
+            let slice = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), len) };
+            Some(slice.to_vec())
+        };
+        // If the receiver was dropped (caller cancelled), .send
+        // returns Err; nothing to do here.
+        let _ = tx.send(FfiResult { code, buffer });
+    }
+
+    unsafe extern "C" {
+        /// Probe Foundation Models availability. Emits a JSON
+        /// `{available, reason}` blob via the callback.
+        fn aborg_fm_status(
+            ctx: *mut c_void,
+            callback: extern "C" fn(*mut c_void, *const c_char, usize, i32),
+        );
+
+        /// One-shot completion. Callback receives the response
+        /// text as UTF-8.
+        fn aborg_fm_complete(
+            prompt: *const c_char,
+            max_tokens: usize,
+            ctx: *mut c_void,
+            callback: extern "C" fn(*mut c_void, *const c_char, usize, i32),
+        );
+    }
+
+    /// Raw JSON shape emitted by `aborg_fm_status`. The string
+    /// `reason` token vocabulary is defined in
+    /// `swift/aborg_fm.swift`.
+    #[derive(serde::Deserialize)]
+    struct StatusJson {
+        available: bool,
+        reason: String,
+    }
+
+    pub(super) async fn status_impl() -> Result<StatusReport, BridgeError> {
+        let (tx, rx) = oneshot::channel::<FfiResult>();
+        let ctx = Box::into_raw(Box::new(tx)).cast::<c_void>();
+        // SAFETY: ctx pairs with the on_result callback. Swift
+        // fires the callback exactly once.
+        unsafe { aborg_fm_status(ctx, on_result) };
+        let res = rx.await.map_err(|_| BridgeError::CallbackDropped)?;
+        if res.code != 0 {
+            return Err(BridgeError::from_code(res.code));
+        }
+        let bytes = res
+            .buffer
+            .ok_or_else(|| BridgeError::InvalidPayload("OK code but null buffer".into()))?;
+        let s = std::str::from_utf8(&bytes)
+            .map_err(|e| BridgeError::InvalidPayload(format!("non-utf8: {e}")))?;
+        let json: StatusJson = serde_json::from_str(s)
+            .map_err(|e| BridgeError::InvalidPayload(format!("status json: {e}")))?;
+        let reason = match json.reason.as_str() {
+            "available" => None,
+            "apple_intelligence_not_enabled" => {
+                Some(super::UnavailableReason::AppleIntelligenceNotEnabled)
+            }
+            "device_not_eligible" => Some(super::UnavailableReason::DeviceNotEligible),
+            "model_not_ready" => Some(super::UnavailableReason::ModelNotReady),
+            "framework_not_built" => Some(super::UnavailableReason::FrameworkNotBuilt),
+            "macos_below_26" => Some(super::UnavailableReason::MacosBelow26),
+            _ => Some(super::UnavailableReason::UnknownAvailability),
+        };
+        Ok(StatusReport {
+            available: json.available,
+            reason,
+        })
+    }
+
+    pub(super) async fn complete_impl(
+        prompt: &str,
+        max_tokens: usize,
+    ) -> Result<String, BridgeError> {
+        let c_prompt =
+            CString::new(prompt).map_err(|e| BridgeError::NulInInput(format!("prompt: {e}")))?;
+        let (tx, rx) = oneshot::channel::<FfiResult>();
+        let ctx = Box::into_raw(Box::new(tx)).cast::<c_void>();
+        // SAFETY: ctx pairs with on_result; CString outlives
+        // the call into Swift (we hold it until the await
+        // returns). Swift fires the callback exactly once.
+        unsafe { aborg_fm_complete(c_prompt.as_ptr(), max_tokens, ctx, on_result) };
+        // CStr is preserved by c_prompt living until rx.await
+        // resolves; Swift copies the bytes synchronously
+        // before kicking off its Task.
+        let _ = CStr::from_bytes_with_nul(c_prompt.as_bytes_with_nul());
+        let res = rx.await.map_err(|_| BridgeError::CallbackDropped)?;
+        if res.code != 0 {
+            return Err(BridgeError::from_code(res.code));
+        }
+        let bytes = res
+            .buffer
+            .ok_or_else(|| BridgeError::InvalidPayload("OK code but null buffer".into()))?;
+        String::from_utf8(bytes).map_err(|e| BridgeError::InvalidPayload(format!("utf8: {e}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// On a non-Apple-Intelligence build (or non-macOS CI), the
+    /// status probe should report `available: false` with a
+    /// typed reason rather than erroring out — the daemon
+    /// surfaces the reason to the doctor view.
+    #[tokio::test]
+    async fn status_returns_typed_reason_on_unavailable() {
+        let r = status().await;
+        // Either Ok(unavailable, reason) on hosts where the bridge
+        // compiled but the model isn't ready, or Ok(available)
+        // on a dev machine with Apple Intelligence enabled.
+        // Hard error only when the bridge crate failed to compile.
+        match r {
+            Ok(StatusReport {
+                available: false,
+                reason: Some(_),
+            }) => {}
+            Ok(StatusReport {
+                available: true,
+                reason: None,
+            }) => {}
+            Ok(other) => panic!("unexpected status shape: {other:?}"),
+            // BridgeUnavailable on an unbuilt host is acceptable,
+            // anything else is a bug.
+            Err(BridgeError::BridgeUnavailable) => {}
+            Err(other) => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    /// On a host where the bridge isn't compiled in, `complete`
+    /// must return `BridgeUnavailable` rather than panicking.
+    /// On a host where it is compiled in, we accept either a
+    /// successful generation or a typed unavailability error.
+    #[tokio::test]
+    async fn complete_returns_typed_error_when_unavailable() {
+        let r = complete("Say hi.", 32).await;
+        match r {
+            Ok(_text) => {}
+            Err(
+                BridgeError::BridgeUnavailable
+                | BridgeError::AppleIntelligenceDisabled
+                | BridgeError::DeviceNotEligible
+                | BridgeError::ModelUnavailable(_)
+                | BridgeError::GenerationFailed(_),
+            ) => {}
+            Err(other) => panic!("unexpected error: {other:?}"),
+        }
+    }
+}
