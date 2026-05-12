@@ -45,6 +45,9 @@ private let kFmAppleIntelligenceDisabled: Int32 = 21
 private let kFmDeviceNotEligible: Int32 = 22
 private let kFmPromptEmpty: Int32 = 23
 private let kFmGenerationFailed: Int32 = 24
+// Slice C5.7.c additions (structured generation).
+private let kFmSchemaParseFailure: Int32 = 25     // input JSON Schema invalid
+private let kFmSchemaUnsupportedShape: Int32 = 26 // valid JSON but a shape we don't map
 
 private enum AborgFmError: Error {
     case frameworkUnavailable
@@ -53,6 +56,8 @@ private enum AborgFmError: Error {
     case deviceNotEligible
     case promptEmpty
     case generationFailed(String)
+    case schemaParseFailure(String)
+    case schemaUnsupportedShape(String)
 }
 
 private func errorCode(for err: Error) -> Int32 {
@@ -64,6 +69,8 @@ private func errorCode(for err: Error) -> Int32 {
         case .deviceNotEligible: return kFmDeviceNotEligible
         case .promptEmpty: return kFmPromptEmpty
         case .generationFailed: return kFmGenerationFailed
+        case .schemaParseFailure: return kFmSchemaParseFailure
+        case .schemaUnsupportedShape: return kFmSchemaUnsupportedShape
         }
     }
     return kFmGeneric
@@ -289,6 +296,193 @@ public func aborg_fm_complete(
             }
         } catch {
             logError("aborg_fm_complete", error)
+            callback(ctx, nil, 0, errorCode(for: error))
+        }
+    }
+}
+
+// MARK: - Structured completion (schema-constrained)
+//
+// `session.respond(to:, schema:, includeSchemaInPrompt: true,
+// options:)` constrains the model at decode time to produce
+// output that round-trips through the supplied
+// `GenerationSchema`. The Rust side passes a JSON Schema
+// fragment naming the shape it wants; this entry parses it into
+// a `DynamicGenerationSchema`, runs the round-trip, and returns
+// the structured output as a JSON string via
+// `GeneratedContent.jsonString`.
+//
+// Shape support (slice C5.7.c initial pass):
+//   * object with `properties` + optional `required`
+//   * primitives: `string`, `integer`, `number`, `boolean`
+//   * arrays of the above
+// Shapes not yet supported: `oneOf`, `$ref`, nested arrays of
+// arrays, enums. Adding any is a small append below.
+//
+// Rationale: every LLM extractor (DNA, summary, story arc,
+// characters) currently asks the model for JSON in prompts and
+// parses with `serde_json::from_str` on the Rust side, with
+// known reliability quirks (DNA stage has a test for "the
+// model occasionally omits empty arrays"). Schema-constrained
+// generation moves that contract from prompt-and-pray to
+// decode-time guarantee.
+
+@available(macOS 26.0, *)
+private func buildDynamicSchema(
+    name: String,
+    json: [String: Any]
+) throws -> DynamicGenerationSchema {
+    if let typeAny = json["type"] as? String {
+        switch typeAny {
+        case "object":
+            let propertiesDict = json["properties"] as? [String: Any] ?? [:]
+            let requiredArr = json["required"] as? [String] ?? []
+            let requiredSet = Set(requiredArr)
+            var properties: [DynamicGenerationSchema.Property] = []
+            for (propName, propAny) in propertiesDict {
+                guard let propJson = propAny as? [String: Any] else {
+                    throw AborgFmError.schemaUnsupportedShape(
+                        "property '\(propName)' is not an object")
+                }
+                let childName = "\(name)_\(propName)"
+                let childSchema = try buildDynamicSchema(name: childName, json: propJson)
+                let isOptional = !requiredSet.contains(propName)
+                properties.append(
+                    DynamicGenerationSchema.Property(
+                        name: propName,
+                        schema: childSchema,
+                        isOptional: isOptional
+                    )
+                )
+            }
+            return DynamicGenerationSchema(name: name, properties: properties)
+        case "string":
+            return DynamicGenerationSchema(type: String.self)
+        case "integer":
+            return DynamicGenerationSchema(type: Int.self)
+        case "number":
+            return DynamicGenerationSchema(type: Double.self)
+        case "boolean":
+            return DynamicGenerationSchema(type: Bool.self)
+        case "array":
+            guard let itemsJson = json["items"] as? [String: Any] else {
+                throw AborgFmError.schemaUnsupportedShape(
+                    "array '\(name)' missing 'items' object")
+            }
+            let itemSchema = try buildDynamicSchema(
+                name: "\(name)_item", json: itemsJson)
+            return DynamicGenerationSchema(arrayOf: itemSchema)
+        default:
+            throw AborgFmError.schemaUnsupportedShape(
+                "unsupported JSON Schema 'type': \(typeAny)")
+        }
+    }
+    throw AborgFmError.schemaUnsupportedShape(
+        "schema node missing 'type' (oneOf / $ref not yet supported)")
+}
+
+@available(macOS 26.0, *)
+private func runCompleteStructured(
+    prompt: String,
+    schemaJsonStr: String,
+    maxTokens: Int
+) async throws -> String {
+    #if canImport(FoundationModels)
+    let model = SystemLanguageModel.default
+    switch model.availability {
+    case .available:
+        break
+    case .unavailable(let reason):
+        switch reason {
+        case .appleIntelligenceNotEnabled:
+            throw AborgFmError.appleIntelligenceDisabled
+        case .deviceNotEligible:
+            throw AborgFmError.deviceNotEligible
+        case .modelNotReady:
+            throw AborgFmError.modelUnavailable("modelNotReady")
+        @unknown default:
+            throw AborgFmError.modelUnavailable("unknown")
+        }
+    @unknown default:
+        throw AborgFmError.modelUnavailable("availability_unknown")
+    }
+    if prompt.isEmpty {
+        throw AborgFmError.promptEmpty
+    }
+
+    // Parse the input JSON Schema string.
+    guard let schemaData = schemaJsonStr.data(using: .utf8) else {
+        throw AborgFmError.schemaParseFailure("non-utf8 schema input")
+    }
+    let parsed: Any
+    do {
+        parsed = try JSONSerialization.jsonObject(with: schemaData, options: [])
+    } catch {
+        throw AborgFmError.schemaParseFailure("\(error)")
+    }
+    guard let schemaObj = parsed as? [String: Any] else {
+        throw AborgFmError.schemaParseFailure("root must be a JSON object")
+    }
+
+    let rootSchema = try buildDynamicSchema(name: "Root", json: schemaObj)
+    let generationSchema: GenerationSchema
+    do {
+        generationSchema = try GenerationSchema(root: rootSchema, dependencies: [])
+    } catch {
+        throw AborgFmError.schemaUnsupportedShape("GenerationSchema build: \(error)")
+    }
+
+    // TODO(C5.7-followup): once `Guardrails.developerProvided` lands on
+    // a public SDK, swap to `SystemLanguageModel(guardrails: …)` here
+    // so adult-content audiobooks aren't refused by default guardrails.
+    let session = LanguageModelSession()
+    let options = GenerationOptions(maximumResponseTokens: max(1, maxTokens))
+    do {
+        let response = try await session.respond(
+            to: prompt,
+            schema: generationSchema,
+            includeSchemaInPrompt: true,
+            options: options
+        )
+        return response.content.jsonString
+    } catch {
+        throw AborgFmError.generationFailed("\(error)")
+    }
+    #else
+    _ = (prompt, schemaJsonStr, maxTokens)
+    throw AborgFmError.frameworkUnavailable
+    #endif
+}
+
+@_cdecl("aborg_fm_complete_structured")
+public func aborg_fm_complete_structured(
+    _ prompt: UnsafePointer<CChar>?,
+    _ schemaJson: UnsafePointer<CChar>?,
+    _ maxTokens: Int,
+    _ ctx: UnsafeMutableRawPointer?,
+    _ callback: @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?, Int, Int32) -> Void
+) {
+    let promptStr = prompt.flatMap { String(validatingCString: $0) } ?? ""
+    let schemaStr = schemaJson.flatMap { String(validatingCString: $0) } ?? ""
+    Task.detached {
+        do {
+            let text: String
+            if #available(macOS 26.0, *) {
+                text = try await runCompleteStructured(
+                    prompt: promptStr,
+                    schemaJsonStr: schemaStr,
+                    maxTokens: maxTokens
+                )
+            } else {
+                throw AborgFmError.frameworkUnavailable
+            }
+            let data = text.data(using: .utf8) ?? Data()
+            data.withUnsafeBytes { rawBuf in
+                let base = rawBuf.baseAddress?.assumingMemoryBound(to: CChar.self)
+                callback(ctx, base, data.count, kFmOk)
+            }
+        } catch {
+            logError("aborg_fm_complete_structured", error)
             callback(ctx, nil, 0, errorCode(for: error))
         }
     }

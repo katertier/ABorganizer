@@ -121,6 +121,18 @@ pub enum BridgeError {
     /// impossible per contract; if it happens, it's a Swift bug.
     #[error("callback dropped without firing")]
     CallbackDropped,
+    /// `complete_structured` was called with a `schema_json` that
+    /// is not parseable JSON or isn't a JSON object at the top
+    /// level. Caller bug — fix the schema text.
+    #[error("schema JSON failed to parse")]
+    SchemaParseFailure,
+    /// `complete_structured`'s schema parsed, but it used a JSON
+    /// Schema feature the bridge doesn't yet support
+    /// (`oneOf`, `$ref`, `enum`, etc.). See
+    /// `swift/aborg_fm.swift::buildDynamicSchema` for the
+    /// supported subset.
+    #[error("schema uses a shape the bridge doesn't yet support")]
+    SchemaUnsupportedShape,
 }
 
 impl BridgeError {
@@ -134,6 +146,8 @@ impl BridgeError {
             22 => Self::DeviceNotEligible,
             23 => Self::PromptEmpty,
             24 => Self::GenerationFailed("(see Swift stderr)".into()),
+            25 => Self::SchemaParseFailure,
+            26 => Self::SchemaUnsupportedShape,
             _ => Self::Generic,
         }
     }
@@ -215,6 +229,57 @@ pub async fn complete(prompt: &str, max_tokens: usize) -> Result<String, BridgeE
     #[cfg(not(aborg_fm_bridge))]
     {
         let _ = (prompt, max_tokens);
+        Err(BridgeError::BridgeUnavailable)
+    }
+}
+
+/// Run a one-shot completion against the on-device LLM that is
+/// constrained to produce JSON matching a caller-supplied schema.
+///
+/// `schema_json` is a JSON-Schema-like document; the bridge maps
+/// it to a `DynamicGenerationSchema` and passes it to
+/// `session.respond(to:, schema:, includeSchemaInPrompt: true,
+/// options:)`. The framework converts the schema into a logits
+/// constraint at generation time, so the model can't emit
+/// off-schema tokens.
+///
+/// Supported JSON-Schema shapes (see
+/// `swift/aborg_fm.swift::buildDynamicSchema`):
+///
+/// * `"type": "object"` with a `properties` map and optional
+///   `required` array — children are recursed into.
+/// * Primitive `"type": "string" | "integer" | "number" | "boolean"`.
+/// * `"type": "array"` with an `items` sub-schema.
+///
+/// Unsupported (rejected with [`BridgeError::SchemaUnsupportedShape`]):
+/// `oneOf`, `anyOf`, `allOf`, `enum`, `$ref`, tuple-style array
+/// `items`. Add these in a follow-up slice when an extractor needs
+/// them.
+///
+/// Returns the raw JSON string the model produced — caller is
+/// responsible for `serde_json::from_str::<MySchema>(&s)`. We
+/// don't typed-decode here so this crate stays free of the
+/// extractor's domain types.
+///
+/// # Errors
+///
+/// In addition to all variants documented on [`complete`]:
+/// [`BridgeError::SchemaParseFailure`] when `schema_json` isn't
+/// parseable JSON / isn't a top-level object;
+/// [`BridgeError::SchemaUnsupportedShape`] when it uses a JSON
+/// Schema feature the bridge doesn't yet handle.
+pub async fn complete_structured(
+    prompt: &str,
+    schema_json: &str,
+    max_tokens: usize,
+) -> Result<String, BridgeError> {
+    #[cfg(aborg_fm_bridge)]
+    {
+        ffi::complete_structured_impl(prompt, schema_json, max_tokens).await
+    }
+    #[cfg(not(aborg_fm_bridge))]
+    {
+        let _ = (prompt, schema_json, max_tokens);
         Err(BridgeError::BridgeUnavailable)
     }
 }
@@ -308,6 +373,18 @@ mod ffi {
         /// accepts. Emits a JSON `{locales: [...]}` blob via the
         /// callback.
         fn aborg_fm_supported_languages(
+            ctx: *mut c_void,
+            callback: extern "C" fn(*mut c_void, *const c_char, usize, i32),
+        );
+
+        /// Schema-constrained completion. The Swift side maps
+        /// `schema_json` to a `DynamicGenerationSchema`, passes
+        /// it to `session.respond(to:, schema:, ...)`, and emits
+        /// `response.content.jsonString` via the callback.
+        fn aborg_fm_complete_structured(
+            prompt: *const c_char,
+            schema_json: *const c_char,
+            max_tokens: usize,
             ctx: *mut c_void,
             callback: extern "C" fn(*mut c_void, *const c_char, usize, i32),
         );
@@ -406,6 +483,45 @@ mod ffi {
             .ok_or_else(|| BridgeError::InvalidPayload("OK code but null buffer".into()))?;
         String::from_utf8(bytes).map_err(|e| BridgeError::InvalidPayload(format!("utf8: {e}")))
     }
+
+    pub(super) async fn complete_structured_impl(
+        prompt: &str,
+        schema_json: &str,
+        max_tokens: usize,
+    ) -> Result<String, BridgeError> {
+        let c_prompt =
+            CString::new(prompt).map_err(|e| BridgeError::NulInInput(format!("prompt: {e}")))?;
+        let c_schema = CString::new(schema_json)
+            .map_err(|e| BridgeError::NulInInput(format!("schema_json: {e}")))?;
+        let (tx, rx) = oneshot::channel::<FfiResult>();
+        let ctx = Box::into_raw(Box::new(tx)).cast::<c_void>();
+        // SAFETY: ctx pairs with on_result; both CStrings outlive
+        // the call into Swift (held until the await returns) and
+        // Swift copies them synchronously before kicking off its
+        // Task. Swift fires the callback exactly once.
+        unsafe {
+            aborg_fm_complete_structured(
+                c_prompt.as_ptr(),
+                c_schema.as_ptr(),
+                max_tokens,
+                ctx,
+                on_result,
+            );
+        }
+        // Keep the CStrings live across the await — defeats any
+        // lifetime-inference shortcut that would let LLVM elide
+        // them after the unsafe block.
+        let _ = CStr::from_bytes_with_nul(c_prompt.as_bytes_with_nul());
+        let _ = CStr::from_bytes_with_nul(c_schema.as_bytes_with_nul());
+        let res = rx.await.map_err(|_| BridgeError::CallbackDropped)?;
+        if res.code != 0 {
+            return Err(BridgeError::from_code(res.code));
+        }
+        let bytes = res
+            .buffer
+            .ok_or_else(|| BridgeError::InvalidPayload("OK code but null buffer".into()))?;
+        String::from_utf8(bytes).map_err(|e| BridgeError::InvalidPayload(format!("utf8: {e}")))
+    }
 }
 
 #[cfg(test)]
@@ -467,6 +583,33 @@ mod tests {
                 | BridgeError::DeviceNotEligible
                 | BridgeError::ModelUnavailable(_)
                 | BridgeError::GenerationFailed(_),
+            ) => {}
+            Err(other) => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    /// `complete_structured` must follow the same contract — typed
+    /// error on unavailable hosts; on a built host with the model
+    /// reachable, either a JSON response (caller decodes) or a
+    /// typed unavailability / schema error.
+    #[tokio::test]
+    async fn complete_structured_returns_typed_error_when_unavailable() {
+        let schema = r#"{
+            "type": "object",
+            "properties": { "greeting": { "type": "string" } },
+            "required": ["greeting"]
+        }"#;
+        let r = complete_structured("Say hi as JSON.", schema, 64).await;
+        match r {
+            Ok(_text) => {}
+            Err(
+                BridgeError::BridgeUnavailable
+                | BridgeError::AppleIntelligenceDisabled
+                | BridgeError::DeviceNotEligible
+                | BridgeError::ModelUnavailable(_)
+                | BridgeError::GenerationFailed(_)
+                | BridgeError::SchemaParseFailure
+                | BridgeError::SchemaUnsupportedShape,
             ) => {}
             Err(other) => panic!("unexpected error: {other:?}"),
         }
