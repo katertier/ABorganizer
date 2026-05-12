@@ -163,6 +163,34 @@ pub struct AudnexusBook {
     /// candidates (the consensus stage can refine later).
     #[serde(default)]
     pub genres: Vec<AudnexusGenre>,
+    /// The book's primary series, when it belongs to one.
+    /// Audnexus separates this from `series_secondary` (e.g.
+    /// franchise / shared-universe links). Slice C5.6 ingests
+    /// both into `book_series_candidate` with `is_primary`
+    /// distinguishing them.
+    #[serde(default, rename = "seriesPrimary")]
+    pub series_primary: Option<AudnexusSeries>,
+    /// Secondary series — typically franchise / shared-universe
+    /// rather than reading-order ("Cosmere Universe" when the
+    /// primary is "Mistborn"). Optional; absent for most books.
+    #[serde(default, rename = "seriesSecondary")]
+    pub series_secondary: Option<AudnexusSeries>,
+}
+
+/// One series entry on an Audnexus book response.
+///
+/// `position` arrives as a string ("1", "1.5", "1.0a", "2-3" for
+/// omnibus editions) because Audnexus normalises across decades of
+/// publisher conventions. The catalog writer parses to `f64` for
+/// the simple cases and writes NULL for the rest (logged + still
+/// captured by the candidate row so the name resolves; just no
+/// numeric position).
+#[derive(Debug, Clone, Deserialize)]
+pub struct AudnexusSeries {
+    pub asin: String,
+    pub name: String,
+    #[serde(default)]
+    pub position: String,
 }
 
 /// One genre entry on an Audnexus book response.

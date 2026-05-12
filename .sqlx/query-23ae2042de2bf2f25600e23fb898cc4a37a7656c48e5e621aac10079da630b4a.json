@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO series (name, audible_id) VALUES (?, ?) RETURNING series_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "series_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "23ae2042de2bf2f25600e23fb898cc4a37a7656c48e5e621aac10079da630b4a"
+}

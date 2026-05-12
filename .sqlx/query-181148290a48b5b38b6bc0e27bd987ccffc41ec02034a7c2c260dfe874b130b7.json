@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE series SET audible_id = ? WHERE series_id = ? AND audible_id IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "181148290a48b5b38b6bc0e27bd987ccffc41ec02034a7c2c260dfe874b130b7"
+}

@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n              series_name  AS \"series_name!\",\n              series_asin,\n              position,\n              is_primary   AS \"is_primary!: i64\",\n              confidence   AS \"confidence!: f64\"\n           FROM book_series_candidate\n           WHERE book_id = ?\n           ORDER BY confidence DESC, recorded_at DESC",
+  "describe": {
+    "columns": [
+      {
+        "name": "series_name!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "series_asin",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "position",
+        "ordinal": 2,
+        "type_info": "Float"
+      },
+      {
+        "name": "is_primary!: i64",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "confidence!: f64",
+        "ordinal": 4,
+        "type_info": "Float"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "29a5c65db9e1f66d0e0f169f3431165594355ba998853cee9859f5911b86b3a5"
+}

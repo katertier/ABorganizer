@@ -133,9 +133,21 @@ async fn process_one_file(
 
     if tunables.write_provenance {
         for candidate in &probe.candidates {
-            if let Err(e) =
-                write_provenance(library, book_id, candidate.field, &candidate.value).await
-            {
+            // Series gets a dedicated candidate table
+            // (`book_series_candidate`) because the shape needs
+            // series_asin + position + is_primary alongside the
+            // name — see ADR-0017 (slice C5.6). Every other
+            // Field variant goes through the
+            // `book_field_provenance` scalar path.
+            let result = match candidate.field {
+                Field::Series => {
+                    write_series_candidate(library, book_id, &candidate.value).await
+                }
+                _ => {
+                    write_provenance(library, book_id, candidate.field, &candidate.value).await
+                }
+            };
+            if let Err(e) = result {
                 tracing::warn!(
                     book = %book_id,
                     field = %candidate.field,
@@ -322,6 +334,42 @@ async fn update_book_file_properties(
     .execute(library.pool())
     .await
     .map_err(|e| Error::Database(format!("update book_file: {e}")))?;
+    Ok(())
+}
+
+/// Write a series candidate row sourced from the audio file's
+/// album tag. Tag-read can't supply a `series_asin` (the album
+/// tag is name-only) or a numeric `position` (the album tag is
+/// just a string); identity-resolve fills in the rest via
+/// case-insensitive name match against `series` (and any
+/// `series.audible_id` if a higher-confidence source like
+/// Audnexus seeded the row).
+///
+/// `is_primary` defaults to `1` — the album tag is conventionally
+/// the book's primary series. Future sources (filename heuristics)
+/// might write `0`.
+async fn write_series_candidate(
+    library: &ab_db::LibraryDb,
+    book_id: BookId,
+    series_name: &str,
+) -> Result<()> {
+    let id = book_id.0;
+    let name = series_name.trim();
+    if name.is_empty() {
+        return Ok(());
+    }
+    sqlx::query!(
+        "INSERT INTO book_series_candidate \
+         (book_id, source, series_name, series_asin, position, is_primary, confidence) \
+         VALUES (?, ?, ?, NULL, NULL, 1, ?)",
+        id,
+        PROVENANCE_SOURCE,
+        name,
+        TAG_CONFIDENCE,
+    )
+    .execute(library.pool())
+    .await
+    .map_err(|e| Error::Database(format!("insert series candidate: {e}")))?;
     Ok(())
 }
 
