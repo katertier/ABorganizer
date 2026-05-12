@@ -197,9 +197,13 @@ name = "ab-transcript"
 version = "0.1.0"
 dependencies = [
  "ab-core",
+ "ab-db",
+ "ab-pipeline",
+ "async-trait",
  "regex",
  "serde",
  "serde_json",
+ "sqlx",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -257,6 +261,7 @@ dependencies = [
  "ab-seed",
  "ab-shelf",
  "ab-tag-read",
+ "ab-transcript",
  "ab-webui-config",
  "ab-webui-player",
  "anyhow",

@@ -96,6 +96,12 @@ async fn library_scan(
             "audnexus-chapters",
             "embedded-chapters",
             "chapter-pick-winner",
+            // 6-min head + 30-s tail. Heavier than the other
+            // stages (multi-second per book at decode +
+            // SpeechAnalyzer time) but seeded at scan time so
+            // the language gate + downstream extractors have a
+            // transcript by the time the user opens the book.
+            "transcribe-head-tail",
         ] {
             if let Err(e) = state
                 .inner

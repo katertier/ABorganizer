@@ -15,10 +15,15 @@
 
 pub mod bridge;
 pub mod language;
+pub mod stage;
 
 pub use bridge::{TranscriptSegment, install_speech_model, transcribe_window};
 pub use language::{
     LanguageDetection, LanguageHit, detect as detect_language, detect_from_transcript,
+};
+pub use stage::{
+    CACHE_TYPE_HEAD, CACHE_TYPE_TAIL, SOURCE_NL_LANGUAGE_TAGS, SOURCE_NL_LANGUAGE_TRANSCRIPT_HEAD,
+    STAGE_NAME as TRANSCRIBE_HEAD_TAIL_STAGE, TranscribeHeadTailStage,
 };
 
 use serde::{Deserialize, Serialize};

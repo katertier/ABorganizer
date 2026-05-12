@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT duration_ms, raw_duration_ms FROM books WHERE book_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "duration_ms",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "raw_duration_ms",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "73c501cbdbb4a8f4dfd9f70f64f2b87e979913e7483fe46c7b02f65f61deea49"
+}

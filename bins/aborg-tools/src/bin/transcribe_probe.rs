@@ -9,6 +9,9 @@
 //!
 //! Not part of any production code path — one-shot diagnostic.
 
+// xtask: allow_macros — manual-probe binary prints JSON to stdout
+// for human inspection + status messages to stderr; tracing would
+// over-engineer a one-shot diagnostic.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::path::PathBuf;

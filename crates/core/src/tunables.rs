@@ -59,6 +59,10 @@ pub struct Tunables {
     /// Language detection (NLLanguageRecognizer) — pre- and
     /// post-transcribe gates.
     pub language: LanguageTunables,
+
+    /// Head/tail transcribe stage (`SpeechAnalyzer` window sizes,
+    /// `model_version` stamp).
+    pub transcribe: TranscribeTunables,
 }
 
 impl Default for Tunables {
@@ -77,6 +81,7 @@ impl Default for Tunables {
             tag_read: TagReadTunables::default(),
             tags: TagsTunables::default(),
             language: LanguageTunables::default(),
+            transcribe: TranscribeTunables::default(),
         }
     }
 }
@@ -460,6 +465,59 @@ impl Default for LanguageTunables {
             min_confidence: 0.65,
             default_locale: "en-US".into(),
             min_text_chars: 16,
+        }
+    }
+}
+
+/// Head/tail transcribe stage knobs.
+///
+/// The stage transcribes two windows per book: `[0, head_secs)`
+/// for downstream extractors (audiologo, language, title/author
+/// confirm, DNA, summary) and `[duration - tail_secs, duration)`
+/// for outro audiologo + last-sentence boundary work. Results
+/// land in `ai_cache` keyed by `(book_id, cache_type)` with
+/// `cache_type` ∈ {`transcript_head`, `transcript_tail`} and
+/// the `model_version` stamp below.
+///
+/// Why store `model_version`: when Apple ships a new
+/// `SpeechAnalyzer` engine, bump this and the stage re-runs
+/// (the cached row is stale). Derived features that DON'T need
+/// the new engine (e.g. re-running language detection with a
+/// tweaked tunable) re-read the same cached transcript without
+/// re-transcribing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TranscribeTunables {
+    /// Length of the head transcription window in seconds.
+    /// 6 minutes is the sweet spot — covers the Audible jingle
+    /// (~6 s), publisher branding (~30 s), author/title intro
+    /// (typically <2 min), and the start of the prologue/first
+    /// chapter. Past 6 min, marginal extractor value drops.
+    pub head_secs: f64,
+    /// Length of the tail transcription window in seconds.
+    /// 30 s captures the outro publisher jingle + closing
+    /// credits ("This has been an Audible production…")
+    /// without paying for non-jingle book content.
+    pub tail_secs: f64,
+    /// Engine identifier written to `ai_cache.model_version`.
+    /// Bump to force re-transcription across the library when
+    /// the Speech framework improves materially. The string is
+    /// opaque to the engine — it's a content-addressable cache
+    /// key on our side. Convention: `speech-<macOS>-v<bump>`.
+    pub model_version: String,
+    /// Skip the stage when the active file is shorter than this
+    /// (seconds). Below ~30 s neither head nor tail are useful;
+    /// the file is probably a sample / preview / corrupt entry.
+    pub min_duration_secs: f64,
+}
+
+impl Default for TranscribeTunables {
+    fn default() -> Self {
+        Self {
+            head_secs: 360.0,
+            tail_secs: 30.0,
+            model_version: "speech-26.0-v1".into(),
+            min_duration_secs: 30.0,
         }
     }
 }
