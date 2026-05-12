@@ -8,8 +8,13 @@
 //!    excerpt, return a JSON object with two arrays: `dna_tags`
 //!    (safe-to-display thematic tags) and `spoiler_tags`
 //!    (plot-revealing tags)."
-//! 3. Calls [`ab_foundation_models::complete`] (the Foundation Models bridge)
-//!    against Apple Intelligence's on-device LLM.
+//! 3. Calls [`ab_foundation_models::complete_structured`]
+//!    against Apple Intelligence's on-device LLM, passing a
+//!    `DynamicGenerationSchema`-shaped JSON schema so the framework
+//!    constrains the model's output to `{dna_tags: [string],
+//!    spoiler_tags: [string]}` at decode time. (Retrofitted from
+//!    the free-form `complete()` + parse-retry pattern in
+//!    slice C5.7.c.)
 //! 4. Parses the JSON, applies the configured per-category
 //!    caps, and writes one row per tag to `book_tags` with
 //!    `source = "dna_llm"` and the prefix convention
@@ -34,9 +39,15 @@
 //!   / `DeviceNotEligible`) → `Err`. Per project policy these
 //!   are user-fixable issues surfaced by `aborg doctor llm`,
 //!   not silent skips.
-//! - Model returned malformed JSON → log warning + `Err`. The
-//!   executor records the failure; rerun after a prompt fix
-//!   or `extractor_version` bump.
+//! - Model returned malformed JSON → log warning + `Err`. With
+//!   schema-constrained generation this should be near-impossible
+//!   (the model literally can't emit off-schema tokens), but
+//!   the parse step + warn is kept as a defence-in-depth.
+//! - [`BridgeError::SchemaParseFailure`] / `SchemaUnsupportedShape`
+//!   → `Err`. Both indicate a bug in [`DNA_SCHEMA_JSON`], which
+//!   is a `const` — should be impossible at runtime, but the
+//!   typed variants surface clearly if a future schema edit
+//!   regresses.
 
 use std::sync::Arc;
 
@@ -48,7 +59,7 @@ use ab_core::{BookId, CacheKey, Error, Result, TagKind};
 use ab_db::LibraryDb;
 use ab_pipeline::{Stage, StageContext, StageId, StageOutcome};
 
-use ab_foundation_models::{BridgeError, complete};
+use ab_foundation_models::{BridgeError, complete_structured};
 
 /// Typed identifier for this stage.
 pub const STAGE_ID: StageId = StageId::new("extract-dna-tags");
@@ -58,6 +69,26 @@ pub const STAGE_NAME: &str = STAGE_ID.as_str();
 
 /// `book_tags.source` for rows produced by this stage.
 pub const TAG_SOURCE_DNA_LLM: &str = "dna_llm";
+
+/// JSON Schema passed to `complete_structured`.
+///
+/// Constrains the model's output at decode time. Maps to a
+/// `DynamicGenerationSchema` on the Swift side; matches the
+/// `DnaResponse` Rust shape one-to-one so any drift surfaces as a
+/// `serde_json` parse error in the test suite (`parse_dna_response`).
+///
+/// `additionalProperties` is omitted — the bridge's
+/// `buildDynamicSchema` ignores it (Apple's schema model doesn't
+/// have a direct equivalent), and the schema-constrained decoder
+/// can't emit unlisted keys anyway.
+pub const DNA_SCHEMA_JSON: &str = r#"{
+    "type": "object",
+    "properties": {
+        "dna_tags": {"type": "array", "items": {"type": "string"}},
+        "spoiler_tags": {"type": "array", "items": {"type": "string"}}
+    },
+    "required": ["dna_tags", "spoiler_tags"]
+}"#;
 
 /// Stage that asks the on-device LLM for thematic DNA tags +
 /// spoiler tags, then promotes them into `book_tags`.
@@ -114,7 +145,9 @@ impl Stage for ExtractDnaTagsStage {
             self.tunables.dna_max_tags,
             self.tunables.dna_max_spoiler_tags,
         );
-        let raw = match complete(&prompt, self.tunables.dna_max_tokens).await {
+        let raw = match complete_structured(&prompt, DNA_SCHEMA_JSON, self.tunables.dna_max_tokens)
+            .await
+        {
             Ok(s) => s,
             Err(BridgeError::PromptEmpty) => {
                 // Should be impossible given the sanity floor
@@ -356,24 +389,30 @@ pub fn build_prompt(transcript: &str, locale: &str, max_dna: usize, max_spoilers
     } else {
         transcript
     };
+    // Schema shape (`dna_tags`, `spoiler_tags` — both arrays of
+    // strings) is conveyed to the model by the
+    // `complete_structured` bridge with `includeSchemaInPrompt:
+    // true`; we don't restate it here. What stays in the prompt
+    // is the *content guidance* the schema cannot express:
+    // category caps, what each list semantically means, the
+    // no-prefix-in-the-string convention, and the
+    // English-tags-regardless-of-locale rule.
     format!(
         "You are a metadata extractor for an audiobook library. \
-Read the TRANSCRIPT excerpt below and return a JSON object with \
-exactly two keys: `dna_tags` and `spoiler_tags`.\n\
+Read the TRANSCRIPT excerpt below and produce two short tag lists.\n\
 \n\
 - `dna_tags`: at most {max_dna} short, lowercase, hyphenated tags \
 describing the book's themes, mood, narrative style, and content \
 texture. Tags must be safe to show readers who haven't read the \
 book (no plot reveals). Examples: \"cozy\", \"unreliable-narrator\", \
 \"slow-burn-romance\", \"morally-grey-cast\". Do NOT include the # \
-prefix in the JSON value.\n\
+prefix in the string.\n\
 - `spoiler_tags`: at most {max_spoilers} tags marking plot-revealing \
 attributes a spoiler-averse reader should not see by default. \
 Examples: \"hero-dies\", \"twin-twist\", \"unreliable-narrator-revealed\". \
 Only include tags backed by clear evidence in the transcript. Do NOT \
-include the ! prefix.\n\
+include the ! prefix in the string.\n\
 \n\
-Respond with ONLY the JSON object, no prose, no markdown fence. \
 Write tags in English regardless of TRANSCRIPT language.\n\
 \n\
 TRANSCRIPT (locale={locale}):\n\
@@ -433,7 +472,7 @@ fn bridge_to_stage_error(err: &BridgeError) -> Error {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -501,5 +540,45 @@ mod tests {
         let r: DnaResponse = serde_json::from_str(json).expect("parse");
         assert_eq!(r.dna_tags, vec!["cozy"]);
         assert!(r.spoiler_tags.is_empty());
+    }
+
+    /// `DNA_SCHEMA_JSON` is the JSON Schema the framework
+    /// constrains the model to. Verify it parses as JSON (so the
+    /// bridge's schema-parse step won't reject it at runtime) and
+    /// names exactly the fields the `DnaResponse` deserialiser
+    /// reads. Catches the case where one side adds a field
+    /// without the other.
+    #[test]
+    fn schema_parses_and_matches_response_shape() {
+        let v: serde_json::Value = serde_json::from_str(DNA_SCHEMA_JSON).expect("schema parses");
+        assert_eq!(v["type"], "object");
+        let props = v["properties"]
+            .as_object()
+            .expect("properties is an object");
+        // Both fields the DnaResponse deserialiser reads must
+        // be in the schema, and both must be arrays-of-strings.
+        for field in ["dna_tags", "spoiler_tags"] {
+            let entry = props
+                .get(field)
+                .unwrap_or_else(|| panic!("schema missing field {field}"));
+            assert_eq!(
+                entry["type"], "array",
+                "{field} must be `type: array` in schema",
+            );
+            assert_eq!(
+                entry["items"]["type"], "string",
+                "{field}.items must be `type: string` in schema",
+            );
+        }
+        // `required` must list both keys so the schema enforces
+        // them rather than relying on the prompt.
+        let required = v["required"]
+            .as_array()
+            .expect("required is an array")
+            .iter()
+            .map(|x| x.as_str().expect("required entry is string").to_owned())
+            .collect::<Vec<_>>();
+        assert!(required.contains(&"dna_tags".to_owned()));
+        assert!(required.contains(&"spoiler_tags".to_owned()));
     }
 }
