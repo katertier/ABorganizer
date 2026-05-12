@@ -1,3 +1,17 @@
+// Integration test target: `expect()` / `unwrap()` are the
+// standard test-setup idiom (a panic on setup-failure is the
+// expected outcome — the test simply cannot run), `panic!()` is
+// the deliberate signal for "unexpected match arm", and the
+// `books.X` shorthand in module docs is a column reference, not
+// a struct-field reference. The lints are restored to defaults
+// inside the production crates.
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::doc_markdown
+)]
+
 //! Drift-detection integration test for the consensus →
 //! `books.*` promotion path.
 //!

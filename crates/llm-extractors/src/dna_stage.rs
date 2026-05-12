@@ -433,6 +433,7 @@ fn bridge_to_stage_error(err: &BridgeError) -> Error {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
 

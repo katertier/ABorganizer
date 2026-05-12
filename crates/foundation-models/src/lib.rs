@@ -348,6 +348,18 @@ mod ffi {
 }
 
 #[cfg(test)]
+#[allow(
+    // panic!() is the test signal for unexpected match arms — the
+    // explicit panic on `Ok(other)` / `Err(other)` is doing real
+    // work: it fails the test loudly with the unexpected variant
+    // pretty-printed, which is what a test expects.
+    clippy::panic,
+    // The match arms below intentionally enumerate each valid
+    // shape on its own line (with its own doc comment). Merging
+    // them with `|` would collapse the documentation that pairs
+    // each pattern with what state it represents.
+    clippy::match_same_arms,
+)]
 mod tests {
     use super::*;
 
