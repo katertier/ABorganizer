@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE pending_speech_installs SET status = 'installing', last_attempted_at = strftime('%s','now') WHERE locale = ( SELECT locale FROM pending_speech_installs WHERE status = 'pending' ORDER BY queued_at LIMIT 1 ) RETURNING locale",
+  "describe": {
+    "columns": [
+      {
+        "name": "locale",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c4ba3a02acb00bdbef1ec9cd0c09d493a8f09687d7a2489c445f893751f32de5"
+}

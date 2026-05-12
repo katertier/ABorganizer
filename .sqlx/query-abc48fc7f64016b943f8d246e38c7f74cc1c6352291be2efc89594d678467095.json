@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM book_locale_blocks WHERE locale = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "abc48fc7f64016b943f8d246e38c7f74cc1c6352291be2efc89594d678467095"
+}

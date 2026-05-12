@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO pending_speech_installs (locale, status) VALUES (?, 'pending') ON CONFLICT(locale) DO UPDATE SET status = CASE WHEN pending_speech_installs.status = 'failed' THEN 'pending' ELSE pending_speech_installs.status END",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "73551f0a3c2bcf05a26a7b17fbbd652db183e213893efdfdcec7b0f4b10797fb"
+}

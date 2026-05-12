@@ -18,7 +18,6 @@
 set -euo pipefail
 
 PREP_DB="${SQLX_PREP_DB:-/tmp/aborg-prep.db}"
-MIGRATION="crates/db/migrations/library/001_initial.sql"
 
 cd "$(git rev-parse --show-toplevel)"
 
@@ -29,7 +28,21 @@ if ! command -v sqlx >/dev/null 2>&1; then
 fi
 
 rm -f "$PREP_DB"
-sqlite3 "$PREP_DB" < "$MIGRATION"
+# Apply every library + ephemeral migration into a single prep DB.
+# sqlx prepare validates query strings against ONE schema; we just
+# need every CREATE TABLE referenced from any sqlx::query!() call
+# to exist somewhere in the prep DB. The two production DBs stay
+# separate at runtime — this is purely a compile-time concern.
+#
+# Some tables (e.g. `meta`) are declared in BOTH schemas with the
+# same shape. Rewrite the migration text to `... IF NOT EXISTS` so
+# the second declaration is a no-op in the prep DB. Production
+# migrations run against separate DBs, so they stay strict — this
+# rewrite never touches the source files.
+for migration in crates/db/migrations/library/*.sql crates/db/migrations/ephemeral/*.sql; do
+    sed -E 's/CREATE (UNIQUE )?(TABLE|INDEX) /CREATE \1\2 IF NOT EXISTS /g; s/INSERT INTO /INSERT OR IGNORE INTO /g' \
+        "$migration" | sqlite3 "$PREP_DB"
+done
 echo "prep DB ready: $PREP_DB"
 
 DATABASE_URL="sqlite://$PREP_DB" cargo sqlx prepare --workspace

@@ -162,6 +162,18 @@ async fn main() -> Result<()> {
     };
     let scheduler = Arc::new(Scheduler::spawn(dag, stage_ctx, &tunables.scheduler));
 
+    // Idle-priority Speech-model installer. Spawned once at
+    // startup; wakes every `tunables.transcribe.idle_install_check_secs`
+    // to drain `pending_speech_installs` and re-queue any books
+    // that were blocked on the install. Cancellation flows
+    // through the shared `cancel` token alongside SIGTERM.
+    tokio::spawn(ab_transcript::run_idle_install_loop(
+        ephemeral.clone(),
+        Arc::clone(&scheduler),
+        tunables.transcribe.clone(),
+        cancel.clone(),
+    ));
+
     // Shared state for the API router. Carries the scheduler handle
     // so the scan endpoint can submit new BookIds.
     let api_state = ab_api::ApiState::new(library.clone(), ephemeral.clone(), scheduler);

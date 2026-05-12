@@ -14,8 +14,11 @@
 //! Add a new extractor: implement [`Extractor`], register it.
 
 pub mod bridge;
+pub mod idle_install;
 pub mod language;
 pub mod stage;
+
+pub use idle_install::run_idle_install_loop;
 
 pub use bridge::{
     BridgeError, TranscriptSegment, install_speech_model, install_speech_model_typed,

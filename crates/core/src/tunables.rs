@@ -509,6 +509,14 @@ pub struct TranscribeTunables {
     /// (seconds). Below ~30 s neither head nor tail are useful;
     /// the file is probably a sample / preview / corrupt entry.
     pub min_duration_secs: f64,
+    /// Idle-priority Speech-model installer wake interval
+    /// (seconds). The daemon spawns one tokio task at startup
+    /// that wakes every `idle_install_check_secs` to drain
+    /// `pending_speech_installs`. 1800 s (30 min) is the
+    /// default — fast enough that a freshly-imported book in a
+    /// new locale gets transcribed within an hour; slow enough
+    /// that an empty queue costs negligible CPU.
+    pub idle_install_check_secs: u64,
 }
 
 impl Default for TranscribeTunables {
@@ -518,6 +526,7 @@ impl Default for TranscribeTunables {
             tail_secs: 30.0,
             model_version: "speech-26.0-v1".into(),
             min_duration_secs: 30.0,
+            idle_install_check_secs: 1_800,
         }
     }
 }

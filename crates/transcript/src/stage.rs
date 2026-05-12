@@ -50,7 +50,7 @@ use serde::Serialize;
 
 use ab_core::tunables::{LanguageTunables, TranscribeTunables};
 use ab_core::{BookId, Error, Result};
-use ab_db::LibraryDb;
+use ab_db::{EphemeralDb, LibraryDb};
 use ab_pipeline::{Stage, StageContext, StageOutcome};
 
 use crate::bridge::{BridgeError, TranscriptSegment, transcribe_window_typed};
@@ -108,16 +108,22 @@ impl Stage for TranscribeHeadTailStage {
             write_language_candidate(&ctx.library, book_id, SOURCE_NL_LANGUAGE_TAGS, d).await?;
         }
 
-        // Head window.
-        let Some(head_segments) = transcribe_window_with_skip_on_no_model(
+        // Head window. On `ModelMissing`, queue the locale for
+        // idle install and stop; the idle loop re-submits this
+        // book once the model lands.
+        let head_segments = match transcribe_window_with_skip_on_no_model(
             &plan.head_path,
             0.0,
             plan.head_end_secs,
             &locale,
         )
         .await?
-        else {
-            return Ok(StageOutcome::Skipped);
+        {
+            TranscribeWindowOutcome::Segments(s) => s,
+            TranscribeWindowOutcome::ModelMissing => {
+                queue_locale_install(&ctx.ephemeral, book_id, &locale).await?;
+                return Ok(StageOutcome::Skipped);
+            }
         };
         write_transcript_cache(
             &ctx.library,
@@ -148,32 +154,50 @@ impl Stage for TranscribeHeadTailStage {
             .await?;
         }
 
-        // Tail window (skipped on short books).
+        // Tail window (skipped on short books). On `ModelMissing`
+        // the head path already queued the locale; we just skip
+        // the tail and return Done — head transcript is the more
+        // valuable artifact.
         if let Some(tail) = plan.tail.as_ref() {
-            let tail_segments = transcribe_window_with_skip_on_no_model(
+            match transcribe_window_with_skip_on_no_model(
                 &tail.path,
                 tail.start_secs,
                 tail.end_secs,
                 &locale,
             )
-            .await?;
-            if let Some(segments) = tail_segments {
-                write_transcript_cache(
-                    &ctx.library,
-                    book_id,
-                    CACHE_TYPE_TAIL,
-                    CacheWrite {
-                        segments: &segments,
-                        locale: &locale,
-                        model_version: &self.transcribe.model_version,
-                    },
-                )
-                .await?;
-                // No post-transcribe language candidate on the
-                // tail: it's 30 s of outro jingle by design, and
-                // jingles are English-biased per the LanguageTunables
-                // skip semantics. Tail's job is audiologo /
-                // last-sentence work, not language confirmation.
+            .await?
+            {
+                TranscribeWindowOutcome::Segments(segments) => {
+                    write_transcript_cache(
+                        &ctx.library,
+                        book_id,
+                        CACHE_TYPE_TAIL,
+                        CacheWrite {
+                            segments: &segments,
+                            locale: &locale,
+                            model_version: &self.transcribe.model_version,
+                        },
+                    )
+                    .await?;
+                    // No post-transcribe language candidate on
+                    // the tail: it's 30 s of outro jingle by
+                    // design, and jingles are English-biased per
+                    // the LanguageTunables skip semantics. Tail's
+                    // job is audiologo / last-sentence work, not
+                    // language confirmation.
+                }
+                TranscribeWindowOutcome::ModelMissing => {
+                    // Head landed but tail's locale is gone? That
+                    // would be an Apple-side glitch — the install
+                    // was good 6 minutes ago. Log and move on;
+                    // the book is mostly useful with just the
+                    // head transcript.
+                    tracing::warn!(
+                        book = %book_id,
+                        locale,
+                        "transcribe.tail.model_unexpectedly_missing"
+                    );
+                }
             }
         }
 
@@ -382,27 +406,38 @@ async fn pre_transcribe_locale(
     Ok(PrePick { detection })
 }
 
-// ── Transcribe wrapper that demotes "model not installed" ────────
+// ── Transcribe wrapper that surfaces "model not installed" ───────
 
-/// Calls `transcribe_window_typed`; on `ModelNotInstalled` the
-/// error is converted to `Ok(None)` so the stage cleanly returns
-/// `Skipped` and 3A.4.1's idle-installer can fix the gap. All
-/// other errors propagate via `BridgeError -> ab_core::Error`.
+/// Outcome from a transcribe window. `ModelMissing` is the
+/// recoverable failure that the idle-priority installer
+/// (`run_idle_install_loop`) handles; caller writes a
+/// `book_locale_blocks` row and returns `Skipped` so the book
+/// retries automatically once the model lands.
+#[derive(Debug)]
+enum TranscribeWindowOutcome {
+    Segments(Vec<TranscriptSegment>),
+    ModelMissing,
+}
+
+/// Calls [`transcribe_window_typed`]; on
+/// [`BridgeError::ModelNotInstalled`] returns
+/// `TranscribeWindowOutcome::ModelMissing`. Other errors
+/// propagate via `BridgeError -> ab_core::Error`.
 async fn transcribe_window_with_skip_on_no_model(
     path: &std::path::Path,
     start_secs: f64,
     end_secs: f64,
     locale: &str,
-) -> Result<Option<Vec<TranscriptSegment>>> {
+) -> Result<TranscribeWindowOutcome> {
     match transcribe_window_typed(path, start_secs, end_secs, locale).await {
-        Ok(segs) => Ok(Some(segs)),
+        Ok(segs) => Ok(TranscribeWindowOutcome::Segments(segs)),
         Err(BridgeError::ModelNotInstalled) => {
             tracing::warn!(
                 locale,
                 path = %path.display(),
                 "transcribe.skip.model_not_installed"
             );
-            Ok(None)
+            Ok(TranscribeWindowOutcome::ModelMissing)
         }
         Err(e) => Err(e.into()),
     }
@@ -485,6 +520,47 @@ async fn write_language_candidate(
     .execute(library.pool())
     .await
     .map_err(|e| Error::Database(format!("transcribe write language candidate: {e}")))?;
+    Ok(())
+}
+
+/// Upserts the install-needed locale + records this book as
+/// waiting on it. Called when transcribe lands a
+/// [`BridgeError::ModelNotInstalled`]. Idempotent on both rows;
+/// PK / unique constraints make duplicate calls safe.
+///
+/// The idle install loop (`run_idle_install_loop`) drains both
+/// tables.
+async fn queue_locale_install(
+    ephemeral: &EphemeralDb,
+    book_id: BookId,
+    locale: &str,
+) -> Result<()> {
+    let id = book_id.0;
+    // Don't reset `status='installing'` or `'installed'` rows —
+    // the idle loop is mid-flight or just finished. Re-queueing
+    // the book is enough.
+    sqlx::query!(
+        "INSERT INTO pending_speech_installs (locale, status) \
+         VALUES (?, 'pending') \
+         ON CONFLICT(locale) DO UPDATE \
+           SET status = CASE \
+                          WHEN pending_speech_installs.status = 'failed' \
+                            THEN 'pending' \
+                          ELSE pending_speech_installs.status \
+                        END",
+        locale,
+    )
+    .execute(ephemeral.pool())
+    .await
+    .map_err(|e| Error::Database(format!("queue speech install: {e}")))?;
+    sqlx::query!(
+        "INSERT OR IGNORE INTO book_locale_blocks (book_id, locale) VALUES (?, ?)",
+        id,
+        locale,
+    )
+    .execute(ephemeral.pool())
+    .await
+    .map_err(|e| Error::Database(format!("queue locale block: {e}")))?;
     Ok(())
 }
 
