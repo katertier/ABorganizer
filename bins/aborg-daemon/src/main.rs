@@ -144,6 +144,20 @@ fn build_pipeline_stages(tunables: &Tunables) -> Vec<Arc<dyn Stage>> {
         // and writes candidates to `book_field_provenance`.
         // Cheap — pure-text regex / keyword passes; no FFI.
         Arc::new(ab_transcript::RunExtractorsStage::new()),
+        // `extract-dna-tags` (slice 3K.3, retrofitted to
+        // complete_structured in C5.7.d) — Apple-Intelligence
+        // pass over the full transcript producing `#`-prefixed
+        // safe DNA tags + `!`-prefixed spoiler tags. Skips when
+        // FoundationModels is unavailable; idempotent on
+        // `extractor_version`.
+        Arc::new(ab_llm_extractors::ExtractDnaTagsStage::new(&tunables.llm)),
+        // `extract-summary-spoiler-free` (slice 3K.4) — Apple-
+        // Intelligence pass producing a spoiler-free book summary
+        // in `books.language`. Output stays in the book's native
+        // language regardless of `library_locale` (per project
+        // policy — library_locale is reserved for genre
+        // vocabulary).
+        Arc::new(ab_llm_extractors::ExtractSummaryStage::new(&tunables.llm)),
     ]
 }
 

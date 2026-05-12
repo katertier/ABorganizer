@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT language FROM books WHERE book_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "language",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "41acd143dc627ab7882c0310855c6c0a8958f71ddc653546ae8608114a9bba09"
+}
