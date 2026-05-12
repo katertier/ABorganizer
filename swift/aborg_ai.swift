@@ -82,6 +82,41 @@ private enum AborgAIError: Error {
     case readFailure(String)
 }
 
+// MARK: - C ABI error codes
+
+// Stable numeric codes passed back through the C callback as the
+// fourth argument. The Rust side maps each onto a typed
+// `BridgeError` variant — no string-matching. Order matters: new
+// codes append, never reuse a number.
+//
+// 0 is success (callback fired with a real payload). Any other
+// value means the data pointer + length are unspecified
+// (typically null + 0).
+private let kErrCodeOK: Int32 = 0
+private let kErrCodeGeneric: Int32 = 1
+private let kErrCodeFrameworkUnavailable: Int32 = 2
+private let kErrCodeLocaleUnsupported: Int32 = 3
+private let kErrCodeModelNotInstalled: Int32 = 4
+private let kErrCodeWindowEmpty: Int32 = 5
+private let kErrCodeNoCompatibleAudioFormat: Int32 = 6
+private let kErrCodeReadFailure: Int32 = 7
+private let kErrCodeEncodeFailure: Int32 = 8
+
+@available(macOS 26.0, *)
+private func errorCode(_ err: Error) -> Int32 {
+    if let e = err as? AborgAIError {
+        switch e {
+        case .frameworkUnavailable: return kErrCodeFrameworkUnavailable
+        case .localeUnsupported: return kErrCodeLocaleUnsupported
+        case .modelNotInstalled: return kErrCodeModelNotInstalled
+        case .noCompatibleAudioFormat: return kErrCodeNoCompatibleAudioFormat
+        case .windowEmpty: return kErrCodeWindowEmpty
+        case .readFailure: return kErrCodeReadFailure
+        }
+    }
+    return kErrCodeGeneric
+}
+
 @available(macOS 26.0, *)
 private func runTranscribe(
     pathStr: String,
@@ -141,7 +176,12 @@ private func runTranscribe(
     //    future full-book stage we'll switch to chunked
     //    AVAssetReader to keep RAM bounded.
     let url = URL(fileURLWithPath: pathStr)
-    let file = try AVAudioFile(forReading: url)
+    let file: AVAudioFile
+    do {
+        file = try AVAudioFile(forReading: url)
+    } catch {
+        throw AborgAIError.readFailure("AVAudioFile open: \(error)")
+    }
     let nativeFormat = file.processingFormat
     let nativeSampleRate = nativeFormat.sampleRate
     let totalFrames = file.length
@@ -289,26 +329,28 @@ public func aborg_detect_language(
     _ text: UnsafePointer<CChar>?,
     _ maxAlternatives: Int,
     _ ctx: UnsafeMutableRawPointer?,
-    _ callback: @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?, Int) -> Void
+    _ callback: @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?, Int, Int32) -> Void
 ) {
     let textStr = text.flatMap { String(validatingCString: $0) } ?? ""
     // Clamp to [0, 16] — more than 16 alternatives is noise from
     // NLLanguageRecognizer; keep the surface small.
     let n = max(0, min(maxAlternatives, 16))
     guard let result = runDetectLanguage(text: textStr, maxAlternatives: n) else {
-        callback(ctx, nil, 0)
+        // Inconclusive / empty input → success-with-null. The
+        // Rust side maps (OK code, null ptr) → `Ok(None)`.
+        callback(ctx, nil, 0, kErrCodeOK)
         return
     }
     do {
         let data = try JSONEncoder().encode(result)
         data.withUnsafeBytes { rawBuf in
             let base = rawBuf.baseAddress?.assumingMemoryBound(to: CChar.self)
-            callback(ctx, base, data.count)
+            callback(ctx, base, data.count, kErrCodeOK)
         }
     } catch {
         let msg = "aborg_detect_language encode error: \(error)\n"
         FileHandle.standardError.write(msg.data(using: .utf8) ?? Data())
-        callback(ctx, nil, 0)
+        callback(ctx, nil, 0, kErrCodeEncodeFailure)
     }
 }
 
@@ -366,31 +408,26 @@ private func runInstallModel(localeStr: String) async throws {
 public func aborg_install_speech_model(
     _ locale: UnsafePointer<CChar>?,
     _ ctx: UnsafeMutableRawPointer?,
-    _ callback: @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?, Int) -> Void
+    _ callback: @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?, Int, Int32) -> Void
 ) {
     let localeStr = locale.flatMap { String(validatingCString: $0) } ?? "en-US"
 
     guard #available(macOS 26.0, *) else {
-        callback(ctx, nil, 0)
+        callback(ctx, nil, 0, kErrCodeFrameworkUnavailable)
         return
     }
 
     Task {
         do {
             try await runInstallModel(localeStr: localeStr)
-            // Success → callback with empty-but-non-null payload
-            // so the Rust side distinguishes "Swift fired with
-            // success" from "Swift fired with null = failed".
-            // One zero byte is enough.
-            var marker: UInt8 = 0
-            withUnsafePointer(to: &marker) { ptr in
-                let cptr = UnsafeRawPointer(ptr).assumingMemoryBound(to: CChar.self)
-                callback(ctx, cptr, 1)
-            }
+            // Success → callback with the OK code + null payload.
+            // No buffer needed; the Rust side only cares about
+            // success/failure for install.
+            callback(ctx, nil, 0, kErrCodeOK)
         } catch {
             let msg = "aborg_install_speech_model error: \(error)\n"
             FileHandle.standardError.write(msg.data(using: .utf8) ?? Data())
-            callback(ctx, nil, 0)
+            callback(ctx, nil, 0, errorCode(error))
         }
     }
 }
@@ -404,16 +441,16 @@ public func aborg_transcribe_window(
     _ endSecs: Double,
     _ locale: UnsafePointer<CChar>?,
     _ ctx: UnsafeMutableRawPointer?,
-    _ callback: @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?, Int) -> Void
+    _ callback: @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?, Int, Int32) -> Void
 ) {
     let pathStr = inputPath.flatMap { String(validatingCString: $0) } ?? ""
     let localeStr = locale.flatMap { String(validatingCString: $0) } ?? "en-US"
 
     guard #available(macOS 26.0, *) else {
         // Build script targets macOS 26.0, so unreachable when
-        // built normally. Defensive call back with null on the
-        // off chance the dylib is loaded on an older host.
-        callback(ctx, nil, 0)
+        // built normally. Defensive call back on the off chance
+        // the dylib is loaded on an older host.
+        callback(ctx, nil, 0, kErrCodeFrameworkUnavailable)
         return
     }
 
@@ -433,12 +470,12 @@ public func aborg_transcribe_window(
             let data = try encoder.encode(segments)
             data.withUnsafeBytes { rawBuf in
                 let base = rawBuf.baseAddress?.assumingMemoryBound(to: CChar.self)
-                callback(ctx, base, data.count)
+                callback(ctx, base, data.count, kErrCodeOK)
             }
         } catch {
             let msg = "aborg_transcribe_window error: \(error)\n"
             FileHandle.standardError.write(msg.data(using: .utf8) ?? Data())
-            callback(ctx, nil, 0)
+            callback(ctx, nil, 0, errorCode(error))
         }
     }
 }

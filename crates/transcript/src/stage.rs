@@ -53,7 +53,7 @@ use ab_core::{BookId, Error, Result};
 use ab_db::LibraryDb;
 use ab_pipeline::{Stage, StageContext, StageOutcome};
 
-use crate::bridge::TranscriptSegment;
+use crate::bridge::{BridgeError, TranscriptSegment, transcribe_window_typed};
 use crate::language::{LanguageDetection, detect, detect_from_transcript};
 
 /// Stage that runs head + tail transcription and seeds the
@@ -384,35 +384,27 @@ async fn pre_transcribe_locale(
 
 // ── Transcribe wrapper that demotes "model not installed" ────────
 
-/// Calls `transcribe_window`; on "model not installed" the error
-/// is converted to `Ok(None)` so the stage cleanly returns
-/// `Skipped`. All other errors propagate.
+/// Calls `transcribe_window_typed`; on `ModelNotInstalled` the
+/// error is converted to `Ok(None)` so the stage cleanly returns
+/// `Skipped` and 3A.4.1's idle-installer can fix the gap. All
+/// other errors propagate via `BridgeError -> ab_core::Error`.
 async fn transcribe_window_with_skip_on_no_model(
     path: &std::path::Path,
     start_secs: f64,
     end_secs: f64,
     locale: &str,
 ) -> Result<Option<Vec<TranscriptSegment>>> {
-    match crate::bridge::transcribe_window(path, start_secs, end_secs, locale).await {
+    match transcribe_window_typed(path, start_secs, end_secs, locale).await {
         Ok(segs) => Ok(Some(segs)),
-        Err(e) => {
-            let msg = format!("{e}");
-            // The Swift side stringifies the Swift error variant
-            // as `modelNotInstalled(...)`. This string-match is
-            // brittle if we ever change the Swift error path —
-            // tracked as a follow-up to introduce a typed error
-            // code over the FFI.
-            if msg.contains("modelNotInstalled") {
-                tracing::warn!(
-                    locale,
-                    path = %path.display(),
-                    "transcribe.skip.model_not_installed"
-                );
-                Ok(None)
-            } else {
-                Err(e)
-            }
+        Err(BridgeError::ModelNotInstalled) => {
+            tracing::warn!(
+                locale,
+                path = %path.display(),
+                "transcribe.skip.model_not_installed"
+            );
+            Ok(None)
         }
+        Err(e) => Err(e.into()),
     }
 }
 

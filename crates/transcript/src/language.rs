@@ -79,14 +79,16 @@ mod ffi {
             text: *const c_char,
             max_alternatives: isize,
             ctx: *mut c_void,
-            callback: unsafe extern "C" fn(*mut c_void, *const c_char, usize),
+            callback: unsafe extern "C" fn(*mut c_void, *const c_char, usize, i32),
         );
     }
 
-    /// Callback fired exactly once by Swift. `ptr == null` means
-    /// either empty input or framework gave no hypothesis — both
-    /// surface to the caller as `Ok(None)`.
-    unsafe extern "C" fn on_result(ctx: *mut c_void, ptr: *const c_char, len: usize) {
+    /// Callback fired exactly once by Swift. `code == 0` is the
+    /// success path; `(ptr == null, code == 0)` means
+    /// "inconclusive" → caller maps to `Ok(None)`. Any non-zero
+    /// code is an FFI failure (currently only `kErrCodeEncodeFailure`
+    /// for language).
+    unsafe extern "C" fn on_result(ctx: *mut c_void, ptr: *const c_char, len: usize, code: i32) {
         if ctx.is_null() {
             return;
         }
@@ -95,7 +97,12 @@ mod ffi {
         let sender = unsafe {
             Box::from_raw(ctx.cast::<oneshot::Sender<Result<Option<LanguageDetection>>>>())
         };
-        let outcome: Result<Option<LanguageDetection>> = if ptr.is_null() {
+        let outcome: Result<Option<LanguageDetection>> = if code != 0 {
+            Err(Error::stage(
+                "language",
+                format!("Swift bridge error code {code}"),
+            ))
+        } else if ptr.is_null() || len == 0 {
             Ok(None)
         } else {
             // SAFETY: Swift documents `(ptr, len)` as a UTF-8

@@ -27,8 +27,106 @@
 
 use std::path::Path;
 
-use ab_core::Result;
+use ab_core::{Error, Result};
 use serde::{Deserialize, Serialize};
+
+/// Typed Swift-FFI error variants. Mirrors the `kErrCode*`
+/// constants in `swift/aborg_ai.swift`. Values are stable across
+/// versions — new variants append, never reorder.
+///
+/// Callers that care about a specific failure (e.g. the
+/// transcribe stage demoting `ModelNotInstalled` into a
+/// `Skipped` outcome) match against this enum via
+/// [`transcribe_window_typed`]. Most callers go through the
+/// convenience wrappers ([`transcribe_window`],
+/// [`install_speech_model`]) which collapse everything into
+/// `ab_core::Error::Stage` — fine for "log and move on" flows.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum BridgeError {
+    /// `kErrCodeGeneric` (1). Swift caught an error type we
+    /// don't classify. Detail in stderr.
+    #[error("generic Swift bridge error (see stderr)")]
+    Generic,
+    /// `kErrCodeFrameworkUnavailable` (2). Apple Intelligence is
+    /// disabled / not provisioned on this host.
+    #[error("Speech framework unavailable (Apple Intelligence not enabled)")]
+    FrameworkUnavailable,
+    /// `kErrCodeLocaleUnsupported` (3). `SpeechTranscriber` has
+    /// no equivalent for the BCP-47 string we passed.
+    #[error("locale not supported by SpeechTranscriber")]
+    LocaleUnsupported,
+    /// `kErrCodeModelNotInstalled` (4). Status was `.supported`
+    /// or `.downloading`, not `.installed`. Daemon should queue
+    /// an idle-priority install via [`install_speech_model`].
+    #[error("on-device Speech model not installed for this locale")]
+    ModelNotInstalled,
+    /// `kErrCodeWindowEmpty` (5). `start_secs >= end_secs` or
+    /// the requested range fell entirely outside the file.
+    #[error("transcribe window is empty / invalid")]
+    WindowEmpty,
+    /// `kErrCodeNoCompatibleAudioFormat` (6).
+    #[error("no audio format compatible with the engine")]
+    NoCompatibleAudioFormat,
+    /// `kErrCodeReadFailure` (7). `AVAudioFile` open / decode /
+    /// `AVAudioConverter` init / conversion failure.
+    #[error("audio read or convert failure")]
+    ReadFailure,
+    /// `kErrCodeEncodeFailure` (8). JSON encode of the segments
+    /// failed (extremely rare — would mean a non-UTF8 byte in
+    /// the engine's `AttributedString`).
+    #[error("payload encode failure")]
+    EncodeFailure,
+    /// Unknown code. New Swift code without matching Rust
+    /// classification. Always log + treat as Generic.
+    #[error("unknown bridge error code {0}")]
+    UnknownCode(i32),
+    /// Bridge accepted the call but the callback was dropped
+    /// without firing. Almost certainly a Swift-side panic.
+    #[error("Swift dropped the callback without firing it")]
+    CallbackDropped,
+    /// Buffer pointer was null but the code was `kErrCodeOK`,
+    /// or the buffer wasn't valid UTF-8.
+    #[error("invalid buffer payload: {0}")]
+    InvalidPayload(String),
+    /// JSON shape didn't match the expected schema.
+    #[error("payload schema mismatch: {0}")]
+    PayloadParse(String),
+    /// Bridge not linked at build time (non-macOS host or
+    /// swiftc missing). Stable error that callers can use to
+    /// degrade gracefully.
+    #[error("Speech FFI bridge not linked (non-macOS host or swiftc unavailable)")]
+    BridgeUnavailable,
+    /// `CString` conversion caught a NUL byte in user input
+    /// before crossing the FFI boundary.
+    #[error("nul byte in FFI input: {0}")]
+    NulInInput(String),
+}
+
+impl BridgeError {
+    /// Map the C ABI `i32` to a typed variant. `0` is the
+    /// success code and never reaches this function; callers
+    /// should branch on `code == 0` before classifying.
+    #[must_use]
+    pub const fn from_code(code: i32) -> Self {
+        match code {
+            1 => Self::Generic,
+            2 => Self::FrameworkUnavailable,
+            3 => Self::LocaleUnsupported,
+            4 => Self::ModelNotInstalled,
+            5 => Self::WindowEmpty,
+            6 => Self::NoCompatibleAudioFormat,
+            7 => Self::ReadFailure,
+            8 => Self::EncodeFailure,
+            other => Self::UnknownCode(other),
+        }
+    }
+}
+
+impl From<BridgeError> for Error {
+    fn from(e: BridgeError) -> Self {
+        Self::stage("transcribe", e.to_string())
+    }
+}
 
 /// One transcribed segment.
 ///
@@ -59,13 +157,24 @@ mod ffi {
     use std::ffi::{c_char, c_void};
     use std::path::Path;
 
-    use ab_core::{Error, Result};
     use tokio::sync::oneshot;
 
-    use super::TranscriptSegment;
+    use super::{BridgeError, TranscriptSegment};
+
+    /// Internal carrier: the FFI callback delivers a code plus
+    /// an optional buffer; we collect them into this struct and
+    /// the calling task classifies.
+    pub(super) struct FfiResult {
+        pub code: i32,
+        pub buffer: Option<Vec<u8>>,
+    }
 
     // Symbols exported by `swift/aborg_ai.swift` (see the
-    // `@_cdecl(...)` annotations there).
+    // `@_cdecl(...)` annotations there). Callback signature is
+    // `(ctx, data_ptr, len, error_code)` — `error_code == 0`
+    // means success and `data_ptr` is the JSON buffer; otherwise
+    // `data_ptr` is null and the code identifies the failure
+    // (see [`BridgeError::from_code`]).
     unsafe extern "C" {
         fn aborg_transcribe_window(
             input_path: *const c_char,
@@ -73,81 +182,55 @@ mod ffi {
             end_secs: f64,
             locale: *const c_char,
             ctx: *mut c_void,
-            callback: unsafe extern "C" fn(*mut c_void, *const c_char, usize),
+            callback: unsafe extern "C" fn(*mut c_void, *const c_char, usize, i32),
         );
         fn aborg_install_speech_model(
             locale: *const c_char,
             ctx: *mut c_void,
-            callback: unsafe extern "C" fn(*mut c_void, *const c_char, usize),
+            callback: unsafe extern "C" fn(*mut c_void, *const c_char, usize, i32),
         );
     }
 
-    /// C ABI callback Swift fires with the JSON result. Recovers
-    /// the boxed sender and forwards either Ok(json) or Err.
-    unsafe extern "C" fn on_result(ctx: *mut c_void, ptr: *const c_char, len: usize) {
+    /// C ABI callback. Recovers the boxed sender, copies the
+    /// payload (if any) into an owned `Vec<u8>`, ships everything
+    /// through the oneshot.
+    unsafe extern "C" fn on_result(ctx: *mut c_void, ptr: *const c_char, len: usize, code: i32) {
         if ctx.is_null() {
             return;
         }
-        // SAFETY: the caller of `transcribe_window` boxed the
-        // oneshot sender and converted it with `Box::into_raw`.
-        // Swift returns it unchanged here, exactly once. We
-        // reclaim ownership; the box drops when the closure
-        // ends.
-        let sender = unsafe { Box::from_raw(ctx.cast::<oneshot::Sender<Result<String>>>()) };
-        let outcome: Result<String> = if ptr.is_null() {
-            Err(Error::stage(
-                "transcribe",
-                "Swift returned null buffer pointer",
-            ))
+        // SAFETY: paired with `Box::into_raw` in the caller;
+        // Swift returns ctx unchanged exactly once.
+        let sender = unsafe { Box::from_raw(ctx.cast::<oneshot::Sender<FfiResult>>()) };
+        let buffer = if ptr.is_null() || len == 0 {
+            None
         } else {
-            // SAFETY: Swift documents `(ptr, len)` as a UTF-8
-            // buffer of exactly `len` bytes. The buffer's
-            // lifetime is the duration of this callback (Swift's
-            // `withCString` scopes it), which is fine — we copy
-            // immediately via `to_owned`.
+            // SAFETY: Swift documents `(ptr, len)` as a buffer of
+            // exactly `len` bytes valid for the duration of this
+            // callback. `to_vec` copies immediately so the buffer
+            // lifetime ends with the callback.
             let slice = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), len) };
-            std::str::from_utf8(slice)
-                .map(str::to_owned)
-                .map_err(|e| Error::stage("transcribe", format!("non-utf8 buffer: {e}")))
+            Some(slice.to_vec())
         };
-        let _ = sender.send(outcome);
+        let _ = sender.send(FfiResult { code, buffer });
     }
 
-    /// C ABI callback for the install entry point. Swift fires
-    /// with a non-null one-byte buffer on success, null on
-    /// failure. We just need success/failure, not the payload.
-    unsafe extern "C" fn on_install_result(ctx: *mut c_void, ptr: *const c_char, _len: usize) {
-        if ctx.is_null() {
-            return;
-        }
-        // SAFETY: paired with `Box::into_raw` in
-        // `install_speech_model_impl`; Swift returns ctx
-        // unchanged exactly once.
-        let sender = unsafe { Box::from_raw(ctx.cast::<oneshot::Sender<Result<()>>>()) };
-        let outcome: Result<()> = if ptr.is_null() {
-            Err(Error::stage(
-                "transcribe",
-                "Swift install callback returned null (see stderr for detail)",
-            ))
-        } else {
-            Ok(())
-        };
-        let _ = sender.send(outcome);
-    }
-
-    pub(super) async fn install_speech_model_impl(locale: &str) -> Result<()> {
+    pub(super) async fn install_speech_model_impl(locale: &str) -> Result<(), BridgeError> {
         let locale_c = std::ffi::CString::new(locale)
-            .map_err(|e| Error::stage("transcribe", format!("locale has NUL byte: {e}")))?;
-        let (tx, rx) = oneshot::channel::<Result<()>>();
+            .map_err(|e| BridgeError::NulInInput(format!("locale: {e}")))?;
+        let (tx, rx) = oneshot::channel::<FfiResult>();
         let ctx = Box::into_raw(Box::new(tx)).cast::<c_void>();
-        // SAFETY: `locale_c` outlives the synchronous Swift
-        // call; the install Task runs detached on the Swift
-        // side and only fires `on_install_result` exactly once.
+        // SAFETY: `locale_c` outlives the synchronous Swift call;
+        // the install Task runs detached on the Swift side and
+        // only fires `on_result` exactly once.
         unsafe {
-            aborg_install_speech_model(locale_c.as_ptr(), ctx, on_install_result);
+            aborg_install_speech_model(locale_c.as_ptr(), ctx, on_result);
         }
-        rx.await
-            .map_err(|_| Error::stage("transcribe", "Swift dropped install callback"))?
+        let res = rx.await.map_err(|_| BridgeError::CallbackDropped)?;
+        if res.code == 0 {
+            Ok(())
+        } else {
+            Err(BridgeError::from_code(res.code))
+        }
     }
 
     pub(super) async fn transcribe_window_impl(
@@ -155,20 +238,19 @@ mod ffi {
         start_secs: f64,
         end_secs: f64,
         locale: &str,
-    ) -> Result<Vec<TranscriptSegment>> {
+    ) -> Result<Vec<TranscriptSegment>, BridgeError> {
         let path_str = input_path
             .to_str()
-            .ok_or_else(|| Error::stage("transcribe", "input_path is not valid UTF-8"))?;
+            .ok_or_else(|| BridgeError::NulInInput("input_path is not valid UTF-8".into()))?;
         let path_c = std::ffi::CString::new(path_str)
-            .map_err(|e| Error::stage("transcribe", format!("input path has NUL byte: {e}")))?;
+            .map_err(|e| BridgeError::NulInInput(format!("input_path: {e}")))?;
         let locale_c = std::ffi::CString::new(locale)
-            .map_err(|e| Error::stage("transcribe", format!("locale has NUL byte: {e}")))?;
+            .map_err(|e| BridgeError::NulInInput(format!("locale: {e}")))?;
 
-        let (tx, rx) = oneshot::channel::<Result<String>>();
-        // Leak the sender into Swift. The callback reclaims it.
+        let (tx, rx) = oneshot::channel::<FfiResult>();
         let ctx = Box::into_raw(Box::new(tx)).cast::<c_void>();
 
-        // SAFETY: the four `*const c_char` pointers outlive the
+        // SAFETY: the two `*const c_char` pointers outlive the
         // synchronous portion of the call (their CStrings are
         // not dropped until this fn returns). The `ctx` and
         // callback are paired — Swift fires `on_result` exactly
@@ -183,11 +265,17 @@ mod ffi {
                 on_result,
             );
         }
-        let json = rx.await.map_err(|_| {
-            Error::stage("transcribe", "Swift dropped the callback without firing it")
-        })??;
-        serde_json::from_str(&json)
-            .map_err(|e| Error::stage("transcribe", format!("segment-array parse: {e}")))
+        let res = rx.await.map_err(|_| BridgeError::CallbackDropped)?;
+        if res.code != 0 {
+            return Err(BridgeError::from_code(res.code));
+        }
+        let bytes = res
+            .buffer
+            .ok_or_else(|| BridgeError::InvalidPayload("OK code but null buffer".into()))?;
+        let s = std::str::from_utf8(&bytes)
+            .map_err(|e| BridgeError::InvalidPayload(format!("non-utf8: {e}")))?;
+        serde_json::from_str::<Vec<TranscriptSegment>>(s)
+            .map_err(|e| BridgeError::PayloadParse(format!("segments: {e}")))
     }
 }
 
@@ -200,12 +288,11 @@ mod ffi {
 ///
 /// # Errors
 ///
-/// - `Error::Stage("transcribe", ...)` when the bridge isn't
-///   linked (non-macOS / no-swiftc build).
-/// - `Error::Stage("transcribe", ...)` when the locale isn't
-///   supported on this host, Apple Intelligence is disabled, or
-///   the download fails.
-pub async fn install_speech_model(locale: &str) -> Result<()> {
+/// - [`BridgeError::BridgeUnavailable`] on non-macOS / no-swiftc
+///   builds.
+/// - [`BridgeError::LocaleUnsupported`] / `FrameworkUnavailable`
+///   / `ModelNotInstalled` etc. with the engine's verdict.
+pub async fn install_speech_model_typed(locale: &str) -> Result<(), BridgeError> {
     #[cfg(aborg_ai_bridge)]
     {
         ffi::install_speech_model_impl(locale).await
@@ -213,11 +300,22 @@ pub async fn install_speech_model(locale: &str) -> Result<()> {
     #[cfg(not(aborg_ai_bridge))]
     {
         let _ = locale;
-        Err(Error::stage(
-            "transcribe",
-            "Speech FFI bridge not linked (non-macOS host or swiftc unavailable)",
-        ))
+        Err(BridgeError::BridgeUnavailable)
     }
+}
+
+/// Convenience wrapper around [`install_speech_model_typed`].
+///
+/// Collapses every variant into `ab_core::Error::Stage`. Use the
+/// typed version when you need to branch on a specific failure
+/// (e.g. the idle-install retry path treats
+/// `FrameworkUnavailable` as terminal).
+///
+/// # Errors
+///
+/// See [`install_speech_model_typed`].
+pub async fn install_speech_model(locale: &str) -> Result<()> {
+    install_speech_model_typed(locale).await.map_err(Into::into)
 }
 
 /// Transcribe `[start_secs, end_secs)` of `input_path` in the
@@ -226,15 +324,13 @@ pub async fn install_speech_model(locale: &str) -> Result<()> {
 ///
 /// # Errors
 ///
-/// - `Error::Stage("transcribe", ...)` when the bridge is not
-///   linked (non-macOS / no-swiftc build).
-/// - `Error::Stage("transcribe", ...)` for FFI / parse failures.
-pub async fn transcribe_window(
+/// See [`BridgeError`] for the enum of typed failures.
+pub async fn transcribe_window_typed(
     input_path: &Path,
     start_secs: f64,
     end_secs: f64,
     locale: &str,
-) -> Result<Vec<TranscriptSegment>> {
+) -> Result<Vec<TranscriptSegment>, BridgeError> {
     #[cfg(aborg_ai_bridge)]
     {
         ffi::transcribe_window_impl(input_path, start_secs, end_secs, locale).await
@@ -242,11 +338,25 @@ pub async fn transcribe_window(
     #[cfg(not(aborg_ai_bridge))]
     {
         let _ = (input_path, start_secs, end_secs, locale);
-        Err(Error::stage(
-            "transcribe",
-            "Speech FFI bridge not linked (non-macOS host or swiftc unavailable)",
-        ))
+        Err(BridgeError::BridgeUnavailable)
     }
+}
+
+/// Convenience wrapper around [`transcribe_window_typed`] that
+/// collapses everything into `ab_core::Error::Stage`.
+///
+/// # Errors
+///
+/// See [`transcribe_window_typed`].
+pub async fn transcribe_window(
+    input_path: &Path,
+    start_secs: f64,
+    end_secs: f64,
+    locale: &str,
+) -> Result<Vec<TranscriptSegment>> {
+    transcribe_window_typed(input_path, start_secs, end_secs, locale)
+        .await
+        .map_err(Into::into)
 }
 
 #[cfg(test)]
