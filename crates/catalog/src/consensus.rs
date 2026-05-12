@@ -125,6 +125,9 @@ impl Stage for ConsensusStage {
         if promote_duration(&mut tx, book_id).await? {
             updates += 1;
         }
+        if promote_genres(&mut tx, book_id).await? {
+            updates += 1;
+        }
 
         tx.commit()
             .await
@@ -278,6 +281,144 @@ async fn promote_duration(
         .execute(&mut **tx)
         .await
         .map_err(|e| Error::Database(format!("consensus write duration_ms: {e}")))?;
+    Ok(true)
+}
+
+/// Multi-value promotion: every distinct `value` for
+/// `field='genre'` becomes a row in the `book_genre` junction
+/// table. Unlike the scalar promoters above, "winning" here
+/// applies per unique value — the highest-confidence row for
+/// each canonical genre slug gets `is_winner=1`, with that
+/// confidence carried into `book_genre.confidence`.
+///
+/// Side-effect: ensures the `genres` table has a row for each
+/// canonical slug we're inserting (auto-create on first use).
+/// Display name comes from `genre_code::display_name(slug, "en")`
+/// — denormalised English form stored once; the locale-aware
+/// display happens at read time.
+///
+/// Removes `book_genre` rows whose slug no longer has any
+/// provenance candidate (e.g. a misclassified candidate that
+/// got deleted).
+async fn promote_genres(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    book_id: BookId,
+) -> Result<bool> {
+    let id = book_id.0;
+    // Distinct genre slugs + their max confidence + winning
+    // provenance_id (the row that supplied the max confidence).
+    let rows = sqlx::query!(
+        r#"SELECT value AS "value!",
+                  MAX(confidence) AS "best_confidence!: f64",
+                  (SELECT provenance_id FROM book_field_provenance p2
+                   WHERE p2.book_id = book_field_provenance.book_id
+                     AND p2.field = 'genre'
+                     AND p2.value = book_field_provenance.value
+                   ORDER BY p2.confidence DESC, p2.recorded_at DESC
+                   LIMIT 1) AS "winner_id!"
+           FROM book_field_provenance
+           WHERE book_id = ? AND field = 'genre' AND value IS NOT NULL
+           GROUP BY value"#,
+        id,
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|e| Error::Database(format!("consensus pick genres: {e}")))?;
+
+    if rows.is_empty() {
+        return Ok(false);
+    }
+
+    // Clear all is_winner flags for genre rows, then set the
+    // winners. Same shape as the scalar promoters; safe order
+    // because all happens in the same tx.
+    sqlx::query!(
+        "UPDATE book_field_provenance SET is_winner = 0 \
+         WHERE book_id = ? AND field = 'genre'",
+        id,
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| Error::Database(format!("consensus clear genre losers: {e}")))?;
+
+    let mut current_slugs: Vec<String> = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let slug = &row.value;
+        let confidence = row.best_confidence;
+        let winner_id = row.winner_id;
+        current_slugs.push(slug.clone());
+
+        // Set winner flag.
+        sqlx::query!(
+            "UPDATE book_field_provenance SET is_winner = 1 WHERE provenance_id = ?",
+            winner_id,
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| Error::Database(format!("consensus set genre winner: {e}")))?;
+
+        // Ensure `genres` row exists for this slug. The English
+        // display-name is stored once at first-insert; locale-
+        // aware rendering happens at read time via
+        // `genre_code::display_name(slug, locale)`.
+        let display = ab_core::genre_code::display_name(slug, "en");
+        sqlx::query!(
+            "INSERT OR IGNORE INTO genres (canonical_id, display_name) VALUES (?, ?)",
+            slug,
+            display,
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| Error::Database(format!("consensus upsert genre row: {e}")))?;
+
+        // Resolve the genre_id (separate query — sqlite's
+        // INSERT-OR-IGNORE doesn't return the existing id on
+        // conflict).
+        let genre_row = sqlx::query!(
+            r#"SELECT genre_id AS "genre_id!" FROM genres WHERE canonical_id = ?"#,
+            slug,
+        )
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|e| Error::Database(format!("consensus lookup genre_id: {e}")))?;
+
+        sqlx::query!(
+            "INSERT INTO book_genre (book_id, genre_id, confidence) \
+             VALUES (?, ?, ?) \
+             ON CONFLICT(book_id, genre_id) DO UPDATE SET confidence = excluded.confidence",
+            id,
+            genre_row.genre_id,
+            confidence,
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| Error::Database(format!("consensus upsert book_genre: {e}")))?;
+    }
+
+    // Clean up `book_genre` rows whose slug no longer has any
+    // candidate. Builds a NOT-IN clause from the current slug
+    // list — dynamic SQL, but the slugs themselves come from
+    // the closed `book_field_provenance.value` namespace
+    // (written by normalize() in tag-read / Audnexus) so
+    // injection isn't a concern. Bound parameters anyway for
+    // safety.
+    let placeholders = std::iter::repeat_n("?", current_slugs.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let cleanup_sql = format!(
+        "DELETE FROM book_genre \
+         WHERE book_id = ? AND genre_id NOT IN ( \
+             SELECT genre_id FROM genres WHERE canonical_id IN ({placeholders}) \
+         )"
+    );
+    let mut q = sqlx::query(&cleanup_sql).bind(id);
+    for slug in &current_slugs {
+        q = q.bind(slug);
+    }
+    q.execute(&mut **tx)
+        .await
+        .map_err(|e| Error::Database(format!("consensus cleanup book_genre: {e}")))?;
+
     Ok(true)
 }
 

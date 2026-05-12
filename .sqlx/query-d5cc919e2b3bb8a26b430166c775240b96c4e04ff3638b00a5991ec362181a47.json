@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT value AS \"value!\",\n                  MAX(confidence) AS \"best_confidence!: f64\",\n                  (SELECT provenance_id FROM book_field_provenance p2\n                   WHERE p2.book_id = book_field_provenance.book_id\n                     AND p2.field = 'genre'\n                     AND p2.value = book_field_provenance.value\n                   ORDER BY p2.confidence DESC, p2.recorded_at DESC\n                   LIMIT 1) AS \"winner_id!\"\n           FROM book_field_provenance\n           WHERE book_id = ? AND field = 'genre' AND value IS NOT NULL\n           GROUP BY value",
+  "describe": {
+    "columns": [
+      {
+        "name": "value!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "best_confidence!: f64",
+        "ordinal": 1,
+        "type_info": "Float"
+      },
+      {
+        "name": "winner_id!",
+        "ordinal": 2,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "d5cc919e2b3bb8a26b430166c775240b96c4e04ff3638b00a5991ec362181a47"
+}
