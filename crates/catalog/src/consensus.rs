@@ -59,40 +59,26 @@ impl Default for ConsensusStage {
     }
 }
 
-/// Fields that consensus knows how to promote directly into the
-/// `books` table. Order is the iteration order at run time. The
-/// `target_column` doubles as the SQL column name; it's safe as
-/// long as we never accept user input here (this list is closed
-/// + the `provenance_field` is the typed `Field` enum).
-const PROMOTABLE_FIELDS: &[PromotableField] = &[
-    PromotableField {
-        provenance_field: Field::Title,
-        target_column: "title",
-    },
-    PromotableField {
-        provenance_field: Field::Subtitle,
-        target_column: "subtitle",
-    },
-    PromotableField {
-        provenance_field: Field::Description,
-        target_column: "description",
-    },
-    PromotableField {
-        provenance_field: Field::Language,
-        target_column: "language",
-    },
-    PromotableField {
-        provenance_field: Field::ReleaseDate,
-        target_column: "release_date",
-    },
+/// Fields that consensus knows how to promote via direct text
+/// copy. Order is the iteration order at run time. Each entry's
+/// target column comes from `Field::books_column()` — no separate
+/// `target_column` literal here, so the two pieces of information
+/// can't drift (slice C5.2 collapsed the `PromotableField` struct).
+///
+/// `DurationSeconds` is intentionally **not** in this list — it
+/// needs the × 1000 integer transform handled by
+/// `promote_duration`. `Genre` is also intentionally absent — it's
+/// multi-value through the `book_genre` junction, handled by
+/// `promote_genres`. Junction / identity-resolve fields
+/// (`Author`, `Narrator`, `Publisher`, `Series`) return
+/// `Field::books_column() == None` and live in `identity-resolve`.
+const PROMOTABLE_FIELDS: &[Field] = &[
+    Field::Title,
+    Field::Subtitle,
+    Field::Description,
+    Field::Language,
+    Field::ReleaseDate,
 ];
-
-struct PromotableField {
-    /// `book_field_provenance.field` value (typed).
-    provenance_field: Field,
-    /// Target column on `books`.
-    target_column: &'static str,
-}
 
 /// Typed identifier for this stage.
 pub const STAGE_ID: StageId = StageId::new("consensus");
@@ -121,7 +107,7 @@ impl Stage for ConsensusStage {
             .map_err(|e| Error::Database(format!("consensus tx begin: {e}")))?;
 
         let mut updates = 0;
-        for field in PROMOTABLE_FIELDS {
+        for &field in PROMOTABLE_FIELDS {
             if promote_text_field(&mut tx, book_id, field).await? {
                 updates += 1;
             }
@@ -151,15 +137,33 @@ impl Stage for ConsensusStage {
 }
 
 /// Pick the winning provenance row for `field`, set `is_winner`
-/// flags, and write the value to `books.<target_column>`. Returns
-/// `true` if any change was made.
+/// flags, and write the value to the `books.<col>` column named
+/// by `field.books_column()`. Returns `true` if any change was
+/// made.
+///
+/// Panics on a `Field` whose `books_column()` returns `None` —
+/// the invariant is that `PROMOTABLE_FIELDS` only contains
+/// scalar-direct-copy variants. A non-PROMOTABLE field reaching
+/// this fn is a programmer error.
 async fn promote_text_field(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     book_id: BookId,
-    field: &PromotableField,
+    field: Field,
 ) -> Result<bool> {
     let id = book_id.0;
-    let provenance_field = field.provenance_field.as_str();
+    let field_str = field.as_str();
+    let Some(target_column) = field.books_column() else {
+        // Invariant: PROMOTABLE_FIELDS contains only fields whose
+        // `books_column()` returns `Some`. A `None` here is a
+        // programmer error (e.g. someone added `Field::Author`
+        // to the const). Surface it as a stage error so it
+        // can't slip past in production.
+        return Err(Error::stage(
+            STAGE_ID.as_str(),
+            format!("PROMOTABLE_FIELDS contains {field} which has no books_column()"),
+        ));
+    };
+
     let winner = sqlx::query!(
         r#"SELECT provenance_id AS "provenance_id!", value
            FROM book_field_provenance
@@ -167,11 +171,11 @@ async fn promote_text_field(
            ORDER BY confidence DESC, recorded_at DESC
            LIMIT 1"#,
         id,
-        provenance_field,
+        field_str,
     )
     .fetch_optional(&mut **tx)
     .await
-    .map_err(|e| Error::Database(format!("consensus pick {provenance_field}: {e}")))?;
+    .map_err(|e| Error::Database(format!("consensus pick {field}: {e}")))?;
 
     let Some(winner) = winner else {
         return Ok(false);
@@ -191,41 +195,35 @@ async fn promote_text_field(
          SET is_winner = 0 \
          WHERE book_id = ? AND field = ? AND provenance_id != ?",
         id,
-        provenance_field,
+        field_str,
         winner.provenance_id,
     )
     .execute(&mut **tx)
     .await
-    .map_err(|e| Error::Database(format!("consensus clear losers {provenance_field}: {e}")))?;
+    .map_err(|e| Error::Database(format!("consensus clear losers {field}: {e}")))?;
     sqlx::query!(
         "UPDATE book_field_provenance SET is_winner = 1 WHERE provenance_id = ?",
         winner.provenance_id,
     )
     .execute(&mut **tx)
     .await
-    .map_err(|e| Error::Database(format!("consensus set winner {provenance_field}: {e}")))?;
+    .map_err(|e| Error::Database(format!("consensus set winner {field}: {e}")))?;
 
-    // Write to the books column. Column name is a `&'static str` from
-    // PROMOTABLE_FIELDS — never user input — so the format!() here
-    // is safe from injection. (The macros require literal SQL; for
-    // this small fixed dispatch a runtime query is the pragmatic
-    // shape. The closed `PROMOTABLE_FIELDS` list is the implicit
+    // Write to the books column. `target_column` is a
+    // `&'static str` returned by `Field::books_column()` — never
+    // user input — so the `format!()` here is safe from injection.
+    // (The `sqlx::query!` macros require literal SQL; for this
+    // small fixed dispatch a runtime query is the pragmatic
+    // shape. The closed `PROMOTABLE_FIELDS` list × the closed
+    // `Field` enum × `Field::books_column()` is the implicit
     // allowlist.)
-    let sql = format!(
-        "UPDATE books SET {} = ? WHERE book_id = ?",
-        field.target_column
-    );
+    let sql = format!("UPDATE books SET {target_column} = ? WHERE book_id = ?");
     sqlx::query(&sql)
         .bind(&value)
         .bind(id)
         .execute(&mut **tx)
         .await
-        .map_err(|e| {
-            Error::Database(format!(
-                "consensus write books.{}: {e}",
-                field.target_column
-            ))
-        })?;
+        .map_err(|e| Error::Database(format!("consensus write books.{target_column}: {e}")))?;
     Ok(true)
 }
 
@@ -236,13 +234,15 @@ async fn promote_duration(
     book_id: BookId,
 ) -> Result<bool> {
     let id = book_id.0;
+    let field_str = Field::DurationSeconds.as_str();
     let winner = sqlx::query!(
         r#"SELECT provenance_id AS "provenance_id!", value
            FROM book_field_provenance
-           WHERE book_id = ? AND field = 'duration_seconds' AND value IS NOT NULL
+           WHERE book_id = ? AND field = ? AND value IS NOT NULL
            ORDER BY confidence DESC, recorded_at DESC
            LIMIT 1"#,
         id,
+        field_str,
     )
     .fetch_optional(&mut **tx)
     .await
@@ -267,8 +267,9 @@ async fn promote_duration(
     sqlx::query!(
         "UPDATE book_field_provenance \
          SET is_winner = 0 \
-         WHERE book_id = ? AND field = 'duration_seconds' AND provenance_id != ?",
+         WHERE book_id = ? AND field = ? AND provenance_id != ?",
         id,
+        field_str,
         winner.provenance_id,
     )
     .execute(&mut **tx)
@@ -309,21 +310,27 @@ async fn promote_genres(
     book_id: BookId,
 ) -> Result<bool> {
     let id = book_id.0;
+    let genre_field = Field::Genre.as_str();
     // Distinct genre slugs + their max confidence + winning
     // provenance_id (the row that supplied the max confidence).
+    // The subquery's `field = ?` repeats the outer bind — sqlite
+    // doesn't allow positional reuse, so the parameter is bound
+    // twice.
     let rows = sqlx::query!(
         r#"SELECT value AS "value!",
                   MAX(confidence) AS "best_confidence!: f64",
                   (SELECT provenance_id FROM book_field_provenance p2
                    WHERE p2.book_id = book_field_provenance.book_id
-                     AND p2.field = 'genre'
+                     AND p2.field = ?
                      AND p2.value = book_field_provenance.value
                    ORDER BY p2.confidence DESC, p2.recorded_at DESC
                    LIMIT 1) AS "winner_id!"
            FROM book_field_provenance
-           WHERE book_id = ? AND field = 'genre' AND value IS NOT NULL
+           WHERE book_id = ? AND field = ? AND value IS NOT NULL
            GROUP BY value"#,
+        genre_field,
         id,
+        genre_field,
     )
     .fetch_all(&mut **tx)
     .await
@@ -338,8 +345,9 @@ async fn promote_genres(
     // because all happens in the same tx.
     sqlx::query!(
         "UPDATE book_field_provenance SET is_winner = 0 \
-         WHERE book_id = ? AND field = 'genre'",
+         WHERE book_id = ? AND field = ?",
         id,
+        genre_field,
     )
     .execute(&mut **tx)
     .await

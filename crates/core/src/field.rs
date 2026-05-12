@@ -98,6 +98,44 @@ impl Field {
         }
     }
 
+    /// The `books.<col>` column this field promotes into, if any.
+    ///
+    /// Returns:
+    /// - `Some("title")`, `Some("subtitle")`, … for fields whose
+    ///   winner value lands in a scalar column on `books`.
+    /// - `Some("duration_ms")` for `DurationSeconds` — the value
+    ///   transform (seconds × 1000) is the consensus stage's
+    ///   responsibility; this method just names the target column.
+    /// - `None` for fields that go through junction tables
+    ///   (`Author`, `Narrator`, `Genre`, `Series`) or FK-indirect
+    ///   identity tables (`Publisher` → `books.publisher_id`).
+    ///   These need their own promotion path (identity-resolve,
+    ///   consensus's genre promoter, future series-resolve).
+    ///
+    /// Consensus's `PROMOTABLE_FIELDS` table iterates the
+    /// `Some(_)`-returning variants whose value transform is a
+    /// direct text copy. `DurationSeconds` is `Some` here but
+    /// handled by its own dedicated path because of the × 1000
+    /// integer conversion.
+    #[must_use]
+    pub const fn books_column(self) -> Option<&'static str> {
+        match self {
+            Self::Title => Some("title"),
+            Self::Subtitle => Some("subtitle"),
+            Self::Description => Some("description"),
+            Self::Language => Some("language"),
+            Self::ReleaseDate => Some("release_date"),
+            Self::DurationSeconds => Some("duration_ms"),
+            Self::Asin => Some("asin"),
+            Self::Isbn => Some("isbn"),
+            Self::CoverUrl => Some("cover_url"),
+            Self::Abridged => Some("abridged"),
+            Self::Explicit => Some("explicit"),
+            // Junction / identity-resolve fields:
+            Self::Author | Self::Narrator | Self::Publisher | Self::Genre | Self::Series => None,
+        }
+    }
+
     /// Parse a stored `field` string back into the typed enum.
     /// Returns `None` on unknown strings — callers can treat
     /// those as legacy / extension fields not part of the closed
@@ -179,5 +217,27 @@ mod tests {
     #[test]
     fn display_matches_as_str() {
         assert_eq!(format!("{}", Field::Asin), "asin");
+    }
+
+    #[test]
+    fn books_column_for_scalar_fields() {
+        assert_eq!(Field::Title.books_column(), Some("title"));
+        assert_eq!(Field::Description.books_column(), Some("description"));
+        assert_eq!(Field::ReleaseDate.books_column(), Some("release_date"));
+        // DurationSeconds maps to `duration_ms` (the × 1000
+        // transform is consensus's job, not this method's):
+        assert_eq!(Field::DurationSeconds.books_column(), Some("duration_ms"));
+        assert_eq!(Field::CoverUrl.books_column(), Some("cover_url"));
+    }
+
+    #[test]
+    fn books_column_none_for_junction_fields() {
+        // Junction / identity-resolve fields don't promote into a
+        // scalar `books` column:
+        assert_eq!(Field::Author.books_column(), None);
+        assert_eq!(Field::Narrator.books_column(), None);
+        assert_eq!(Field::Publisher.books_column(), None);
+        assert_eq!(Field::Genre.books_column(), None);
+        assert_eq!(Field::Series.books_column(), None);
     }
 }
