@@ -12,9 +12,11 @@ pub mod build_info {
 }
 
 pub mod error;
+pub mod genre_code;
 pub mod ids;
 pub mod language_code;
 pub mod paths;
+pub mod time_format;
 pub mod tunables;
 
 pub use error::{Error, Result};

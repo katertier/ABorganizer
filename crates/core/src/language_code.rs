@@ -96,26 +96,43 @@ pub fn normalize(input: &str) -> Option<String> {
     None
 }
 
-/// English-language display name for a canonical code.
+/// Locale-aware display name for a canonical code.
 ///
-/// Suitable for fallback UI rendering. Returns `"Unknown"` for
-/// codes the table doesn't carry — caller can substitute the
-/// raw code if it wants to show the user the literal value.
+/// `display_locale` selects the language the name should be
+/// rendered in: `"en"` returns English names (`"German"`),
+/// `"de"` returns German names (`"Deutsch"`), `"fr"` returns
+/// French (`"Allemand"`), etc. Falls back to English when the
+/// requested locale isn't in the localised-names table.
+/// Returns `"Unknown"` for canonical codes the table doesn't
+/// carry.
 ///
 /// # Examples
 ///
 /// ```
 /// use ab_core::language_code::display_name;
-/// assert_eq!(display_name("en"), "English");
-/// assert_eq!(display_name("zh-Hans"), "Mandarin (Simplified)");
-/// assert_eq!(display_name("klingon"), "Unknown");
+/// assert_eq!(display_name("en", "en"), "English");
+/// assert_eq!(display_name("de", "en"), "German");
+/// assert_eq!(display_name("de", "de"), "Deutsch");
+/// assert_eq!(display_name("en", "de"), "Englisch");
+/// assert_eq!(display_name("zh-Hans", "en"), "Mandarin (Simplified)");
+/// assert_eq!(display_name("klingon", "en"), "Unknown");
 /// ```
 #[must_use]
-pub fn display_name(canonical: &str) -> &'static str {
+pub fn display_name(canonical: &str, display_locale: &str) -> &'static str {
+    let locale_short = display_locale.split('-').next().unwrap_or(display_locale);
     for entry in mapping_table() {
-        if entry.canonical.eq_ignore_ascii_case(canonical) {
-            return entry.display;
+        if !entry.canonical.eq_ignore_ascii_case(canonical) {
+            continue;
         }
+        // Look up the requested display locale; fall through to
+        // English when the table doesn't carry a localised
+        // string for it.
+        for (loc, name) in entry.display_localized {
+            if loc.eq_ignore_ascii_case(locale_short) {
+                return name;
+            }
+        }
+        return entry.display;
     }
     "Unknown"
 }
@@ -124,8 +141,13 @@ pub fn display_name(canonical: &str) -> &'static str {
 struct Entry {
     /// Canonical form written to `book_field_provenance.value`.
     canonical: &'static str,
-    /// English display name.
+    /// English display name — used as the fallback when the
+    /// caller's `display_locale` isn't in `display_localized`.
     display: &'static str,
+    /// Locale → display-name pairs. Looked up before falling
+    /// back to `display`. Locale match is on the primary subtag
+    /// (`"de"` matches `"de-DE"`, `"de-AT"`).
+    display_localized: &'static [(&'static str, &'static str)],
     /// All accepted input forms (primary subtag form only — the
     /// caller already stripped region suffixes). Case-insensitive
     /// compare. The canonical form is implicitly in the list
@@ -145,135 +167,190 @@ struct Entry {
 fn mapping_table() -> &'static [Entry] {
     static T: OnceLock<Vec<Entry>> = OnceLock::new();
     T.get_or_init(|| {
+        // Localised display names cover en/de/fr/es as the
+        // current UI locales. Each Entry only carries the
+        // localisations that ship; other locales fall back to
+        // the English `display` field. Future locales add a row
+        // per entry without changing call sites.
         vec![
             Entry {
                 canonical: "en",
                 display: "English",
+                display_localized: &[("de", "Englisch"), ("fr", "Anglais"), ("es", "Inglés")],
                 aliases: &["en", "eng", "english"],
             },
             Entry {
                 canonical: "de",
                 display: "German",
+                display_localized: &[("de", "Deutsch"), ("fr", "Allemand"), ("es", "Alemán")],
                 aliases: &["de", "deu", "ger", "german", "deutsch"],
             },
             Entry {
                 canonical: "fr",
                 display: "French",
+                display_localized: &[("de", "Französisch"), ("fr", "Français"), ("es", "Francés")],
                 aliases: &["fr", "fra", "fre", "french", "français", "francais"],
             },
             Entry {
                 canonical: "es",
                 display: "Spanish",
+                display_localized: &[("de", "Spanisch"), ("fr", "Espagnol"), ("es", "Español")],
                 aliases: &["es", "spa", "spanish", "español", "espanol", "castellano"],
             },
             Entry {
                 canonical: "it",
                 display: "Italian",
+                display_localized: &[("de", "Italienisch"), ("fr", "Italien"), ("es", "Italiano")],
                 aliases: &["it", "ita", "italian", "italiano"],
             },
             Entry {
                 canonical: "pt",
                 display: "Portuguese",
+                display_localized: &[
+                    ("de", "Portugiesisch"),
+                    ("fr", "Portugais"),
+                    ("es", "Portugués"),
+                ],
                 aliases: &["pt", "por", "portuguese", "português", "portugues"],
             },
             Entry {
                 canonical: "nl",
                 display: "Dutch",
+                display_localized: &[
+                    ("de", "Niederländisch"),
+                    ("fr", "Néerlandais"),
+                    ("es", "Neerlandés"),
+                ],
                 aliases: &["nl", "nld", "dut", "dutch", "nederlands"],
             },
             Entry {
                 canonical: "sv",
                 display: "Swedish",
+                display_localized: &[("de", "Schwedisch"), ("fr", "Suédois"), ("es", "Sueco")],
                 aliases: &["sv", "swe", "swedish", "svenska"],
             },
             Entry {
                 canonical: "no",
                 display: "Norwegian",
+                display_localized: &[("de", "Norwegisch"), ("fr", "Norvégien"), ("es", "Noruego")],
                 aliases: &["no", "nor", "nob", "nno", "norwegian", "norsk"],
             },
             Entry {
                 canonical: "da",
                 display: "Danish",
+                display_localized: &[("de", "Dänisch"), ("fr", "Danois"), ("es", "Danés")],
                 aliases: &["da", "dan", "danish", "dansk"],
             },
             Entry {
                 canonical: "fi",
                 display: "Finnish",
+                display_localized: &[("de", "Finnisch"), ("fr", "Finnois"), ("es", "Finés")],
                 aliases: &["fi", "fin", "finnish", "suomi"],
             },
             Entry {
                 canonical: "is",
                 display: "Icelandic",
+                display_localized: &[
+                    ("de", "Isländisch"),
+                    ("fr", "Islandais"),
+                    ("es", "Islandés"),
+                ],
                 aliases: &["is", "isl", "ice", "icelandic", "íslenska", "islenska"],
             },
             Entry {
                 canonical: "pl",
                 display: "Polish",
+                display_localized: &[("de", "Polnisch"), ("fr", "Polonais"), ("es", "Polaco")],
                 aliases: &["pl", "pol", "polish", "polski"],
             },
             Entry {
                 canonical: "cs",
                 display: "Czech",
+                display_localized: &[("de", "Tschechisch"), ("fr", "Tchèque"), ("es", "Checo")],
                 aliases: &["cs", "ces", "cze", "czech", "čeština", "cestina"],
             },
             Entry {
                 canonical: "ru",
                 display: "Russian",
+                display_localized: &[("de", "Russisch"), ("fr", "Russe"), ("es", "Ruso")],
                 aliases: &["ru", "rus", "russian", "русский", "russkij"],
             },
             Entry {
                 canonical: "uk",
                 display: "Ukrainian",
+                display_localized: &[
+                    ("de", "Ukrainisch"),
+                    ("fr", "Ukrainien"),
+                    ("es", "Ucraniano"),
+                ],
                 aliases: &["uk", "ukr", "ukrainian", "українська"],
             },
             Entry {
                 canonical: "tr",
                 display: "Turkish",
+                display_localized: &[("de", "Türkisch"), ("fr", "Turc"), ("es", "Turco")],
                 aliases: &["tr", "tur", "turkish", "türkçe", "turkce"],
             },
             Entry {
                 canonical: "ja",
                 display: "Japanese",
+                display_localized: &[("de", "Japanisch"), ("fr", "Japonais"), ("es", "Japonés")],
                 aliases: &["ja", "jpn", "japanese", "日本語"],
             },
             Entry {
                 canonical: "ko",
                 display: "Korean",
+                display_localized: &[("de", "Koreanisch"), ("fr", "Coréen"), ("es", "Coreano")],
                 aliases: &["ko", "kor", "korean", "한국어"],
             },
             Entry {
                 canonical: "hi",
                 display: "Hindi",
+                display_localized: &[("de", "Hindi"), ("fr", "Hindi"), ("es", "Hindi")],
                 aliases: &["hi", "hin", "hindi", "हिन्दी"],
             },
             Entry {
                 canonical: "ar",
                 display: "Arabic",
+                display_localized: &[("de", "Arabisch"), ("fr", "Arabe"), ("es", "Árabe")],
                 aliases: &["ar", "ara", "arabic", "العربية"],
             },
             Entry {
                 canonical: "he",
                 display: "Hebrew",
+                display_localized: &[("de", "Hebräisch"), ("fr", "Hébreu"), ("es", "Hebreo")],
                 aliases: &["he", "heb", "iw", "hebrew", "עברית"],
             },
             Entry {
                 canonical: "el",
                 display: "Greek",
+                display_localized: &[("de", "Griechisch"), ("fr", "Grec"), ("es", "Griego")],
                 aliases: &["el", "ell", "gre", "greek", "ελληνικά"],
             },
             Entry {
                 canonical: "zh-Hans",
                 display: "Mandarin (Simplified)",
+                display_localized: &[
+                    ("de", "Mandarin (Vereinfacht)"),
+                    ("fr", "Mandarin (Simplifié)"),
+                    ("es", "Mandarín (Simplificado)"),
+                ],
                 aliases: &[],
             },
             Entry {
                 canonical: "zh-Hant",
                 display: "Mandarin (Traditional)",
+                display_localized: &[
+                    ("de", "Mandarin (Traditionell)"),
+                    ("fr", "Mandarin (Traditionnel)"),
+                    ("es", "Mandarín (Tradicional)"),
+                ],
                 aliases: &[],
             },
             Entry {
                 canonical: "zh",
                 display: "Mandarin",
+                display_localized: &[("de", "Mandarin"), ("fr", "Mandarin"), ("es", "Mandarín")],
                 aliases: &["zh", "zho", "chi", "chinese", "mandarin", "中文"],
             },
         ]
@@ -371,17 +448,47 @@ mod tests {
     }
 
     #[test]
-    fn display_name_basic() {
-        assert_eq!(display_name("en"), "English");
-        assert_eq!(display_name("de"), "German");
-        assert_eq!(display_name("zh-Hans"), "Mandarin (Simplified)");
-        assert_eq!(display_name("zh-Hant"), "Mandarin (Traditional)");
-        assert_eq!(display_name("zh"), "Mandarin");
+    fn display_name_english_locale() {
+        assert_eq!(display_name("en", "en"), "English");
+        assert_eq!(display_name("de", "en"), "German");
+        assert_eq!(display_name("zh-Hans", "en"), "Mandarin (Simplified)");
+        assert_eq!(display_name("zh-Hant", "en"), "Mandarin (Traditional)");
+        assert_eq!(display_name("zh", "en"), "Mandarin");
     }
 
     #[test]
-    fn display_name_unknown_returns_unknown() {
-        assert_eq!(display_name("klingon"), "Unknown");
-        assert_eq!(display_name(""), "Unknown");
+    fn display_name_german_locale() {
+        assert_eq!(display_name("en", "de"), "Englisch");
+        assert_eq!(display_name("de", "de"), "Deutsch");
+        assert_eq!(display_name("fr", "de"), "Französisch");
+        assert_eq!(display_name("zh-Hans", "de"), "Mandarin (Vereinfacht)");
+    }
+
+    #[test]
+    fn display_name_french_locale() {
+        assert_eq!(display_name("en", "fr"), "Anglais");
+        assert_eq!(display_name("de", "fr"), "Allemand");
+        assert_eq!(display_name("ja", "fr"), "Japonais");
+    }
+
+    #[test]
+    fn display_name_with_region_normalises_to_primary_subtag() {
+        // `de-AT` should be treated like `de` for lookup.
+        assert_eq!(display_name("de", "de-AT"), "Deutsch");
+        assert_eq!(display_name("en", "DE-DE"), "Englisch");
+    }
+
+    #[test]
+    fn display_name_unknown_locale_falls_back_to_english() {
+        // Locale we don't carry → English fallback.
+        assert_eq!(display_name("de", "klingon"), "German");
+        assert_eq!(display_name("en", "xx"), "English");
+    }
+
+    #[test]
+    fn display_name_unknown_canonical_returns_unknown() {
+        assert_eq!(display_name("klingon", "en"), "Unknown");
+        assert_eq!(display_name("", "en"), "Unknown");
+        assert_eq!(display_name("klingon", "de"), "Unknown");
     }
 }
