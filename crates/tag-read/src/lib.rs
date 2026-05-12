@@ -24,7 +24,7 @@
 use async_trait::async_trait;
 
 use ab_core::tunables::TagReadTunables;
-use ab_core::{BookId, Error, Result};
+use ab_core::{BookId, Error, Field, Result};
 use ab_pipeline::{Stage, StageContext, StageId, StageOutcome};
 
 /// Confidence written to `book_field_provenance` for tag-derived values.
@@ -138,7 +138,7 @@ async fn process_one_file(
             {
                 tracing::warn!(
                     book = %book_id,
-                    field = candidate.field,
+                    field = %candidate.field,
                     error = %e,
                     "tag-read.provenance_write_failed"
                 );
@@ -168,7 +168,7 @@ struct AudioProperties {
 /// Single tag-derived field candidate.
 #[derive(Debug, Clone)]
 struct TagCandidate {
-    field: &'static str,
+    field: Field,
     value: String,
 }
 
@@ -217,13 +217,13 @@ fn tag_candidates_of(tagged: &lofty::file::TaggedFile) -> Vec<TagCandidate> {
 
     let mut out = Vec::with_capacity(8);
     if let Some(title) = tag.title() {
-        push_candidate(&mut out, "title", &title);
+        push_candidate(&mut out, Field::Title, &title);
     }
     if let Some(artist) = tag.artist() {
-        push_candidate(&mut out, "author", &artist);
+        push_candidate(&mut out, Field::Author, &artist);
     }
     if let Some(album) = tag.album() {
-        push_candidate(&mut out, "series", &album);
+        push_candidate(&mut out, Field::Series, &album);
     }
     // Lofty 0.24: `get_string` takes `ItemKey` by value; the
     // catch-all `ItemKey::Unknown(String)` variant was removed.
@@ -238,7 +238,7 @@ fn tag_candidates_of(tagged: &lofty::file::TaggedFile) -> Vec<TagCandidate> {
         // "eng", Audnexus writes "English", and consensus
         // treats them as different values).
         if let Some(canonical) = ab_core::language_code::normalize(language) {
-            push_candidate(&mut out, "language", &canonical);
+            push_candidate(&mut out, Field::Language, &canonical);
         } else {
             tracing::warn!(
                 raw = %language,
@@ -260,25 +260,25 @@ fn tag_candidates_of(tagged: &lofty::file::TaggedFile) -> Vec<TagCandidate> {
                 continue;
             }
             if let Some(canonical) = ab_core::genre_code::normalize(raw) {
-                push_candidate(&mut out, "genre", &canonical);
+                push_candidate(&mut out, Field::Genre, &canonical);
             } else {
                 tracing::warn!(raw = %raw, "tag_read.genre.unparseable");
             }
         }
     }
     if let Some(publisher) = tag.get_string(ItemKey::Publisher) {
-        push_candidate(&mut out, "publisher", publisher);
+        push_candidate(&mut out, Field::Publisher, publisher);
     }
     if let Some(asin) = tag.get_string(ItemKey::CatalogNumber) {
-        push_candidate(&mut out, "asin", asin);
+        push_candidate(&mut out, Field::Asin, asin);
     }
     if let Some(isbn) = tag.get_string(ItemKey::Isrc) {
-        push_candidate(&mut out, "isbn", isbn);
+        push_candidate(&mut out, Field::Isbn, isbn);
     }
     out
 }
 
-fn push_candidate(out: &mut Vec<TagCandidate>, field: &'static str, value: &str) {
+fn push_candidate(out: &mut Vec<TagCandidate>, field: Field, value: &str) {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return;
@@ -328,16 +328,17 @@ async fn update_book_file_properties(
 async fn write_provenance(
     library: &ab_db::LibraryDb,
     book_id: BookId,
-    field: &str,
+    field: Field,
     value: &str,
 ) -> Result<()> {
     let id = book_id.0;
+    let field_str = field.as_str();
     sqlx::query!(
         "INSERT INTO book_field_provenance \
          (book_id, field, value, source, confidence, is_winner) \
          VALUES (?, ?, ?, ?, ?, 0)",
         id,
-        field,
+        field_str,
         value,
         PROVENANCE_SOURCE,
         TAG_CONFIDENCE,

@@ -48,7 +48,7 @@ use std::collections::HashSet;
 
 use async_trait::async_trait;
 
-use ab_core::{BookId, Error, Result};
+use ab_core::{BookId, Error, Field, Result};
 use ab_pipeline::{Stage, StageContext, StageId, StageOutcome};
 
 /// Stage that resolves identities (authors/narrators/publishers).
@@ -129,7 +129,7 @@ async fn resolve_author(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     book_id: BookId,
 ) -> Result<bool> {
-    let Some(candidate) = pick_winner_with_id(tx, book_id, "author").await? else {
+    let Some(candidate) = pick_winner_with_id(tx, book_id, Field::Author).await? else {
         return Ok(false);
     };
     let author_id = find_or_insert_person(
@@ -159,7 +159,7 @@ async fn resolve_publisher(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     book_id: BookId,
 ) -> Result<bool> {
-    let Some(name) = pick_winner_name_only(tx, book_id, "publisher").await? else {
+    let Some(name) = pick_winner_name_only(tx, book_id, Field::Publisher).await? else {
         return Ok(false);
     };
     let publisher_id = find_or_insert_publisher(tx, &name).await?;
@@ -182,7 +182,7 @@ async fn resolve_narrators(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     book_id: BookId,
 ) -> Result<usize> {
-    let candidates = fetch_all_distinct(tx, book_id, "narrator").await?;
+    let candidates = fetch_all_distinct(tx, book_id, Field::Narrator).await?;
     if candidates.is_empty() {
         return Ok(0);
     }
@@ -239,15 +239,16 @@ struct IdentityCandidate {
 async fn pick_winner_with_id(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     book_id: BookId,
-    field: &str,
+    field: Field,
 ) -> Result<Option<IdentityCandidate>> {
     let id = book_id.0;
+    let field_str = field.as_str();
     let row = sqlx::query!(
         "SELECT value, external_id FROM book_field_provenance \
          WHERE book_id = ? AND field = ? AND value IS NOT NULL \
          ORDER BY confidence DESC, recorded_at DESC LIMIT 1",
         id,
-        field,
+        field_str,
     )
     .fetch_optional(&mut **tx)
     .await
@@ -275,7 +276,7 @@ async fn pick_winner_with_id(
 async fn pick_winner_name_only(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     book_id: BookId,
-    field: &str,
+    field: Field,
 ) -> Result<Option<String>> {
     Ok(pick_winner_with_id(tx, book_id, field)
         .await?
@@ -289,15 +290,16 @@ async fn pick_winner_name_only(
 async fn fetch_all_distinct(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     book_id: BookId,
-    field: &str,
+    field: Field,
 ) -> Result<Vec<IdentityCandidate>> {
     let id = book_id.0;
+    let field_str = field.as_str();
     let rows = sqlx::query!(
         "SELECT value, external_id FROM book_field_provenance \
          WHERE book_id = ? AND field = ? AND value IS NOT NULL \
          ORDER BY confidence DESC, recorded_at DESC",
         id,
-        field,
+        field_str,
     )
     .fetch_all(&mut **tx)
     .await

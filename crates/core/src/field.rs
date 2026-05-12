@@ -55,6 +55,12 @@ pub enum Field {
     Narrator,
     /// Publisher / imprint name.
     Publisher,
+    /// Book series name (multi-value; one row per series the
+    /// book belongs to). Currently written by tag-read from the
+    /// audio file's album tag. No consensus / identity-resolve
+    /// path yet — adding one is a future slice; until then the
+    /// provenance row is captured but does not promote anywhere.
+    Series,
     /// Genre slug (canonicalised by `genre_code::normalize`).
     /// Multi-value; promoted to the `book_genre` junction.
     Genre,
@@ -84,6 +90,7 @@ impl Field {
             Self::Author => "author",
             Self::Narrator => "narrator",
             Self::Publisher => "publisher",
+            Self::Series => "series",
             Self::Genre => "genre",
             Self::CoverUrl => "cover_url",
             Self::Abridged => "abridged",
@@ -112,6 +119,7 @@ impl Field {
             "author" => Some(Self::Author),
             "narrator" => Some(Self::Narrator),
             "publisher" => Some(Self::Publisher),
+            "series" => Some(Self::Series),
             "genre" => Some(Self::Genre),
             "cover_url" => Some(Self::CoverUrl),
             "abridged" => Some(Self::Abridged),
@@ -151,6 +159,7 @@ mod tests {
             Field::Author,
             Field::Narrator,
             Field::Publisher,
+            Field::Series,
             Field::Genre,
             Field::CoverUrl,
             Field::Abridged,
