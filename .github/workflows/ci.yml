@@ -31,6 +31,18 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  # No rust-cache across this matrix. `Swatinem/rust-cache@v2`
+  # repeatedly restored a corrupt `~/.cargo/bin/cargo` shim that
+  # resolved to `rustup-init` (manifests as
+  # `error: unexpected argument '<arg>' found / Usage: rustup-init[EXE]`).
+  # Bumping `prefix-key` only delayed the next corruption; the
+  # cargo-install jobs (deny, audit, sqlx-prepare) re-baked the
+  # bad state into the new slot, and any job that hit the slot
+  # afterwards (clippy, deny) failed. Dropping the cache makes
+  # CI ~30-60 s slower per job uncached; reliability wins.
+  # Revisit when we have a smaller-scope cache solution (e.g.
+  # only cache the cargo registry index, not target/).
+
   clippy:
     name: cargo clippy
     runs-on: macos-14
@@ -39,26 +51,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      # `prefix-key: v1-rust` invalidates the prior `v0-rust-clippy-…`
-      # cache that PR #28 hit. The corrupted-cache symptom was
-      # `cargo clippy …` failing with
-      #   error: unexpected argument 'clippy' found
-      #   Usage: rustup-init[EXE] [OPTIONS]
-      # — i.e. the restored `~/.cargo/bin/cargo` was actually
-      # `rustup-init`. Bumping the prefix forces a fresh cache on
-      # the first run after this lands; subsequent runs hit the
-      # `v1-rust-clippy-…` keyspace and stay green.
-      - uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: "v1-rust"
       - run: cargo clippy --workspace --all-targets -- -D warnings
-
-  # Every rust-cache step uses `prefix-key: v1-rust` to invalidate
-  # the v0-rust-* slots that hit partial-restore corruption
-  # (cargo symlink replaced with rustup-init). See the clippy job
-  # above for the diagnostic. Applying uniformly across the matrix
-  # because PR #29 surfaced the same symptom on the audit job
-  # after PR #28 fixed only clippy + sqlx.
 
   test:
     name: cargo test
@@ -66,9 +59,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: "v1-rust"
       - run: cargo test --workspace --all-targets
 
   xtask:
@@ -77,9 +67,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: "v1-rust"
       - run: cargo xtask check
 
   deny:
@@ -88,9 +75,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: "v1-rust"
       # Run cargo-deny directly. The official action is Docker-based
       # (Linux-only); we want to keep the entire CI matrix on macOS so
       # toolchain assumptions match the target.
