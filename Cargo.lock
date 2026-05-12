@@ -122,8 +122,12 @@ name = "ab-foundation-models"
 version = "0.1.0"
 dependencies = [
  "ab-core",
+ "ab-db",
+ "ab-pipeline",
+ "async-trait",
  "serde",
  "serde_json",
+ "sqlx",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -271,6 +275,7 @@ dependencies = [
  "ab-core",
  "ab-db",
  "ab-fingerprint",
+ "ab-foundation-models",
  "ab-pipeline",
  "ab-seed",
  "ab-shelf",

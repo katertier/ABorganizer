@@ -64,6 +64,11 @@ pub struct Tunables {
     /// `model_version` stamp).
     pub transcribe: TranscribeTunables,
 
+    /// Apple Intelligence Foundation Models — token budgets +
+    /// `model_version` stamp for the LLM-driven extractor stages
+    /// (DNA tags, spoiler-free summary, story arc, characters).
+    pub llm: LlmTunables,
+
     /// Library UI display locale (language names, genre
     /// translations, date / number formats). Distinct from any
     /// per-book language.
@@ -87,6 +92,7 @@ impl Default for Tunables {
             tags: TagsTunables::default(),
             language: LanguageTunables::default(),
             transcribe: TranscribeTunables::default(),
+            llm: LlmTunables::default(),
             library_display: LibraryDisplayTunables::default(),
         }
     }
@@ -580,6 +586,74 @@ impl Default for TranscribeTunables {
             idle_install_check_secs: 1_800,
             sample_positions: vec![0.25, 0.50, 0.75],
             sample_secs: 60.0,
+        }
+    }
+}
+
+/// Token budgets + model version stamp for the LLM-driven
+/// extractor stages backed by Apple Intelligence's Foundation
+/// Models framework.
+///
+/// `model_version` is the cache-invalidation key written to
+/// `ai_cache.model_version` for every row produced by an LLM
+/// stage. Bump it (e.g. `fm-26.0-v1` → `fm-26.0-v2`) to force
+/// every book re-extract — useful after a prompt rewrite, after
+/// Apple ships a major Foundation Models update, or after a
+/// schema change that breaks the cached JSON shape.
+///
+/// The per-stage `*_max_tokens` knobs are soft budgets passed
+/// straight to `GenerationOptions.maximumResponseTokens`. The
+/// framework treats them as upper bounds; EOS can land earlier.
+/// Defaults are tuned for typical first-5-minute transcript
+/// excerpts (DNA tags + summary + arc + characters all fit
+/// comfortably).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LlmTunables {
+    /// Version stamp written to `ai_cache.model_version` for
+    /// every LLM-produced row. Opaque to the runtime — it's a
+    /// cache key on our side. Convention: `fm-<macOS>-v<bump>`.
+    pub model_version: String,
+    /// Token budget for the DNA-tag extractor (`#`-prefixed
+    /// safe-to-display tags + `!`-prefixed spoiler tags).
+    /// 800 tokens is plenty for a JSON array of 5-10 tags each
+    /// 1-3 words long; bump if you raise the per-list caps.
+    pub dna_max_tokens: usize,
+    /// Maximum `#`-prefixed DNA tags per book. The prompt
+    /// instructs the model to stop at this count; downstream
+    /// also truncates defensively in case the model overruns.
+    /// 8 is the sweet spot — enough for "books like this"
+    /// similarity, few enough to scan visually.
+    pub dna_max_tags: usize,
+    /// Maximum `!`-prefixed spoiler tags. Smaller cap by design
+    /// — most books have one or two real spoilers; the model
+    /// over-eagerly marks anything plot-bearing as a spoiler if
+    /// given a generous budget.
+    pub dna_max_spoiler_tags: usize,
+    /// Token budget for the spoiler-free summary extractor.
+    /// 600 tokens lands a 3-5 paragraph summary in any of the
+    /// five UI locales without truncation.
+    pub summary_max_tokens: usize,
+    /// Token budget for the story-arc extractor. JSON array of
+    /// `{step, label, summary}` rows — 1200 tokens covers a
+    /// typical 5-7 act arc with 1-2 sentence summaries each.
+    pub arc_max_tokens: usize,
+    /// Token budget for the character extractor. JSON array of
+    /// `{name, aliases, role, description}` rows — 1500 tokens
+    /// covers up to ~15 characters with brief descriptions.
+    pub characters_max_tokens: usize,
+}
+
+impl Default for LlmTunables {
+    fn default() -> Self {
+        Self {
+            model_version: "fm-26.0-v1".into(),
+            dna_max_tokens: 800,
+            dna_max_tags: 8,
+            dna_max_spoiler_tags: 4,
+            summary_max_tokens: 600,
+            arc_max_tokens: 1_200,
+            characters_max_tokens: 1_500,
         }
     }
 }

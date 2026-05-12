@@ -28,6 +28,13 @@
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+pub mod dna_stage;
+
+pub use dna_stage::{
+    CACHE_TYPE_DNA, ExtractDnaTagsStage, STAGE_NAME as EXTRACT_DNA_TAGS_STAGE, TAG_SOURCE_DNA_LLM,
+    build_prompt as build_dna_prompt, normalise_tag,
+};
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -106,7 +113,7 @@ pub enum BridgeError {
     /// the code.
     #[error("Foundation Models bridge: generic error")]
     Generic,
-    /// Input held a NUL byte (CString conversion rejected it).
+    /// Input held a NUL byte (`CString` conversion rejected it).
     #[error("NUL byte in input: {0}")]
     NulInInput(String),
     /// FFI callback was dropped without firing — should be
@@ -195,6 +202,10 @@ pub async fn complete(prompt: &str, max_tokens: usize) -> Result<String, BridgeE
     unsafe_code,
     reason = "FFI to Swift requires unsafe extern blocks and raw-pointer round-trips through the C callback; safe wrappers exposed by the parent module are the public surface."
 )]
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "pub(super) is the correct visibility here: items are reached via the safe-wrapper fns in the parent (lib.rs). At one level of nesting clippy thinks this is equivalent to pub(crate), but pub on a private module trips unreachable_pub. pub(super) keeps the intent explicit."
+)]
 mod ffi {
     //! Raw FFI surface. See `swift/aborg_fm.swift` for the
     //! callback contract. Each Rust wrapper:
@@ -218,7 +229,7 @@ mod ffi {
         buffer: Option<Vec<u8>>,
     }
 
-    /// Common C callback: deserialise (ptr, len, code) → FfiResult,
+    /// Common C callback: deserialise (ptr, len, code) → `FfiResult`,
     /// then send through the boxed oneshot sender (which we
     /// retake ownership of from the ctx pointer).
     ///

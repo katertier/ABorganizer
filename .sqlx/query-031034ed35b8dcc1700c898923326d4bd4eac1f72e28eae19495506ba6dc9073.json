@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT content FROM ai_cache WHERE book_id = ? AND cache_type = 'transcript_full'",
+  "describe": {
+    "columns": [
+      {
+        "name": "content",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "031034ed35b8dcc1700c898923326d4bd4eac1f72e28eae19495506ba6dc9073"
+}
