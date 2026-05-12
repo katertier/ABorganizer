@@ -49,7 +49,6 @@
 //!   Same idle-installer pathway handles the re-queue.
 //! - Other bridge / DB errors propagate.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -106,44 +105,47 @@ impl Stage for TranscribeFullStage {
             return Ok(StageOutcome::Skipped);
         };
 
-        // Single transcribe call for the whole book — the Swift
-        // bridge (3D.3) uses `AVAssetReader` to stream PCM into
-        // `SpeechAnalyzer` chunk-by-chunk; there's no Rust-side
-        // chunking needed. One analyzer session per book =
-        // continuous context across the whole transcript =
-        // no chunk-boundary artifacts.
+        // Per-file transcribe loop. Each active file gets its
+        // own analyzer session via AVAssetReader streaming
+        // (3D.3); we rebase the file-relative segment timestamps
+        // into the book's global time-base using each file's
+        // `cumulative_offset_secs`. File boundaries fall at
+        // chapter breaks — natural reset points for the
+        // transcriber, so per-file sessions don't risk the
+        // chunk-boundary artifacts the AVAssetReader rewrite
+        // solved for the single-file streaming case.
         tracing::debug!(
             book = %book_id,
-            total = plan.total_secs,
+            file_count = plan.files.len(),
+            total = crate::multi_file::total_duration_secs(&plan.files),
             "transcribe.full.start"
         );
-        let all_segments = match transcribe_window_typed(
-            &plan.file_path,
-            0.0,
-            plan.total_secs,
-            &plan.locale,
-        )
-        .await
-        {
-            Ok(segs) => segs,
-            Err(BridgeError::ModelNotInstalled) => {
-                // Idle installer already queued this locale via
-                // head/tail (3A.4.1). Bail; we get re-queued
-                // when the model lands.
-                tracing::warn!(
-                    locale = %plan.locale,
-                    book = %book_id,
-                    "transcribe.full.skip.model_not_installed"
-                );
-                return Ok(StageOutcome::Skipped);
+        let mut all_segments: Vec<TranscriptSegment> = Vec::new();
+        for file in &plan.files {
+            match transcribe_window_typed(&file.path, 0.0, file.duration_secs, &plan.locale).await {
+                Ok(mut segs) => {
+                    crate::multi_file::rebase_segments(&mut segs, file.cumulative_offset_secs);
+                    all_segments.append(&mut segs);
+                }
+                Err(BridgeError::ModelNotInstalled) => {
+                    // Idle installer queued this locale via
+                    // head/tail (3A.4.1). Bail; we get re-queued
+                    // when the model lands.
+                    tracing::warn!(
+                        locale = %plan.locale,
+                        book = %book_id,
+                        path = %file.path.display(),
+                        "transcribe.full.skip.model_not_installed"
+                    );
+                    return Ok(StageOutcome::Skipped);
+                }
+                Err(e) => return Err(e.into()),
             }
-            Err(e) => return Err(e.into()),
-        };
+        }
 
         if all_segments.is_empty() {
-            // Engine returned nothing for the whole file —
-            // unusual but possible for ambient-only audio. Don't
-            // write an empty row; let the next run retry.
+            // Engine returned nothing — unusual but possible for
+            // ambient-only audio. Don't write an empty row.
             tracing::warn!(book = %book_id, "transcribe.full.no_segments");
             return Ok(StageOutcome::Skipped);
         }
@@ -162,8 +164,9 @@ impl Stage for TranscribeFullStage {
 
 #[derive(Debug)]
 struct FullPlan {
-    file_path: PathBuf,
-    total_secs: f64,
+    /// Every active file in book order, with cumulative offsets
+    /// pre-computed for segment rebasing.
+    files: Vec<crate::multi_file::FileEntry>,
     locale: String,
 }
 
@@ -212,50 +215,19 @@ async fn plan_full(
         return Ok(None);
     }
 
-    // Total duration from books.raw_duration_ms (prefer raw so
-    // jingles fall inside the windows).
-    let book_row = sqlx::query!(
-        "SELECT duration_ms, raw_duration_ms FROM books WHERE book_id = ?",
-        id,
-    )
-    .fetch_optional(library.pool())
-    .await
-    .map_err(|e| Error::Database(format!("transcribe-full book lookup: {e}")))?;
-    let Some(book_row) = book_row else {
+    // Per-file plan via the shared multi_file helper. Each
+    // entry carries duration + cumulative offset; we iterate in
+    // run() and rebase per-file segments via the offset.
+    let files = crate::multi_file::active_files(library, book_id).await?;
+    if files.is_empty() {
         return Ok(None);
-    };
-    let total_ms = book_row
-        .raw_duration_ms
-        .or(book_row.duration_ms)
-        .unwrap_or(0)
-        .max(0);
-    #[allow(clippy::cast_precision_loss)]
-    let total_secs = total_ms as f64 / 1000.0;
+    }
+    let total_secs = crate::multi_file::total_duration_secs(&files);
     if total_secs < transcribe.min_duration_secs {
         return Ok(None);
     }
 
-    // File path — first active file. Multi-file books need
-    // per-file iteration to keep timestamps coherent across
-    // files; that's a follow-up (see PROJECT.md "multi-file
-    // full transcribe").
-    let file_row = sqlx::query!(
-        "SELECT file_path FROM book_files \
-         WHERE book_id = ? AND is_active = 1 ORDER BY file_id LIMIT 1",
-        id,
-    )
-    .fetch_optional(library.pool())
-    .await
-    .map_err(|e| Error::Database(format!("transcribe-full file lookup: {e}")))?;
-    let Some(file_row) = file_row else {
-        return Ok(None);
-    };
-
-    Ok(Some(FullPlan {
-        file_path: PathBuf::from(file_row.file_path),
-        total_secs,
-        locale,
-    }))
+    Ok(Some(FullPlan { files, locale }))
 }
 
 /// Same shape as `stage::cache_fresh` but specialised to the

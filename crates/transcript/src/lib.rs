@@ -20,6 +20,7 @@ pub mod extractors;
 pub mod full_stage;
 pub mod idle_install;
 pub mod language;
+pub mod multi_file;
 pub mod samples_stage;
 pub mod stage;
 
