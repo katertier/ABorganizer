@@ -21,6 +21,10 @@ pub fn build_router(state: ApiState) -> Router {
             "/library/pending_speech_installs",
             get(library_pending_speech_installs),
         )
+        .route(
+            "/library/pending_speech_installs/retry",
+            post(library_retry_failed_speech_installs),
+        )
         .route("/books", get(books_list))
         .with_state(state)
 }
@@ -301,6 +305,47 @@ async fn library_pending_speech_installs(
         })
         .collect();
     Ok(Json(PendingSpeechInstallsResponse { installs }))
+}
+
+/// Response shape for `POST /library/pending_speech_installs/retry`.
+#[derive(Serialize)]
+struct RetryFailedSpeechInstallsResponse {
+    /// Count of rows flipped from `failed` to `pending`.
+    requeued: i64,
+}
+
+/// Flip every `pending_speech_installs.status='failed'` row
+/// back to `'pending'` so the idle install loop picks them up
+/// on the next wake. Idempotent: rows already `'pending'` /
+/// `'installing'` / `'installed'` aren't touched.
+///
+/// Used by the future config UI's "retry blocked installs"
+/// button after the user fixes the underlying issue
+/// (re-enable Apple Intelligence in System Settings, install
+/// a missing language pack manually, etc.). For v0 the UI
+/// just POSTs here; future versions could allow per-locale
+/// selection via a body parameter.
+async fn library_retry_failed_speech_installs(
+    State(state): State<ApiState>,
+) -> Result<Json<RetryFailedSpeechInstallsResponse>, ApiError> {
+    let result = sqlx::query!(
+        "UPDATE pending_speech_installs \
+         SET status = 'pending', last_error = NULL \
+         WHERE status = 'failed'",
+    )
+    .execute(state.inner.ephemeral.pool())
+    .await
+    .map_err(|e| ab_core::Error::Database(format!("retry failed speech installs: {e}")))?;
+    let requeued = result.rows_affected();
+    tracing::info!(requeued, "library.speech_installs.retry");
+    // u64 → i64 cast: rows_affected is a row count, capped at
+    // a few thousand pending locales in any sane deployment;
+    // well inside i64.
+    #[allow(clippy::cast_possible_wrap)]
+    let requeued_i64 = requeued as i64;
+    Ok(Json(RetryFailedSpeechInstallsResponse {
+        requeued: requeued_i64,
+    }))
 }
 
 async fn books_list(State(state): State<ApiState>) -> Result<Json<BooksResponse>, ApiError> {
