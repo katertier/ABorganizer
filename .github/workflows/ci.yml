@@ -39,8 +39,26 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      # `prefix-key: v1-rust` invalidates the prior `v0-rust-clippy-…`
+      # cache that PR #28 hit. The corrupted-cache symptom was
+      # `cargo clippy …` failing with
+      #   error: unexpected argument 'clippy' found
+      #   Usage: rustup-init[EXE] [OPTIONS]
+      # — i.e. the restored `~/.cargo/bin/cargo` was actually
+      # `rustup-init`. Bumping the prefix forces a fresh cache on
+      # the first run after this lands; subsequent runs hit the
+      # `v1-rust-clippy-…` keyspace and stay green.
       - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-rust"
       - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # Every rust-cache step uses `prefix-key: v1-rust` to invalidate
+  # the v0-rust-* slots that hit partial-restore corruption
+  # (cargo symlink replaced with rustup-init). See the clippy job
+  # above for the diagnostic. Applying uniformly across the matrix
+  # because PR #29 surfaced the same symptom on the audit job
+  # after PR #28 fixed only clippy + sqlx.
 
   test:
     name: cargo test
@@ -49,6 +67,8 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-rust"
       - run: cargo test --workspace --all-targets
 
   xtask:
@@ -58,6 +78,8 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-rust"
       - run: cargo xtask check
 
   deny:
@@ -67,6 +89,8 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-rust"
       # Run cargo-deny directly. The official action is Docker-based
       # (Linux-only); we want to keep the entire CI matrix on macOS so
       # toolchain assumptions match the target.
@@ -79,7 +103,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      # No rust-cache: the cache occasionally restored a state
+      # where `cargo` resolved to `rustup-init` (see PR #28's
+      # diagnostic threads). The `cargo install --locked
+      # cargo-audit` step rebuilds cargo-audit in ~30s; saving
+      # the cache isn't worth chasing the partial-restore
+      # corruption.
       - run: cargo install --locked cargo-audit || true
       # `--ignore` mirrors the ignore list in deny.toml. Keep in sync.
       # Ignores:
@@ -101,12 +130,32 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      # No rust-cache: this job hit a partial-restore corruption
+      # where the cached `~/.cargo/bin/cargo` shim resolved to
+      # `rustup-init` after restore, so subsequent `cargo install`
+      # / `cargo sqlx prepare` failed with
+      # `error: unexpected argument 'install' found`. The bump
+      # to `prefix-key: v1-rust` (commit on this branch) didn't
+      # help because the same failure pattern repopulated the
+      # new slot. Removing the cache is the surgical fix; the
+      # `cargo install --locked sqlx-cli` step rebuilds in
+      # ~30 s and the prepare step verifies a tiny `.sqlx/`
+      # cache against the prep DB.
       - run: cargo install --locked sqlx-cli --no-default-features --features sqlite,rustls --version "~0.8" || true
-      - name: Apply schema to a prep DB
+      - name: Apply all migrations to a prep DB
         run: |
+          # Apply every library + ephemeral migration into one prep DB
+          # so every `sqlx::query!()` call's referenced table exists.
+          # Mirrors the loop in `scripts/sqlx-prepare.sh`. The
+          # `IF NOT EXISTS` / `OR IGNORE` rewrite is needed because a
+          # few tables (e.g. `meta`) are declared in both schemas with
+          # the same shape; production runs them against separate DBs
+          # and stays strict — this rewrite never touches source files.
           rm -f /tmp/aborg-prep.db
-          sqlite3 /tmp/aborg-prep.db < crates/db/migrations/library/001_initial.sql
+          for migration in crates/db/migrations/library/*.sql crates/db/migrations/ephemeral/*.sql; do
+            sed -E 's/CREATE (UNIQUE )?(TABLE|INDEX) /CREATE \1\2 IF NOT EXISTS /g; s/INSERT INTO /INSERT OR IGNORE INTO /g' \
+              "$migration" | sqlite3 /tmp/aborg-prep.db
+          done
       - name: Verify `.sqlx/` is up to date
         env:
           DATABASE_URL: "sqlite:///tmp/aborg-prep.db"
