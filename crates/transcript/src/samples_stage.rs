@@ -49,16 +49,14 @@ use ab_core::{BookId, Error, Result};
 use ab_db::LibraryDb;
 use ab_pipeline::{Stage, StageContext, StageOutcome};
 
-use crate::stage::{CACHE_TYPE_HEAD, STAGE_NAME as TRANSCRIBE_HEAD_TAIL_STAGE};
+use crate::stage::STAGE_NAME as TRANSCRIBE_HEAD_TAIL_STAGE;
+use ab_core::CacheKey;
 use ab_speech::detect;
 use ab_speech::{BridgeError, TranscriptSegment, transcribe_window_typed};
 
 /// Stage name written to `pipeline_progress` + registered with
 /// the daemon.
 pub const STAGE_NAME: &str = "transcribe-samples";
-
-/// `ai_cache.cache_type` value for the combined sample transcript.
-pub const CACHE_TYPE_SAMPLES: &str = "transcript_samples";
 
 /// `book_field_provenance.source` value for the language
 /// candidate produced from the samples.
@@ -228,10 +226,11 @@ async fn plan_samples(
     let id = book_id.0;
 
     // Locale from head transcript.
+    let head_cache = CacheKey::TranscriptHead.as_str();
     let head_row = sqlx::query!(
         "SELECT content FROM ai_cache WHERE book_id = ? AND cache_type = ?",
         id,
-        CACHE_TYPE_HEAD,
+        head_cache,
     )
     .fetch_optional(library.pool())
     .await
@@ -325,10 +324,11 @@ async fn samples_cache_fresh(
     current_locale: &str,
 ) -> Result<bool> {
     let id = book_id.0;
+    let samples_cache = CacheKey::TranscriptSamples.as_str();
     let row = sqlx::query!(
         "SELECT model_version, content FROM ai_cache WHERE book_id = ? AND cache_type = ?",
         id,
-        CACHE_TYPE_SAMPLES,
+        samples_cache,
     )
     .fetch_optional(library.pool())
     .await
@@ -366,12 +366,13 @@ async fn write_samples_cache(
         .map_err(|e| Error::stage("transcribe-samples", format!("encode payload: {e}")))?;
     let conf = mean_confidence(segments);
     let id = book_id.0;
+    let samples_cache = CacheKey::TranscriptSamples.as_str();
     sqlx::query!(
         "INSERT OR REPLACE INTO ai_cache \
          (book_id, cache_type, content, compressed, confidence, model_version) \
          VALUES (?, ?, ?, 0, ?, ?)",
         id,
-        CACHE_TYPE_SAMPLES,
+        samples_cache,
         bytes,
         conf,
         model_version,

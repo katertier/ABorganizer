@@ -44,7 +44,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use ab_core::tunables::LlmTunables;
-use ab_core::{BookId, Error, Result};
+use ab_core::{BookId, CacheKey, Error, Result, TagKind};
 use ab_db::LibraryDb;
 use ab_pipeline::{Stage, StageContext, StageOutcome};
 
@@ -53,9 +53,6 @@ use ab_foundation_models::{BridgeError, complete};
 /// Stage name written to `pipeline_progress` and registered with
 /// the daemon scheduler.
 pub const STAGE_NAME: &str = "extract-dna-tags";
-
-/// `ai_cache.cache_type` value for the raw LLM response.
-pub const CACHE_TYPE_DNA: &str = "dna_tags";
 
 /// `book_tags.source` for rows produced by this stage.
 pub const TAG_SOURCE_DNA_LLM: &str = "dna_llm";
@@ -198,9 +195,11 @@ async fn load_full_transcript(
     // string can't be a typed parameter at the macro layer
     // (the macro substitutes literals for `?`, not strings) —
     // but we already use the same idiom in full_stage.rs.
+    let full_cache = CacheKey::TranscriptFull.as_str();
     let row = sqlx::query!(
-        "SELECT content FROM ai_cache WHERE book_id = ? AND cache_type = 'transcript_full'",
+        "SELECT content FROM ai_cache WHERE book_id = ? AND cache_type = ?",
         id,
+        full_cache,
     )
     .fetch_optional(library.pool())
     .await
@@ -235,9 +234,11 @@ async fn dna_cache_fresh(
     model_version: &str,
 ) -> Result<bool> {
     let id = book_id.0;
+    let dna_cache = CacheKey::DnaTags.as_str();
     let row = sqlx::query!(
-        "SELECT model_version FROM ai_cache WHERE book_id = ? AND cache_type = 'dna_tags'",
+        "SELECT model_version FROM ai_cache WHERE book_id = ? AND cache_type = ?",
         id,
+        dna_cache,
     )
     .fetch_optional(library.pool())
     .await
@@ -270,7 +271,7 @@ async fn write_tags(
     .map_err(|e| Error::Database(format!("dna tags clear: {e}")))?;
 
     for raw in dna_tags {
-        let tag = format!("#{}", normalise_tag(raw));
+        let tag = TagKind::Dna.format_tag(&normalise_tag(raw));
         sqlx::query!(
             "INSERT OR IGNORE INTO book_tags (book_id, tag, source) VALUES (?, ?, ?)",
             id,
@@ -282,7 +283,7 @@ async fn write_tags(
         .map_err(|e| Error::Database(format!("dna tag insert: {e}")))?;
     }
     for raw in spoiler_tags {
-        let tag = format!("!{}", normalise_tag(raw));
+        let tag = TagKind::Spoiler.format_tag(&normalise_tag(raw));
         sqlx::query!(
             "INSERT OR IGNORE INTO book_tags (book_id, tag, source) VALUES (?, ?, ?)",
             id,
@@ -314,11 +315,13 @@ async fn write_cache(
     let payload = CachePayload { raw };
     let bytes = serde_json::to_vec(&payload)
         .map_err(|e| Error::stage(STAGE_NAME, format!("encode cache: {e}")))?;
+    let dna_cache = CacheKey::DnaTags.as_str();
     sqlx::query!(
         "INSERT OR REPLACE INTO ai_cache \
          (book_id, cache_type, content, compressed, model_version) \
-         VALUES (?, 'dna_tags', ?, 0, ?)",
+         VALUES (?, ?, ?, 0, ?)",
         id,
+        dna_cache,
         bytes,
         model_version,
     )

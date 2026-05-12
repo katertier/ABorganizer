@@ -49,7 +49,7 @@ use async_trait::async_trait;
 use serde::Serialize;
 
 use ab_core::tunables::{LanguageTunables, TranscribeTunables};
-use ab_core::{BookId, Error, Result};
+use ab_core::{BookId, CacheKey, Error, Result};
 use ab_db::{EphemeralDb, LibraryDb};
 use ab_pipeline::{Stage, StageContext, StageOutcome};
 
@@ -138,7 +138,7 @@ impl Stage for TranscribeHeadTailStage {
         write_transcript_cache(
             &ctx.library,
             book_id,
-            CACHE_TYPE_HEAD,
+            CacheKey::TranscriptHead,
             CacheWrite {
                 segments: &head_segments,
                 locale: &locale,
@@ -169,7 +169,7 @@ impl Stage for TranscribeHeadTailStage {
                     write_transcript_cache(
                         &ctx.library,
                         book_id,
-                        CACHE_TYPE_TAIL,
+                        CacheKey::TranscriptTail,
                         CacheWrite {
                             segments: &segments,
                             locale: &locale,
@@ -209,13 +209,6 @@ impl Stage for TranscribeHeadTailStage {
 /// the daemon. Held as a `pub const` so call sites (API router,
 /// docs, tests) can refer to one source of truth.
 pub const STAGE_NAME: &str = "transcribe-head-tail";
-
-/// `ai_cache.cache_type` value for the `[0, head_secs)` transcript.
-pub const CACHE_TYPE_HEAD: &str = "transcript_head";
-
-/// `ai_cache.cache_type` value for the
-/// `[duration - tail_secs, duration)` transcript.
-pub const CACHE_TYPE_TAIL: &str = "transcript_tail";
 
 /// `book_field_provenance.source` for the pre-transcribe
 /// language pick (tag text → `NLLanguageRecognizer`).
@@ -302,10 +295,21 @@ async fn plan_book(
     // between runs without invalidating the cache. The quality
     // gate after head transcription is what re-runs on
     // language disagreement.
-    let head_fresh =
-        cache_fresh(library, book_id, CACHE_TYPE_HEAD, &transcribe.model_version).await?;
+    let head_fresh = cache_fresh(
+        library,
+        book_id,
+        CacheKey::TranscriptHead,
+        &transcribe.model_version,
+    )
+    .await?;
     let tail_fresh = if tail.is_some() {
-        cache_fresh(library, book_id, CACHE_TYPE_TAIL, &transcribe.model_version).await?
+        cache_fresh(
+            library,
+            book_id,
+            CacheKey::TranscriptTail,
+            &transcribe.model_version,
+        )
+        .await?
     } else {
         true
     };
@@ -325,14 +329,15 @@ async fn plan_book(
 async fn cache_fresh(
     library: &LibraryDb,
     book_id: BookId,
-    cache_type: &str,
+    cache_type: CacheKey,
     model_version: &str,
 ) -> Result<bool> {
     let id = book_id.0;
+    let cache_str = cache_type.as_str();
     let row = sqlx::query!(
         "SELECT model_version FROM ai_cache WHERE book_id = ? AND cache_type = ?",
         id,
-        cache_type,
+        cache_str,
     )
     .fetch_optional(library.pool())
     .await
@@ -447,7 +452,7 @@ struct CacheWrite<'a> {
 async fn write_transcript_cache(
     library: &LibraryDb,
     book_id: BookId,
-    cache_type: &str,
+    cache_type: CacheKey,
     args: CacheWrite<'_>,
 ) -> Result<()> {
     let payload = TranscriptPayload {
@@ -462,12 +467,13 @@ async fn write_transcript_cache(
     let conf = mean_confidence(args.segments);
     let id = book_id.0;
     let model_version = args.model_version;
+    let cache_str = cache_type.as_str();
     sqlx::query!(
         "INSERT OR REPLACE INTO ai_cache \
          (book_id, cache_type, content, compressed, confidence, model_version) \
          VALUES (?, ?, ?, 0, ?, ?)",
         id,
-        cache_type,
+        cache_str,
         bytes,
         conf,
         model_version,

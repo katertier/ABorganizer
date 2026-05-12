@@ -29,6 +29,6 @@
 pub mod dna_stage;
 
 pub use dna_stage::{
-    CACHE_TYPE_DNA, ExtractDnaTagsStage, STAGE_NAME as EXTRACT_DNA_TAGS_STAGE, TAG_SOURCE_DNA_LLM,
+    ExtractDnaTagsStage, STAGE_NAME as EXTRACT_DNA_TAGS_STAGE, TAG_SOURCE_DNA_LLM,
     build_prompt as build_dna_prompt, normalise_tag,
 };

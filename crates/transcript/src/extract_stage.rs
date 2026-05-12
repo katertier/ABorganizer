@@ -43,8 +43,9 @@ use ab_pipeline::{Stage, StageContext, StageOutcome};
 use serde::Deserialize;
 
 use crate::extractors::built_in_extractors;
-use crate::stage::{CACHE_TYPE_HEAD, STAGE_NAME as HEAD_TAIL_STAGE};
+use crate::stage::STAGE_NAME as HEAD_TAIL_STAGE;
 use crate::{Candidate, Extractor};
+use ab_core::CacheKey;
 use ab_speech::TranscriptSegment;
 
 /// Stage name written to `pipeline_progress` and registered with
@@ -121,10 +122,11 @@ struct CachedHead {
 /// latter logs a warning so a stale schema is debuggable).
 async fn load_head_text(library: &LibraryDb, book_id: BookId) -> Result<Option<String>> {
     let id = book_id.0;
+    let head_cache = CacheKey::TranscriptHead.as_str();
     let row = sqlx::query!(
         "SELECT content FROM ai_cache WHERE book_id = ? AND cache_type = ?",
         id,
-        CACHE_TYPE_HEAD,
+        head_cache,
     )
     .fetch_optional(library.pool())
     .await

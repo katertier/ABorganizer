@@ -59,17 +59,13 @@ use ab_core::{BookId, Error, Result};
 use ab_db::LibraryDb;
 use ab_pipeline::{Stage, StageContext, StageOutcome};
 
-use crate::stage::{CACHE_TYPE_HEAD, STAGE_NAME as HEAD_TAIL_STAGE};
+use crate::stage::STAGE_NAME as HEAD_TAIL_STAGE;
+use ab_core::CacheKey;
 use ab_speech::{BridgeError, TranscriptSegment, transcribe_window_typed};
 
 /// Stage name written to `pipeline_progress` and registered with
 /// the daemon.
 pub const STAGE_NAME: &str = "transcribe-full";
-
-/// `ai_cache.cache_type` value for the whole-book transcript.
-/// Reuses the existing schema's documented value
-/// (`schema.sql` lists `transcript_full`).
-pub const CACHE_TYPE_FULL: &str = "transcript_full";
 
 /// Idle-priority full-book transcribe stage.
 pub struct TranscribeFullStage {
@@ -189,10 +185,11 @@ async fn plan_full(
     let id = book_id.0;
 
     // Locale from head transcript cache.
+    let head_cache = CacheKey::TranscriptHead.as_str();
     let head_row = sqlx::query!(
         "SELECT content FROM ai_cache WHERE book_id = ? AND cache_type = ?",
         id,
-        CACHE_TYPE_HEAD,
+        head_cache,
     )
     .fetch_optional(library.pool())
     .await
@@ -240,10 +237,11 @@ async fn full_cache_fresh(
     current_locale: &str,
 ) -> Result<bool> {
     let id = book_id.0;
+    let full_cache = CacheKey::TranscriptFull.as_str();
     let row = sqlx::query!(
         "SELECT model_version, content FROM ai_cache WHERE book_id = ? AND cache_type = ?",
         id,
-        CACHE_TYPE_FULL,
+        full_cache,
     )
     .fetch_optional(library.pool())
     .await
@@ -283,12 +281,13 @@ async fn write_full_cache(
     // book ~18 MB. SQLite BLOBs handle this fine. Turning on zstd
     // compression is a follow-up — wants benchmarking on
     // representative books before changing the storage contract.
+    let full_cache = CacheKey::TranscriptFull.as_str();
     sqlx::query!(
         "INSERT OR REPLACE INTO ai_cache \
          (book_id, cache_type, content, compressed, confidence, model_version) \
          VALUES (?, ?, ?, 0, ?, ?)",
         id,
-        CACHE_TYPE_FULL,
+        full_cache,
         bytes,
         conf,
         model_version,

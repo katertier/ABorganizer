@@ -11,14 +11,18 @@ pub mod build_info {
     include!(concat!(env!("OUT_DIR"), "/build_info.rs"));
 }
 
+pub mod cache;
 pub mod error;
 pub mod genre_code;
 pub mod ids;
 pub mod language_code;
 pub mod paths;
+pub mod tags;
 pub mod time_format;
 pub mod tunables;
 
+pub use cache::CacheKey;
 pub use error::{Error, Result};
 pub use ids::{BookId, FileId, JobId};
+pub use tags::{TAG_PREFIX_DNA, TAG_PREFIX_GENRE, TAG_PREFIX_SPOILER, TagKind};
 pub use tunables::Tunables;
