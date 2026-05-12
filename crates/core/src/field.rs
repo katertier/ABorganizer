@@ -179,7 +179,43 @@ impl AsRef<str> for Field {
     }
 }
 
+/// Error returned by `<Field as FromStr>::from_str` when the
+/// input doesn't match any [`Field`] variant. Carries the offending
+/// string for diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseFieldError(pub String);
+
+impl std::fmt::Display for ParseFieldError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "unknown book_field_provenance.field value: {:?}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for ParseFieldError {}
+
+impl std::str::FromStr for Field {
+    type Err = ParseFieldError;
+
+    /// Parse a `book_field_provenance.field` string into the typed
+    /// enum. Returns [`ParseFieldError`] if the string isn't one of
+    /// the known variants — distinct from [`Field::parse`] which
+    /// returns `Option<Self>` for the "unknown is fine" lookup path.
+    ///
+    /// Use `from_str` when the caller treats an unknown string as
+    /// a user-visible error (REPL / admin tool / API deserialise);
+    /// use `parse` when the caller wants to silently skip unknowns
+    /// (e.g. legacy DB rows during a migration).
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s).ok_or_else(|| ParseFieldError(s.to_owned()))
+    }
+}
+
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -239,5 +275,40 @@ mod tests {
         assert_eq!(Field::Publisher.books_column(), None);
         assert_eq!(Field::Genre.books_column(), None);
         assert_eq!(Field::Series.books_column(), None);
+    }
+
+    #[test]
+    fn from_str_round_trips_every_variant() {
+        for f in [
+            Field::Title,
+            Field::Subtitle,
+            Field::Description,
+            Field::Language,
+            Field::ReleaseDate,
+            Field::DurationSeconds,
+            Field::Asin,
+            Field::Isbn,
+            Field::Author,
+            Field::Narrator,
+            Field::Publisher,
+            Field::Series,
+            Field::Genre,
+            Field::CoverUrl,
+            Field::Abridged,
+            Field::Explicit,
+        ] {
+            let parsed: Field = f.as_str().parse().expect("from_str round trip");
+            assert_eq!(parsed, f);
+        }
+    }
+
+    #[test]
+    fn from_str_rejects_unknown_with_diagnostic() {
+        let err = "no_such_field".parse::<Field>().unwrap_err();
+        assert_eq!(err.0, "no_such_field");
+        // Display includes the bad value for the user-visible
+        // error.
+        let msg = format!("{err}");
+        assert!(msg.contains("no_such_field"), "got: {msg}");
     }
 }

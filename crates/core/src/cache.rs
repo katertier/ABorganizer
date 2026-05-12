@@ -110,7 +110,40 @@ impl AsRef<str> for CacheKey {
     }
 }
 
+/// Error returned by `<CacheKey as FromStr>::from_str` when the
+/// input doesn't match any [`CacheKey`] variant. Carries the
+/// offending string for diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseCacheKeyError(pub String);
+
+impl std::fmt::Display for ParseCacheKeyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown ai_cache.cache_type value: {:?}", self.0)
+    }
+}
+
+impl std::error::Error for ParseCacheKeyError {}
+
+impl std::str::FromStr for CacheKey {
+    type Err = ParseCacheKeyError;
+
+    /// Parse an `ai_cache.cache_type` string into the typed enum.
+    /// Returns [`ParseCacheKeyError`] if the string isn't one of
+    /// the known variants — distinct from [`CacheKey::parse`]
+    /// which returns `Option<Self>` for the "unknown is fine"
+    /// lookup path.
+    ///
+    /// Use `from_str` when the caller treats an unknown string as
+    /// a user-visible error (REPL / admin tool / API deserialise);
+    /// use `parse` when the caller wants to silently skip unknowns
+    /// (e.g. legacy DB rows during a migration).
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s).ok_or_else(|| ParseCacheKeyError(s.to_owned()))
+    }
+}
+
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -144,5 +177,30 @@ mod tests {
     fn display_matches_as_str() {
         let key = CacheKey::DnaTags;
         assert_eq!(format!("{key}"), "dna_tags");
+    }
+
+    #[test]
+    fn from_str_round_trips_every_variant() {
+        for key in [
+            CacheKey::TranscriptHead,
+            CacheKey::TranscriptTail,
+            CacheKey::TranscriptSamples,
+            CacheKey::TranscriptFull,
+            CacheKey::DnaTags,
+            CacheKey::SummarySpoilerFree,
+            CacheKey::StoryArc,
+            CacheKey::Characters,
+        ] {
+            let parsed: CacheKey = key.as_str().parse().expect("from_str round trip");
+            assert_eq!(parsed, key);
+        }
+    }
+
+    #[test]
+    fn from_str_rejects_unknown_with_diagnostic() {
+        let err = "transcribe_head".parse::<CacheKey>().unwrap_err();
+        assert_eq!(err.0, "transcribe_head");
+        let msg = format!("{err}");
+        assert!(msg.contains("transcribe_head"), "got: {msg}");
     }
 }

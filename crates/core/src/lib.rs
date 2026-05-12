@@ -22,9 +22,9 @@ pub mod tags;
 pub mod time_format;
 pub mod tunables;
 
-pub use cache::CacheKey;
+pub use cache::{CacheKey, ParseCacheKeyError};
 pub use error::{Error, Result};
-pub use field::Field;
+pub use field::{Field, ParseFieldError};
 pub use ids::{BookId, FileId, JobId};
 pub use tags::{TAG_PREFIX_DNA, TAG_PREFIX_GENRE, TAG_PREFIX_SPOILER, TagKind};
 pub use tunables::Tunables;
