@@ -19,9 +19,10 @@
 //!
 //! # Safety
 //!
-//! `#![forbid(unsafe_code)]` at the crate root is lifted *only* at
-//! FFI call sites with `#[expect(unsafe_code, reason = "…")]` and a
-//! `// SAFETY: …` comment explaining the invariant being upheld.
+//! `unsafe_code = "deny"` at the workspace level is lifted *only*
+//! at FFI call sites with `#[expect(unsafe_code, reason = "…")]`
+//! and a `// SAFETY: …` comment explaining the invariant being
+//! upheld.
 
 pub mod ffi;
 pub mod info;
