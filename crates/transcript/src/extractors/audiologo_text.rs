@@ -138,7 +138,7 @@ impl Extractor for AudiologoTextExtractor {
             if sig.phrases.iter().any(|p| lower.contains(p)) {
                 seen.push(sig.canonical);
                 out.push(Candidate {
-                    field: "publisher".into(),
+                    field: ab_core::Field::Publisher,
                     value: sig.canonical.to_owned(),
                     confidence: MATCH_CONFIDENCE,
                 });

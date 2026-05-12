@@ -444,7 +444,10 @@ mod tests {
         let client = AudnexusClient::new(&HttpClientTunables::default());
         let stage = AudnexusEnrichStage::new(client, &NetworkTunables::default());
         assert_eq!(stage.name(), "audnexus-enrich");
-        assert_eq!(stage.requires(), &[ab_tag_read::STAGE_ID, crate::audible_search::STAGE_ID]);
+        assert_eq!(
+            stage.requires(),
+            &[ab_tag_read::STAGE_ID, crate::audible_search::STAGE_ID]
+        );
     }
 
     #[test]

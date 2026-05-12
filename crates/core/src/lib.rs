@@ -13,6 +13,7 @@ pub mod build_info {
 
 pub mod cache;
 pub mod error;
+pub mod field;
 pub mod genre_code;
 pub mod ids;
 pub mod language_code;
@@ -23,6 +24,7 @@ pub mod tunables;
 
 pub use cache::CacheKey;
 pub use error::{Error, Result};
+pub use field::Field;
 pub use ids::{BookId, FileId, JobId};
 pub use tags::{TAG_PREFIX_DNA, TAG_PREFIX_GENRE, TAG_PREFIX_SPOILER, TagKind};
 pub use tunables::Tunables;

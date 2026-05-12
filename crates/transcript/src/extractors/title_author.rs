@@ -92,7 +92,7 @@ impl Extractor for TitleAuthorExtractor {
                 let name = sanitize_name(m.as_str());
                 if !name.is_empty() {
                     out.push(Candidate {
-                        field: "author".into(),
+                        field: ab_core::Field::Author,
                         value: name,
                         confidence: AUTHOR_CONFIDENCE,
                     });
@@ -104,7 +104,7 @@ impl Extractor for TitleAuthorExtractor {
                 let name = sanitize_name(m.as_str());
                 if !name.is_empty() {
                     out.push(Candidate {
-                        field: "narrator".into(),
+                        field: ab_core::Field::Narrator,
                         value: name,
                         confidence: NARRATOR_CONFIDENCE,
                     });
@@ -116,7 +116,7 @@ impl Extractor for TitleAuthorExtractor {
                 let title = sanitize_name(m.as_str());
                 if !title.is_empty() {
                     out.push(Candidate {
-                        field: "title".into(),
+                        field: ab_core::Field::Title,
                         value: title,
                         confidence: TITLE_CONFIDENCE,
                     });
@@ -192,7 +192,7 @@ fn this_is_title_regex() -> &'static Regex {
 mod tests {
     use super::*;
 
-    fn names(out: &[Candidate], field: &str) -> Vec<String> {
+    fn names(out: &[Candidate], field: ab_core::Field) -> Vec<String> {
         out.iter()
             .filter(|c| c.field == field)
             .map(|c| c.value.clone())
@@ -204,7 +204,7 @@ mod tests {
         let ex = TitleAuthorExtractor::new();
         let text = "Welcome to The Eyre Affair, by Jasper Fforde. Chapter one.";
         let out = ex.extract(text);
-        let authors = names(&out, "author");
+        let authors = names(&out, ab_core::Field::Author);
         assert!(authors.contains(&"Jasper Fforde".to_owned()), "{out:?}");
     }
 
@@ -213,8 +213,8 @@ mod tests {
         let ex = TitleAuthorExtractor::new();
         let text = "Read by Hugh Fraser. A Hercule Poirot mystery by Agatha Christie.";
         let out = ex.extract(text);
-        let narrators = names(&out, "narrator");
-        let authors = names(&out, "author");
+        let narrators = names(&out, ab_core::Field::Narrator);
+        let authors = names(&out, ab_core::Field::Author);
         assert!(narrators.contains(&"Hugh Fraser".to_owned()), "{out:?}");
         assert!(authors.contains(&"Agatha Christie".to_owned()), "{out:?}");
     }
@@ -224,7 +224,7 @@ mod tests {
         let ex = TitleAuthorExtractor::new();
         let text = "This is The Hobbit, by J.R.R. Tolkien.";
         let out = ex.extract(text);
-        let titles = names(&out, "title");
+        let titles = names(&out, ab_core::Field::Title);
         assert!(titles.contains(&"The Hobbit".to_owned()), "{out:?}");
     }
 
@@ -245,7 +245,7 @@ mod tests {
         let ex = TitleAuthorExtractor::new();
         let text = "By Author One. By Author Two. By Author Three. Read by Narrator Alpha. Read by Narrator Beta. Read by Narrator Gamma.";
         let out = ex.extract(text);
-        assert!(names(&out, "author").len() <= 2);
-        assert!(names(&out, "narrator").len() <= 2);
+        assert!(names(&out, ab_core::Field::Author).len() <= 2);
+        assert!(names(&out, ab_core::Field::Narrator).len() <= 2);
     }
 }

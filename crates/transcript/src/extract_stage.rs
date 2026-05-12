@@ -168,11 +168,12 @@ async fn write_candidate(
     candidate: &Candidate,
 ) -> Result<()> {
     let id = book_id.0;
+    let field_str = candidate.field.as_str();
     let exists = sqlx::query_scalar!(
         "SELECT 1 FROM book_field_provenance \
          WHERE book_id = ? AND field = ? AND value = ? AND source = ?",
         id,
-        candidate.field,
+        field_str,
         candidate.value,
         source,
     )
@@ -188,7 +189,7 @@ async fn write_candidate(
          (book_id, field, value, source, confidence, is_winner) \
          VALUES (?, ?, ?, ?, ?, 0)",
         id,
-        candidate.field,
+        field_str,
         candidate.value,
         source,
         conf,

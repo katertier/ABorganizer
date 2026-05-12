@@ -38,7 +38,7 @@
 
 use async_trait::async_trait;
 
-use ab_core::{BookId, Error, Result};
+use ab_core::{BookId, Error, Field, Result};
 use ab_pipeline::{Stage, StageContext, StageId, StageOutcome};
 
 /// Stage that picks winning candidates per field and updates `books`.
@@ -62,33 +62,34 @@ impl Default for ConsensusStage {
 /// Fields that consensus knows how to promote directly into the
 /// `books` table. Order is the iteration order at run time. The
 /// `target_column` doubles as the SQL column name; it's safe as
-/// long as we never accept user input here (this list is closed).
+/// long as we never accept user input here (this list is closed
+/// + the `provenance_field` is the typed `Field` enum).
 const PROMOTABLE_FIELDS: &[PromotableField] = &[
     PromotableField {
-        provenance_field: "title",
+        provenance_field: Field::Title,
         target_column: "title",
     },
     PromotableField {
-        provenance_field: "subtitle",
+        provenance_field: Field::Subtitle,
         target_column: "subtitle",
     },
     PromotableField {
-        provenance_field: "description",
+        provenance_field: Field::Description,
         target_column: "description",
     },
     PromotableField {
-        provenance_field: "language",
+        provenance_field: Field::Language,
         target_column: "language",
     },
     PromotableField {
-        provenance_field: "release_date",
+        provenance_field: Field::ReleaseDate,
         target_column: "release_date",
     },
 ];
 
 struct PromotableField {
-    /// `book_field_provenance.field` value.
-    provenance_field: &'static str,
+    /// `book_field_provenance.field` value (typed).
+    provenance_field: Field,
     /// Target column on `books`.
     target_column: &'static str,
 }
@@ -158,7 +159,7 @@ async fn promote_text_field(
     field: &PromotableField,
 ) -> Result<bool> {
     let id = book_id.0;
-    let provenance_field = field.provenance_field;
+    let provenance_field = field.provenance_field.as_str();
     let winner = sqlx::query!(
         r#"SELECT provenance_id AS "provenance_id!", value
            FROM book_field_provenance

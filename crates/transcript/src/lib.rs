@@ -61,9 +61,10 @@ pub trait Extractor: Send + Sync + 'static {
 /// A typed candidate value. Targets a single field on the book.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Candidate {
-    /// Field this candidate proposes a value for (`title`, `author`,
-    /// `narrator`, `language`, `publisher`).
-    pub field: String,
+    /// Field this candidate proposes a value for. Typed so an
+    /// extractor can't accidentally target a field that
+    /// consensus doesn't know about.
+    pub field: ab_core::Field,
     /// Proposed value.
     pub value: String,
     /// Confidence in `[0.0, 1.0]`.
