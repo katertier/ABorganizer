@@ -25,6 +25,8 @@ pub fn build_router(state: ApiState) -> Router {
             "/library/pending_speech_installs/retry",
             post(library_retry_failed_speech_installs),
         )
+        .route("/doctor/speech", get(doctor_speech))
+        .route("/doctor/speech/install", post(doctor_speech_install))
         .route("/books", get(books_list))
         .with_state(state)
 }
@@ -372,4 +374,228 @@ async fn books_list(State(state): State<ApiState>) -> Result<Json<BooksResponse>
         })
         .collect();
     Ok(Json(BooksResponse { books }))
+}
+
+// ── /doctor/speech ───────────────────────────────────────────────
+
+/// One locale's status as the doctor surfaces it. Combines:
+///
+/// - The library-side view (how many books need this locale).
+/// - The Speech-framework view (installed / supported / etc.).
+/// - The idle-installer view (any failed install with last error).
+#[derive(Serialize)]
+struct DoctorSpeechLocale {
+    /// BCP-47 primary subtag — e.g. `"en"`, `"de"`, `"zh-Hans"`.
+    locale: String,
+    /// Number of books in the library carrying this locale as a
+    /// language-provenance candidate.
+    library_books: i64,
+    /// Number of books whose `transcribe-head-tail` stage hit
+    /// `ModelNotInstalled` for this locale and is waiting.
+    blocked_books: i64,
+    /// `installed` / `supported` / `downloading` / `unsupported`
+    /// / `unknown` as reported by the Speech SDK. `null` when
+    /// the FFI bridge isn't linked (non-macOS / no-swiftc build).
+    sdk_status: Option<String>,
+    /// `true` only when `sdk_status == "installed"` — convenience
+    /// for clients that don't want to string-match.
+    sdk_installed: bool,
+    /// Idle-installer state if we've previously attempted:
+    /// `pending` / `installing` / `failed` / `null`.
+    idle_state: Option<String>,
+    /// Last install error from the idle installer, if any.
+    last_error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct DoctorSpeechResponse {
+    /// `false` when Apple Intelligence is disabled / not
+    /// provisioned on the host. When false, every per-locale
+    /// install will fail — the user fixes via System Settings
+    /// before retrying.
+    framework_available: bool,
+    /// Per-locale rows.
+    locales: Vec<DoctorSpeechLocale>,
+}
+
+/// `GET /api/v1/doctor/speech` — surface everything the doctor
+/// command needs to diagnose Speech-model state. Read-only.
+async fn doctor_speech(
+    State(state): State<ApiState>,
+) -> Result<Json<DoctorSpeechResponse>, ApiError> {
+    // Library-side: distinct languages we care about, with
+    // per-locale book counts.
+    let library_rows = sqlx::query!(
+        r#"SELECT value AS "locale!",
+                  COUNT(DISTINCT book_id) AS "n!"
+           FROM book_field_provenance
+           WHERE field = 'language' AND value IS NOT NULL
+           GROUP BY value
+           ORDER BY value"#,
+    )
+    .fetch_all(state.inner.library.pool())
+    .await
+    .map_err(|e| ab_core::Error::Database(format!("doctor lib langs: {e}")))?;
+
+    // Idle-installer side: pending / installing / failed rows
+    // (we don't surface "installed" — those are cleaned up).
+    let ephem_rows = sqlx::query!(
+        r#"SELECT p.locale,
+                  p.status,
+                  p.last_error,
+                  (SELECT COUNT(*) FROM book_locale_blocks b
+                   WHERE b.locale = p.locale) AS "blocked!: i64"
+           FROM pending_speech_installs p
+           WHERE p.status IN ('pending', 'installing', 'failed')"#,
+    )
+    .fetch_all(state.inner.ephemeral.pool())
+    .await
+    .map_err(|e| ab_core::Error::Database(format!("doctor pending: {e}")))?;
+
+    // Merge: union of all locales seen in either source.
+    let mut locales: std::collections::BTreeMap<String, DoctorSpeechLocale> =
+        std::collections::BTreeMap::new();
+    for r in library_rows {
+        locales.insert(
+            r.locale.clone(),
+            DoctorSpeechLocale {
+                locale: r.locale,
+                library_books: r.n,
+                blocked_books: 0,
+                sdk_status: None,
+                sdk_installed: false,
+                idle_state: None,
+                last_error: None,
+            },
+        );
+    }
+    for r in ephem_rows {
+        let row = locales
+            .entry(r.locale.clone())
+            .or_insert_with(|| DoctorSpeechLocale {
+                locale: r.locale.clone(),
+                library_books: 0,
+                blocked_books: 0,
+                sdk_status: None,
+                sdk_installed: false,
+                idle_state: None,
+                last_error: None,
+            });
+        row.blocked_books = r.blocked;
+        row.idle_state = Some(r.status);
+        row.last_error = r.last_error;
+    }
+
+    // SDK side: query each locale's status via the typed FFI.
+    // First query establishes `framework_available`; that flag
+    // is the same across all locales (it's a host-wide gate).
+    let mut framework_available = true;
+    for row in locales.values_mut() {
+        match ab_transcript::speech_locale_status(&row.locale).await {
+            Ok(report) => {
+                framework_available = framework_available && report.framework_available;
+                row.sdk_installed = report.status == "installed";
+                row.sdk_status = Some(report.status);
+            }
+            Err(e) => {
+                tracing::warn!(locale = %row.locale, error = %e, "doctor.speech_status_failed");
+                // Best-effort: leave sdk_* fields as-is (None
+                // / false). UI shows "?" for unknown.
+            }
+        }
+    }
+
+    Ok(Json(DoctorSpeechResponse {
+        framework_available,
+        locales: locales.into_values().collect(),
+    }))
+}
+
+/// Body for `POST /api/v1/doctor/speech/install`.
+///
+/// Exactly one of `locale` / `all` must be set. The
+/// `untagged` enum form gives clients a clean shape:
+/// `{"locale": "de"}` or `{"all": true}`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum DoctorSpeechInstallRequest {
+    Locale {
+        /// Canonical BCP-47 form, primary subtag suffices
+        /// (`"de"`, `"en"`, `"zh-Hans"`).
+        locale: String,
+    },
+    All {
+        /// When `true`, install every locale that currently has
+        /// books in the library AND whose SDK status isn't
+        /// already `installed`. Idempotent: locales already
+        /// installed are skipped, not re-downloaded.
+        #[serde(rename = "all")]
+        _all: bool,
+    },
+}
+
+#[derive(Serialize)]
+struct DoctorSpeechInstallResponse {
+    /// Locales newly installed by this call.
+    installed: Vec<String>,
+    /// Locales already installed when we checked — no work done.
+    already_installed: Vec<String>,
+    /// Locales whose install failed; pair `(locale, reason)`.
+    failed: Vec<(String, String)>,
+}
+
+/// `POST /api/v1/doctor/speech/install`. Body is a
+/// [`DoctorSpeechInstallRequest`].
+async fn doctor_speech_install(
+    State(state): State<ApiState>,
+    Json(req): Json<DoctorSpeechInstallRequest>,
+) -> Result<Json<DoctorSpeechInstallResponse>, ApiError> {
+    let locales: Vec<String> = match req {
+        DoctorSpeechInstallRequest::Locale { locale } => vec![locale],
+        DoctorSpeechInstallRequest::All { .. } => {
+            // Every locale that has a library candidate row.
+            sqlx::query_scalar!(
+                r#"SELECT DISTINCT value AS "v!"
+                   FROM book_field_provenance
+                   WHERE field = 'language' AND value IS NOT NULL"#,
+            )
+            .fetch_all(state.inner.library.pool())
+            .await
+            .map_err(|e| ab_core::Error::Database(format!("doctor all locales: {e}")))?
+        }
+    };
+
+    let mut installed = Vec::new();
+    let mut already_installed = Vec::new();
+    let mut failed: Vec<(String, String)> = Vec::new();
+    for locale in &locales {
+        // Skip when already installed — saves the round trip.
+        match ab_transcript::speech_locale_status(locale).await {
+            Ok(report) if report.status == "installed" => {
+                already_installed.push(locale.clone());
+                continue;
+            }
+            Ok(_) => { /* fall through to install */ }
+            Err(e) => {
+                failed.push((locale.clone(), format!("status check: {e}")));
+                continue;
+            }
+        }
+        match ab_transcript::install_speech_model_typed(locale).await {
+            Ok(()) => installed.push(locale.clone()),
+            Err(e) => failed.push((locale.clone(), e.to_string())),
+        }
+    }
+
+    tracing::info!(
+        installed = installed.len(),
+        skipped = already_installed.len(),
+        failed = failed.len(),
+        "doctor.speech_install.done"
+    );
+    Ok(Json(DoctorSpeechInstallResponse {
+        installed,
+        already_installed,
+        failed,
+    }))
 }

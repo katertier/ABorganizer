@@ -479,6 +479,84 @@ private func runInstallModel(localeStr: String) async throws {
     }
 }
 
+// MARK: - Locale status query
+
+// Used by `aborg doctor` to surface per-locale install state
+// without committing to an install. Returns JSON
+// `{"framework_available": bool, "locale_supported": bool,
+//   "status": "installed"|"supported"|"downloading"|"unsupported"|"unknown"}`.
+//
+// `framework_available = false` means Apple Intelligence is
+// disabled in System Settings; in that case the other fields
+// are still populated with whatever the SDK reports but the
+// doctor presents the framework-unavailable diagnosis first.
+
+@available(macOS 26.0, *)
+private struct AborgLocaleStatus: Codable {
+    let framework_available: Bool
+    let locale_supported: Bool
+    let status: String
+}
+
+@available(macOS 26.0, *)
+private func runLocaleStatus(localeStr: String) async -> AborgLocaleStatus {
+    let frameworkOK = SpeechTranscriber.isAvailable
+    let requested = Locale(identifier: localeStr)
+    let supported = await SpeechTranscriber.supportedLocale(equivalentTo: requested)
+    let supportedFlag = supported != nil
+    let status: String
+    if let s = supported {
+        let transcriber = SpeechTranscriber(
+            locale: s,
+            transcriptionOptions: [],
+            reportingOptions: [],
+            attributeOptions: [.audioTimeRange, .transcriptionConfidence]
+        )
+        let inv = await AssetInventory.status(forModules: [transcriber])
+        status = switch inv {
+        case .installed: "installed"
+        case .downloading: "downloading"
+        case .supported: "supported"
+        case .unsupported: "unsupported"
+        @unknown default: "unknown"
+        }
+    } else {
+        status = "unsupported"
+    }
+    return AborgLocaleStatus(
+        framework_available: frameworkOK,
+        locale_supported: supportedFlag,
+        status: status
+    )
+}
+
+@_cdecl("aborg_speech_locale_status")
+public func aborg_speech_locale_status(
+    _ locale: UnsafePointer<CChar>?,
+    _ ctx: UnsafeMutableRawPointer?,
+    _ callback: @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?, Int, Int32) -> Void
+) {
+    let localeStr = locale.flatMap { String(validatingCString: $0) } ?? "en-US"
+    guard #available(macOS 26.0, *) else {
+        callback(ctx, nil, 0, kErrCodeFrameworkUnavailable)
+        return
+    }
+    Task {
+        let report = await runLocaleStatus(localeStr: localeStr)
+        do {
+            let data = try JSONEncoder().encode(report)
+            data.withUnsafeBytes { rawBuf in
+                let base = rawBuf.baseAddress?.assumingMemoryBound(to: CChar.self)
+                callback(ctx, base, data.count, kErrCodeOK)
+            }
+        } catch {
+            let msg = "aborg_speech_locale_status encode error: \(error)\n"
+            FileHandle.standardError.write(msg.data(using: .utf8) ?? Data())
+            callback(ctx, nil, 0, kErrCodeEncodeFailure)
+        }
+    }
+}
+
 @_cdecl("aborg_install_speech_model")
 public func aborg_install_speech_model(
     _ locale: UnsafePointer<CChar>?,

@@ -36,8 +36,8 @@ pub use samples_stage::{
 };
 
 pub use bridge::{
-    BridgeError, TranscriptSegment, install_speech_model, install_speech_model_typed,
-    transcribe_window, transcribe_window_typed,
+    BridgeError, LocaleStatusReport, TranscriptSegment, install_speech_model,
+    install_speech_model_typed, speech_locale_status, transcribe_window, transcribe_window_typed,
 };
 pub use language::{
     LanguageDetection, LanguageHit, detect as detect_language, detect_from_transcript,

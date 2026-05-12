@@ -128,6 +128,28 @@ impl From<BridgeError> for Error {
     }
 }
 
+/// Per-locale Speech-model status report returned by
+/// [`speech_locale_status`]. The doctor command uses this to
+/// surface install / availability state to the user.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct LocaleStatusReport {
+    /// `false` when Apple Intelligence is disabled in System
+    /// Settings or otherwise unavailable on the host. When
+    /// false, the other fields still reflect what the SDK
+    /// reports but the doctor presents the framework-
+    /// unavailable diagnosis first.
+    pub framework_available: bool,
+    /// `true` when `SpeechTranscriber.supportedLocale` returns
+    /// a non-nil mapping for the input locale. `false` means
+    /// the SDK doesn't know this locale at all.
+    pub locale_supported: bool,
+    /// One of `"installed"` / `"supported"` (=available for
+    /// download) / `"downloading"` / `"unsupported"` /
+    /// `"unknown"`. Mirrors the `AssetInventory.Status` enum
+    /// in the Speech framework.
+    pub status: String,
+}
+
 /// One transcribed segment.
 ///
 /// Sentence-level when the engine returns sentence boundaries;
@@ -189,6 +211,11 @@ mod ffi {
             ctx: *mut c_void,
             callback: unsafe extern "C" fn(*mut c_void, *const c_char, usize, i32),
         );
+        fn aborg_speech_locale_status(
+            locale: *const c_char,
+            ctx: *mut c_void,
+            callback: unsafe extern "C" fn(*mut c_void, *const c_char, usize, i32),
+        );
     }
 
     /// C ABI callback. Recovers the boxed sender, copies the
@@ -212,6 +239,31 @@ mod ffi {
             Some(slice.to_vec())
         };
         let _ = sender.send(FfiResult { code, buffer });
+    }
+
+    pub(super) async fn locale_status_impl(
+        locale: &str,
+    ) -> Result<super::LocaleStatusReport, BridgeError> {
+        let locale_c = std::ffi::CString::new(locale)
+            .map_err(|e| BridgeError::NulInInput(format!("locale: {e}")))?;
+        let (tx, rx) = oneshot::channel::<FfiResult>();
+        let ctx = Box::into_raw(Box::new(tx)).cast::<c_void>();
+        // SAFETY: `locale_c` outlives the synchronous Swift call;
+        // the Swift Task fires on_result exactly once.
+        unsafe {
+            aborg_speech_locale_status(locale_c.as_ptr(), ctx, on_result);
+        }
+        let res = rx.await.map_err(|_| BridgeError::CallbackDropped)?;
+        if res.code != 0 {
+            return Err(BridgeError::from_code(res.code));
+        }
+        let bytes = res
+            .buffer
+            .ok_or_else(|| BridgeError::InvalidPayload("OK code but null buffer".into()))?;
+        let s = std::str::from_utf8(&bytes)
+            .map_err(|e| BridgeError::InvalidPayload(format!("non-utf8: {e}")))?;
+        serde_json::from_str::<super::LocaleStatusReport>(s)
+            .map_err(|e| BridgeError::PayloadParse(format!("locale-status: {e}")))
     }
 
     pub(super) async fn install_speech_model_impl(locale: &str) -> Result<(), BridgeError> {
@@ -279,19 +331,38 @@ mod ffi {
     }
 }
 
-/// Ensure the on-device Speech model for `locale` is installed.
-/// Idempotent: returns Ok immediately if already installed.
+/// Query the Speech-model install state for a single locale.
 ///
-/// First-time installs can take multiple minutes — the daemon
-/// should call this at Idle priority (or behind an explicit user
-/// action), not in the middle of an interactive transcribe.
+/// Used by `aborg doctor` to surface per-locale install state
+/// without committing to an install (which can take minutes
+/// the first time). Returns a [`LocaleStatusReport`] describing
+/// the framework availability + locale support + install
+/// status.
 ///
 /// # Errors
 ///
-/// - [`BridgeError::BridgeUnavailable`] on non-macOS / no-swiftc
-///   builds.
-/// - [`BridgeError::LocaleUnsupported`] / `FrameworkUnavailable`
-///   / `ModelNotInstalled` etc. with the engine's verdict.
+/// See [`BridgeError`] for the variants.
+pub async fn speech_locale_status(locale: &str) -> Result<LocaleStatusReport, BridgeError> {
+    #[cfg(aborg_ai_bridge)]
+    {
+        ffi::locale_status_impl(locale).await
+    }
+    #[cfg(not(aborg_ai_bridge))]
+    {
+        let _ = locale;
+        Err(BridgeError::BridgeUnavailable)
+    }
+}
+
+/// Typed variant of [`install_speech_model`].
+///
+/// Returns the raw [`BridgeError`] enum so callers (e.g. the
+/// doctor command) can branch on `FrameworkUnavailable` vs.
+/// `LocaleUnsupported` without parsing strings.
+///
+/// # Errors
+///
+/// See [`BridgeError`].
 pub async fn install_speech_model_typed(locale: &str) -> Result<(), BridgeError> {
     #[cfg(aborg_ai_bridge)]
     {

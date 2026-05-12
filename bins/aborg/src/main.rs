@@ -6,7 +6,10 @@
 //!
 //! Noun-verb structure: `aborg book list`, `aborg library scan`, etc.
 
-#![allow(missing_docs)]
+// xtask: allow_macros — `aborg` is a user-facing CLI; formatted
+// table / JSON output goes via println! to stdout. tracing
+// fields don't render as nicely for human-readable diagnosis.
+#![allow(missing_docs, clippy::print_stdout)]
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -73,8 +76,11 @@ enum Command {
         #[command(subcommand)]
         action: DaemonAction,
     },
-    /// Diagnostics (read-only health checks).
-    Doctor,
+    /// Diagnostics + repair commands.
+    Doctor {
+        #[command(subcommand)]
+        action: Option<DoctorAction>,
+    },
     /// Show daemon health.
     Health,
 }
@@ -98,6 +104,27 @@ enum BookAction {
     List,
     /// Show details of one book (not yet implemented).
     Show { id: i64 },
+}
+
+#[derive(Debug, Subcommand)]
+enum DoctorAction {
+    /// Diagnose Speech / Apple Intelligence state for the
+    /// languages the library needs.
+    Speech,
+    /// Install on-device Speech models. Use `--language <bcp47>`
+    /// for one locale, or `--all` for every locale the library
+    /// needs that isn't already installed. Pre-import: use
+    /// `--language` to install ahead of time.
+    Install {
+        /// BCP-47 primary subtag — `de`, `en`, `zh-Hans`, etc.
+        /// Mutually exclusive with `--all`.
+        #[arg(long, conflicts_with = "all")]
+        language: Option<String>,
+        /// Install every locale the library currently needs
+        /// that isn't already installed.
+        #[arg(long, conflicts_with = "language")]
+        all: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -136,7 +163,13 @@ async fn main() -> Result<()> {
         Command::Daemon { action: _ } => {
             tracing::warn!("daemon control not yet implemented in slice 1A");
         }
-        Command::Doctor => tracing::warn!("doctor not yet implemented"),
+        Command::Doctor { action } => match action {
+            // Default: print the speech diagnosis.
+            None | Some(DoctorAction::Speech) => doctor_speech(&cli.daemon, cli.output).await?,
+            Some(DoctorAction::Install { language, all }) => {
+                doctor_speech_install(&cli.daemon, language, all, cli.output).await?;
+            }
+        },
         Command::Health => health(&cli.daemon, cli.output).await?,
     }
     Ok(())
@@ -367,4 +400,157 @@ fn init_tracing(quiet: bool, verbose: u8) {
         .with_target(false)
         .with_writer(std::io::stderr)
         .init();
+}
+
+// ── Doctor: speech ───────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct DoctorSpeechLocale {
+    locale: String,
+    library_books: i64,
+    blocked_books: i64,
+    sdk_status: Option<String>,
+    sdk_installed: bool,
+    idle_state: Option<String>,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DoctorSpeechResponse {
+    framework_available: bool,
+    locales: Vec<DoctorSpeechLocale>,
+}
+
+async fn doctor_speech(daemon: &str, output: OutputFormat) -> Result<()> {
+    let url = format!("{daemon}/api/v1/doctor/speech");
+    let resp: DoctorSpeechResponse = client()
+        .get(&url)
+        .send()
+        .await
+        .context("fetch doctor/speech")?
+        .error_for_status()?
+        .json()
+        .await
+        .context("decode doctor/speech")?;
+
+    if matches!(output, OutputFormat::Json) {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "framework_available": resp.framework_available,
+                "locales": resp.locales.iter().map(|l| serde_json::json!({
+                    "locale": l.locale,
+                    "library_books": l.library_books,
+                    "blocked_books": l.blocked_books,
+                    "sdk_status": l.sdk_status,
+                    "sdk_installed": l.sdk_installed,
+                    "idle_state": l.idle_state,
+                    "last_error": l.last_error,
+                })).collect::<Vec<_>>(),
+            }))?
+        );
+        return Ok(());
+    }
+
+    // Table form.
+    println!(
+        "Apple Intelligence: {}",
+        if resp.framework_available {
+            "available"
+        } else {
+            "UNAVAILABLE — enable in System Settings → Privacy & Security → Apple Intelligence"
+        }
+    );
+    if resp.locales.is_empty() {
+        println!("\nNo language candidates in library yet. Use:");
+        println!("  aborg doctor install --language <bcp47>");
+        println!("to install a model in advance of importing books.");
+        return Ok(());
+    }
+    println!(
+        "\n{:<10} {:>5} {:>7} {:<14} {:<14}",
+        "Locale", "Books", "Blocked", "SDK Status", "Idle State"
+    );
+    println!("{}", "-".repeat(60));
+    for l in &resp.locales {
+        println!(
+            "{:<10} {:>5} {:>7} {:<14} {:<14}",
+            l.locale,
+            l.library_books,
+            l.blocked_books,
+            l.sdk_status.as_deref().unwrap_or("?"),
+            l.idle_state.as_deref().unwrap_or("—"),
+        );
+        if let Some(err) = &l.last_error {
+            println!("  ↳ last error: {err}");
+        }
+    }
+    let needs_install: Vec<&DoctorSpeechLocale> =
+        resp.locales.iter().filter(|l| !l.sdk_installed).collect();
+    if !needs_install.is_empty() {
+        println!("\n{} locale(s) need install. Run:", needs_install.len());
+        println!("  aborg doctor install --all");
+        println!("Or for one:");
+        if let Some(first) = needs_install.first() {
+            println!("  aborg doctor install --language {}", first.locale);
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct DoctorSpeechInstallResponse {
+    installed: Vec<String>,
+    already_installed: Vec<String>,
+    failed: Vec<(String, String)>,
+}
+
+async fn doctor_speech_install(
+    daemon: &str,
+    language: Option<String>,
+    all: bool,
+    output: OutputFormat,
+) -> Result<()> {
+    if language.is_none() && !all {
+        anyhow::bail!("specify --language <bcp47> or --all");
+    }
+    let url = format!("{daemon}/api/v1/doctor/speech/install");
+    let body = language.map_or_else(
+        || serde_json::json!({"all": true}),
+        |lang| serde_json::json!({"locale": lang}),
+    );
+    let resp: DoctorSpeechInstallResponse = client()
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .context("post doctor/speech/install")?
+        .error_for_status()?
+        .json()
+        .await
+        .context("decode doctor/speech/install")?;
+
+    if matches!(output, OutputFormat::Json) {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+    if !resp.installed.is_empty() {
+        println!("Installed: {}", resp.installed.join(", "));
+    }
+    if !resp.already_installed.is_empty() {
+        println!(
+            "Already installed (skipped): {}",
+            resp.already_installed.join(", ")
+        );
+    }
+    if !resp.failed.is_empty() {
+        println!("Failed:");
+        for (loc, err) in &resp.failed {
+            println!("  {loc}: {err}");
+        }
+    }
+    if resp.installed.is_empty() && resp.failed.is_empty() {
+        println!("Nothing to do.");
+    }
+    Ok(())
 }

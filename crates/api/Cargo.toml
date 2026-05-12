@@ -17,6 +17,7 @@ ab-db           = { workspace = true }
 ab-fingerprint  = { workspace = true }
 ab-pipeline     = { workspace = true }
 ab-scan         = { workspace = true }
+ab-transcript   = { workspace = true }
 axum        = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }

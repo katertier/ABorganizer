@@ -112,7 +112,8 @@ pub fn format_datetime(unix_secs: i64, locale: &str, style: DateStyle) -> String
 /// use ab_core::time_format::format_integer;
 /// assert_eq!(format_integer(1_234_567, "en"), "1,234,567");
 /// assert_eq!(format_integer(1_234_567, "de"), "1.234.567");
-/// assert_eq!(format_integer(1_234_567, "fr"), "1 234 567");
+/// // French uses U+202F (narrow no-break space) per ISO 31-0.
+/// assert_eq!(format_integer(1_234_567, "fr"), "1\u{202f}234\u{202f}567");
 /// ```
 #[must_use]
 pub fn format_integer(value: i64, locale: &str) -> String {
