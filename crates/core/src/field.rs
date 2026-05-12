@@ -187,11 +187,7 @@ pub struct ParseFieldError(pub String);
 
 impl std::fmt::Display for ParseFieldError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "unknown book_field_provenance.field value: {:?}",
-            self.0
-        )
+        write!(f, "unknown book_field_provenance.field value: {:?}", self.0)
     }
 }
 

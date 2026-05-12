@@ -140,12 +140,8 @@ async fn process_one_file(
             // Field variant goes through the
             // `book_field_provenance` scalar path.
             let result = match candidate.field {
-                Field::Series => {
-                    write_series_candidate(library, book_id, &candidate.value).await
-                }
-                _ => {
-                    write_provenance(library, book_id, candidate.field, &candidate.value).await
-                }
+                Field::Series => write_series_candidate(library, book_id, &candidate.value).await,
+                _ => write_provenance(library, book_id, candidate.field, &candidate.value).await,
             };
             if let Err(e) = result {
                 tracing::warn!(

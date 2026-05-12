@@ -157,12 +157,7 @@ impl Scheduler {
     ///
     /// Returns an error if the channel is closed (scheduler shutting
     /// down).
-    pub async fn submit(
-        &self,
-        book_id: BookId,
-        stage: StageId,
-        priority: Priority,
-    ) -> Result<()> {
+    pub async fn submit(&self, book_id: BookId, stage: StageId, priority: Priority) -> Result<()> {
         let job = Job {
             book_id,
             stage,

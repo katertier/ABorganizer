@@ -258,7 +258,10 @@ async fn resolve_series(
         }
         let key = trimmed.to_lowercase();
         let primary = r.is_primary != 0;
-        if let Some(existing) = groups.iter_mut().find(|g| g.display_name.eq_ignore_ascii_case(trimmed)) {
+        if let Some(existing) = groups
+            .iter_mut()
+            .find(|g| g.display_name.eq_ignore_ascii_case(trimmed))
+        {
             // Higher-confidence row was already seen (rows arrive
             // confidence-DESC). Fill in pieces it lacks.
             if existing.asin.is_none() {

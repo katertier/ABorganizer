@@ -107,12 +107,11 @@ async fn audnexus_only_seeds_series_and_book_series() {
     let stage = IdentityResolveStage::new();
     stage.run(&ctx, BookId(1)).await.expect("identity run");
 
-    let (series_id, name, audible_id): (i64, String, Option<String>) = sqlx::query_as(
-        "SELECT series_id, name, audible_id FROM series WHERE name = 'Mistborn'",
-    )
-    .fetch_one(library.pool())
-    .await
-    .expect("read series");
+    let (series_id, name, audible_id): (i64, String, Option<String>) =
+        sqlx::query_as("SELECT series_id, name, audible_id FROM series WHERE name = 'Mistborn'")
+            .fetch_one(library.pool())
+            .await
+            .expect("read series");
     assert_eq!(name, "Mistborn");
     assert_eq!(audible_id.as_deref(), Some("B0SERIES1"));
 
@@ -142,7 +141,10 @@ async fn tag_only_seeds_by_name() {
             .fetch_one(library.pool())
             .await
             .expect("read series");
-    assert!(audible_id.is_none(), "tag-only seed must not set audible_id");
+    assert!(
+        audible_id.is_none(),
+        "tag-only seed must not set audible_id"
+    );
 
     let (position, is_primary): (Option<f64>, i64) = sqlx::query_as(
         "SELECT position, is_primary FROM book_series \
@@ -161,7 +163,17 @@ async fn audnexus_and_tag_for_same_series_merge_into_one_row() {
     let (ctx, library) = fresh_ctx(tmp.path()).await;
     seed_book(&library, 1).await;
     // Tag fires first (lower confidence, no ASIN, no position).
-    insert_candidate(&library, 1, "tag_file", "Stormlight Archive", None, None, 1, 0.7).await;
+    insert_candidate(
+        &library,
+        1,
+        "tag_file",
+        "Stormlight Archive",
+        None,
+        None,
+        1,
+        0.7,
+    )
+    .await;
     // Audnexus fires after (higher confidence, with ASIN + position).
     insert_candidate(
         &library,
@@ -195,7 +207,11 @@ async fn audnexus_and_tag_for_same_series_merge_into_one_row() {
     .fetch_one(library.pool())
     .await
     .expect("read merged row");
-    assert_eq!(audible_id.as_deref(), Some("B0SERIES2"), "ASIN from Audnexus");
+    assert_eq!(
+        audible_id.as_deref(),
+        Some("B0SERIES2"),
+        "ASIN from Audnexus"
+    );
     assert_eq!(position, Some(2.0), "position from Audnexus");
 }
 
@@ -265,11 +281,10 @@ async fn rerun_is_idempotent() {
     stage.run(&ctx, BookId(1)).await.expect("second run");
     stage.run(&ctx, BookId(1)).await.expect("third run");
 
-    let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM book_series WHERE book_id = 1")
-            .fetch_one(library.pool())
-            .await
-            .expect("count book_series");
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM book_series WHERE book_id = 1")
+        .fetch_one(library.pool())
+        .await
+        .expect("count book_series");
     assert_eq!(count, 1, "re-run must not duplicate book_series rows");
 }
 
@@ -279,17 +294,7 @@ async fn asin_backfills_name_matched_existing_row() {
     let (ctx, library) = fresh_ctx(tmp.path()).await;
     seed_book(&library, 1).await;
     // First: tag-only insert creates the series row WITHOUT audible_id.
-    insert_candidate(
-        &library,
-        1,
-        "tag_file",
-        "Dune",
-        None,
-        None,
-        1,
-        0.7,
-    )
-    .await;
+    insert_candidate(&library, 1, "tag_file", "Dune", None, None, 1, 0.7).await;
     let stage = IdentityResolveStage::new();
     stage.run(&ctx, BookId(1)).await.expect("first run");
 
@@ -314,5 +319,9 @@ async fn asin_backfills_name_matched_existing_row() {
             .fetch_one(library.pool())
             .await
             .expect("read series");
-    assert_eq!(audible_id.as_deref(), Some("B0DUNE"), "back-fill on existing row");
+    assert_eq!(
+        audible_id.as_deref(),
+        Some("B0DUNE"),
+        "back-fill on existing row"
+    );
 }
