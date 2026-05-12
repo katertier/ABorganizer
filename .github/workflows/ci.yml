@@ -39,7 +39,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      # `prefix-key: v1-rust` invalidates the prior `v0-rust-clippy-…`
+      # cache that PR #28 hit. The corrupted-cache symptom was
+      # `cargo clippy …` failing with
+      #   error: unexpected argument 'clippy' found
+      #   Usage: rustup-init[EXE] [OPTIONS]
+      # — i.e. the restored `~/.cargo/bin/cargo` was actually
+      # `rustup-init`. Bumping the prefix forces a fresh cache on
+      # the first run after this lands; subsequent runs hit the
+      # `v1-rust-clippy-…` keyspace and stay green.
       - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-rust"
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
