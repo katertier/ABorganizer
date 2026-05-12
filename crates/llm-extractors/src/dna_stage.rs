@@ -8,7 +8,7 @@
 //!    excerpt, return a JSON object with two arrays: `dna_tags`
 //!    (safe-to-display thematic tags) and `spoiler_tags`
 //!    (plot-revealing tags)."
-//! 3. Calls [`crate::complete`] (the Foundation Models bridge)
+//! 3. Calls [`ab_foundation_models::complete`] (the Foundation Models bridge)
 //!    against Apple Intelligence's on-device LLM.
 //! 4. Parses the JSON, applies the configured per-category
 //!    caps, and writes one row per tag to `book_tags` with
@@ -48,7 +48,7 @@ use ab_core::{BookId, Error, Result};
 use ab_db::LibraryDb;
 use ab_pipeline::{Stage, StageContext, StageOutcome};
 
-use crate::{BridgeError, complete};
+use ab_foundation_models::{BridgeError, complete};
 
 /// Stage name written to `pipeline_progress` and registered with
 /// the daemon scheduler.

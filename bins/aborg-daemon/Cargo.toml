@@ -32,6 +32,7 @@ ab-shelf        = { workspace = true }
 ab-tag-read     = { workspace = true }
 ab-transcript   = { workspace = true }
 ab-foundation-models = { workspace = true }
+ab-llm-extractors = { workspace = true }
 ab-webui-config = { workspace = true }
 ab-webui-player = { workspace = true }
 ab-seed         = { workspace = true }

@@ -123,7 +123,20 @@ name = "ab-foundation-models"
 version = "0.1.0"
 dependencies = [
  "ab-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ab-llm-extractors"
+version = "0.1.0"
+dependencies = [
+ "ab-core",
  "ab-db",
+ "ab-foundation-models",
  "ab-pipeline",
  "async-trait",
  "serde",
@@ -291,6 +304,7 @@ dependencies = [
  "ab-db",
  "ab-fingerprint",
  "ab-foundation-models",
+ "ab-llm-extractors",
  "ab-pipeline",
  "ab-seed",
  "ab-shelf",

@@ -1,6 +1,9 @@
 //! Apple Intelligence Foundation Models bridge.
 //!
-//! Thin wrapper over the Swift FFI in `swift/aborg_fm.swift`.
+//! Thin Rust wrapper over the Swift FFI in
+//! `swift/aborg_fm.swift`, compiled to a static lib by
+//! `build.rs` and linked in at build time.
+//!
 //! Two public surfaces:
 //!
 //! 1. [`status`] — checks whether the on-device model is usable
@@ -23,17 +26,15 @@
 //!
 //! The build script (`build.rs`) emits `cfg(aborg_fm_bridge)`
 //! when the static lib is produced; otherwise the Rust impls
-//! degrade to `Err(BridgeUnavailable)` at runtime, matching the
-//! pattern in `ab-transcript`.
+//! degrade to `Err(BridgeUnavailable)` at runtime.
+//!
+//! No `ab-db` / `ab-pipeline` deps — pipeline stages that
+//! consume this surface live in [`ab_llm_extractors`]. The
+//! separation is the point of this crate: a CLI tool or test
+//! harness can call `complete()` without dragging the SQL
+//! machinery in.
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
-
-pub mod dna_stage;
-
-pub use dna_stage::{
-    CACHE_TYPE_DNA, ExtractDnaTagsStage, STAGE_NAME as EXTRACT_DNA_TAGS_STAGE, TAG_SOURCE_DNA_LLM,
-    build_prompt as build_dna_prompt, normalise_tag,
-};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

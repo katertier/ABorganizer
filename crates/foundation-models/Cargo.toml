@@ -6,23 +6,19 @@ rust-version = { workspace = true }
 license      = { workspace = true }
 authors      = { workspace = true }
 repository   = { workspace = true }
-description  = "Apple Intelligence Foundation Models bridge: prompt → text completion via the on-device LLM. Typed errors over the Swift FFI; used by extractor stages for DNA tags, spoiler-free summaries, story arcs, and character lists."
+description  = "Apple Intelligence Foundation Models bridge: prompt → text completion via the on-device LLM (macOS 26+). Typed errors, async wrappers. No DB / pipeline dependencies — pipeline stages that consume this surface live in ab-llm-extractors."
 build        = "build.rs"
 
 [lints]
 workspace = true
 
 [dependencies]
-ab-core     = { workspace = true }
-ab-db       = { workspace = true }
-ab-pipeline = { workspace = true }
-async-trait = { workspace = true }
-serde       = { workspace = true }
-serde_json  = { workspace = true }
-sqlx        = { workspace = true }
-thiserror   = { workspace = true }
-tokio       = { workspace = true }
-tracing     = { workspace = true }
+ab-core    = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+thiserror  = { workspace = true }
+tokio      = { workspace = true }
+tracing    = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
