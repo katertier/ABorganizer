@@ -14,6 +14,9 @@
 //!   `!`-prefixed spoiler tags into `book_tags`.
 //! - [`ExtractSummaryStage`] — spoiler-free book summary into
 //!   `books.summary_spoiler_free` + `_lang`.
+//! - [`ExtractSeriesSummaryStage`] — spoiler-free series synopsis
+//!   into `series.summary` + `_lang` (regenerated when a book
+//!   joins a series or member-book summaries change).
 //!
 //! Planned (slices 3K.5 / 3K.6):
 //!
@@ -33,11 +36,16 @@
 //! same pattern in slice C5.7.d.
 
 pub mod dna_stage;
+pub mod series_summary_stage;
 pub mod summary_stage;
 
 pub use dna_stage::{
     DNA_SCHEMA_JSON, ExtractDnaTagsStage, STAGE_NAME as EXTRACT_DNA_TAGS_STAGE, TAG_SOURCE_DNA_LLM,
     build_prompt as build_dna_prompt, normalise_tag,
+};
+pub use series_summary_stage::{
+    ExtractSeriesSummaryStage, SERIES_SUMMARY_SCHEMA_JSON,
+    STAGE_NAME as EXTRACT_SERIES_SUMMARY_STAGE,
 };
 pub use summary_stage::{
     ExtractSummaryStage, STAGE_NAME as EXTRACT_SUMMARY_STAGE, SUMMARY_SCHEMA_JSON,

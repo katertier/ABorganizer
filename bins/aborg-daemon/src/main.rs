@@ -158,6 +158,18 @@ fn build_pipeline_stages(tunables: &Tunables) -> Vec<Arc<dyn Stage>> {
         // policy — library_locale is reserved for genre
         // vocabulary).
         Arc::new(ab_llm_extractors::ExtractSummaryStage::new(&tunables.llm)),
+        // `extract-summary-spoiler-free-series` (slice 3K.4.1) —
+        // per-series spoiler-free synopsis, regenerated when a
+        // book completes its own summary AND identity-resolve
+        // writes a `book_series` row. Picks the predominant
+        // `books.language` across the series' books as the
+        // output locale (ADR-0019). No `ai_cache` row — uses
+        // the `series.summary_extractor_version` column added
+        // by migration 007 for freshness.
+        Arc::new(ab_llm_extractors::ExtractSeriesSummaryStage::new(
+            &tunables.llm,
+            &tunables.library_display,
+        )),
     ]
 }
 

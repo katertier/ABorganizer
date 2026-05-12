@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT series_id FROM book_series WHERE book_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "series_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "78d029286f972fafe4768940c7f2564409c0237b580398a2572c43e17f1f7761"
+}

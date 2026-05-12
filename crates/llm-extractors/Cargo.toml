@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 ab-core              = { workspace = true }
+ab-catalog           = { workspace = true }
 ab-db                = { workspace = true }
 ab-foundation-models = { workspace = true }
 ab-pipeline          = { workspace = true }

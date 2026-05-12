@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE series SET summary_extractor_version = ? WHERE series_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "e61835229ce97a3e09dda33ffc2de410536d94e9aa6434e802f8a7047d58be71"
+}

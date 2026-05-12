@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT b.title, b.summary_spoiler_free, b.summary_spoiler_free_lang, b.language FROM books b JOIN book_series bs ON bs.book_id = b.book_id WHERE bs.series_id = ? AND b.summary_spoiler_free IS NOT NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "title",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "summary_spoiler_free",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "summary_spoiler_free_lang",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "language",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "a1b50d41e0cbf38c96d5dd4e65e7ed70cda8825a8223ae8d58203837ad90d3f6"
+}
