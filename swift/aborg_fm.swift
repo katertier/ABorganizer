@@ -139,6 +139,58 @@ public func aborg_fm_status(
     }
 }
 
+// MARK: - Supported languages
+//
+// What `aborg doctor` needs: the list of BCP-47 locales the
+// on-device model accepts as input/output. Lets the doctor
+// surface "your library_locale=ja isn't supported by Apple
+// Intelligence yet" diagnostics before the user hits a runtime
+// generation failure.
+//
+// Encoded as a JSON array of BCP-47 primary-subtag strings
+// (e.g. `["en", "de", "fr", "es", "ja", "zh-Hans"]`). Apple's
+// `Locale.Language.maximalIdentifier` returns the canonical
+// form per language.
+
+private struct AborgFmSupportedLanguages: Encodable {
+    let locales: [String]
+}
+
+@available(macOS 26.0, *)
+private func runSupportedLanguages() -> AborgFmSupportedLanguages {
+    #if canImport(FoundationModels)
+    let model = SystemLanguageModel.default
+    let languages = Array(model.supportedLanguages)
+    let locales = languages.map { $0.maximalIdentifier }.sorted()
+    return AborgFmSupportedLanguages(locales: locales)
+    #else
+    return AborgFmSupportedLanguages(locales: [])
+    #endif
+}
+
+@_cdecl("aborg_fm_supported_languages")
+public func aborg_fm_supported_languages(
+    _ ctx: UnsafeMutableRawPointer?,
+    _ callback: @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?, Int, Int32) -> Void
+) {
+    let payload: AborgFmSupportedLanguages
+    if #available(macOS 26.0, *) {
+        payload = runSupportedLanguages()
+    } else {
+        payload = AborgFmSupportedLanguages(locales: [])
+    }
+    do {
+        let data = try JSONEncoder().encode(payload)
+        data.withUnsafeBytes { rawBuf in
+            let base = rawBuf.baseAddress?.assumingMemoryBound(to: CChar.self)
+            callback(ctx, base, data.count, kFmOk)
+        }
+    } catch {
+        logError("aborg_fm_supported_languages encode error", error)
+        callback(ctx, nil, 0, kFmEncodeFailure)
+    }
+}
+
 // MARK: - Completion
 
 // One-shot prompt. The Rust side stamps the prompt with whatever
@@ -170,6 +222,35 @@ private func runComplete(prompt: String, maxTokens: Int) async throws -> String 
     if prompt.isEmpty {
         throw AborgFmError.promptEmpty
     }
+    // ── Guardrails — KNOWN GAP, see TODO below ──────────────────
+    // The default `SystemLanguageModel.default` applies Apple's
+    // standard content-safety guardrails. That's wrong for an
+    // audiobook organiser: genre fiction routinely contains
+    // violence, sex, adult themes, drug use, etc., and the
+    // default guardrails will refuse to summarise / tag content
+    // the framework flags.
+    //
+    // The entro314 reference codebase uses
+    // `SystemLanguageModel(guardrails: Guardrails.developerProvided)`
+    // to trust the calling app to bound the output domain (which
+    // our DNA / summary extractors do via prompts and the closed
+    // CacheKey vocabulary). HOWEVER, that variant does not exist
+    // on our installed SDK as of macOS 26.5 / Swift 6.3.2 —
+    // `SystemLanguageModel.Guardrails` only exposes `.default`
+    // here. Both `.permissive` and `.developerProvided` are
+    // unresolved at compile time.
+    //
+    // TODO(C5.7-followup): revisit on the next SDK update. When
+    // a less-restrictive variant ships, swap in:
+    //
+    //     let model = SystemLanguageModel(guardrails: .developerProvided)
+    //     let session = LanguageModelSession(model: model)
+    //
+    // For now, stick with the default-guardrails session so the
+    // bridge compiles. Affected stages (DNA, summary, story
+    // arc, characters) should detect refusal-style outputs and
+    // surface a typed BridgeError::GenerationFailed("guardrails")
+    // for the Rust side to log + skip.
     let session = LanguageModelSession()
     let options = GenerationOptions(maximumResponseTokens: max(1, maxTokens))
     do {

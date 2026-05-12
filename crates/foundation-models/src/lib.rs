@@ -164,6 +164,34 @@ pub async fn status() -> Result<StatusReport, BridgeError> {
     }
 }
 
+/// List the BCP-47 locales the on-device Foundation Models accepts.
+///
+/// Returned vector is sorted (alphabetic, lower-cased). When the
+/// bridge isn't compiled in (non-macOS, no swiftc, framework
+/// missing) this returns an empty vector — callers that need
+/// "supported on this host" should check that vector + the
+/// [`status`] result together.
+///
+/// Used by `aborg doctor llm` to surface "your `library_locale`
+/// isn't supported by Apple Intelligence yet" diagnostics before
+/// the user hits a runtime generation failure.
+///
+/// # Errors
+///
+/// Variants of [`BridgeError`]: [`BridgeError::BridgeUnavailable`]
+/// when the bridge isn't compiled in — other failure modes
+/// (parse / FFI) come back as [`BridgeError::InvalidPayload`].
+pub async fn supported_locales() -> Result<Vec<String>, BridgeError> {
+    #[cfg(aborg_fm_bridge)]
+    {
+        ffi::supported_locales_impl().await
+    }
+    #[cfg(not(aborg_fm_bridge))]
+    {
+        Err(BridgeError::BridgeUnavailable)
+    }
+}
+
 /// Run a one-shot text completion against the on-device LLM.
 ///
 /// `max_tokens` is a soft budget passed straight to
@@ -275,6 +303,14 @@ mod ffi {
             ctx: *mut c_void,
             callback: extern "C" fn(*mut c_void, *const c_char, usize, i32),
         );
+
+        /// Enumerate the BCP-47 locales the on-device model
+        /// accepts. Emits a JSON `{locales: [...]}` blob via the
+        /// callback.
+        fn aborg_fm_supported_languages(
+            ctx: *mut c_void,
+            callback: extern "C" fn(*mut c_void, *const c_char, usize, i32),
+        );
     }
 
     /// Raw JSON shape emitted by `aborg_fm_status`. The string
@@ -318,6 +354,31 @@ mod ffi {
             available: json.available,
             reason,
         })
+    }
+
+    /// Raw JSON shape emitted by `aborg_fm_supported_languages`.
+    #[derive(serde::Deserialize)]
+    struct SupportedLanguagesJson {
+        locales: Vec<String>,
+    }
+
+    pub(super) async fn supported_locales_impl() -> Result<Vec<String>, BridgeError> {
+        let (tx, rx) = oneshot::channel::<FfiResult>();
+        let ctx = Box::into_raw(Box::new(tx)).cast::<c_void>();
+        // SAFETY: ctx pairs with on_result; Swift fires exactly once.
+        unsafe { aborg_fm_supported_languages(ctx, on_result) };
+        let res = rx.await.map_err(|_| BridgeError::CallbackDropped)?;
+        if res.code != 0 {
+            return Err(BridgeError::from_code(res.code));
+        }
+        let bytes = res
+            .buffer
+            .ok_or_else(|| BridgeError::InvalidPayload("OK code but null buffer".into()))?;
+        let s = std::str::from_utf8(&bytes)
+            .map_err(|e| BridgeError::InvalidPayload(format!("non-utf8: {e}")))?;
+        let json: SupportedLanguagesJson = serde_json::from_str(s)
+            .map_err(|e| BridgeError::InvalidPayload(format!("supported_languages json: {e}")))?;
+        Ok(json.locales)
     }
 
     pub(super) async fn complete_impl(
