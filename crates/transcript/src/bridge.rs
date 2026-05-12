@@ -185,42 +185,37 @@ mod tests {
     use std::path::PathBuf;
 
     #[tokio::test]
-    async fn stub_returns_sentinel_segment_when_bridge_linked() {
-        // On macOS CI + dev machines `cfg(aborg_ai_bridge)` is
-        // set and the Swift stub returns one segment with
-        // `text == "[transcribe stub]"`.
-        // On other targets the wrapper returns an Err and the
-        // assertion below skips.
+    async fn bogus_path_returns_error_when_bridge_linked() {
+        // With the real SpeechAnalyzer body in slice 3A.3, a
+        // non-audio path fails in the AVAudioFile open step;
+        // the Swift side logs the error to stderr and the
+        // callback fires with a null buffer pointer → Rust
+        // wrapper translates to `Error::Stage`.
+        // On platforms without the bridge, the wrapper short-
+        // circuits to Err immediately.
         let result = transcribe_window(&PathBuf::from("/dev/null"), 0.0, 1.0, "en-US").await;
-        if cfg!(aborg_ai_bridge) {
-            let segs = result.expect("stub call should succeed on macOS");
-            assert_eq!(segs.len(), 1, "stub returns exactly one segment");
-            assert_eq!(segs[0].text, "[transcribe stub]");
-            assert_eq!(segs[0].start_ms, 0);
-            assert_eq!(segs[0].end_ms, 1000);
-        } else {
-            assert!(
-                result.is_err(),
-                "bridge unavailable → wrapper must return Err"
-            );
-        }
+        assert!(
+            result.is_err(),
+            "bogus path / no bridge must return Err (got {result:?})"
+        );
     }
 
     #[tokio::test]
     async fn input_path_with_nul_byte_is_rejected_cleanly() {
-        // Only meaningful when the bridge is linked — otherwise
-        // the function short-circuits to Err before path
-        // validation runs.
-        if !cfg!(aborg_ai_bridge) {
-            return;
-        }
-        // A path constructed from raw bytes containing a NUL.
-        // OsStr / Path don't allow NUL on Unix at the syscall
-        // layer, but the CString conversion rejects them
-        // explicitly so we never pass them to Swift.
+        // The CString-conversion path catches NULs before we
+        // ever cross the FFI boundary. Runs on every host.
         let bad = std::ffi::OsString::from("/tmp/a\0b");
         let bad_path = PathBuf::from(bad);
         let r = transcribe_window(&bad_path, 0.0, 1.0, "en-US").await;
         assert!(r.is_err(), "NUL in path must be rejected, got {r:?}");
+    }
+
+    #[tokio::test]
+    async fn empty_window_returns_error() {
+        // start_secs == end_secs is invalid — the engine has
+        // no audio to chew on. Verified both bridge-linked and
+        // bridge-absent paths.
+        let r = transcribe_window(&PathBuf::from("/dev/null"), 1.0, 1.0, "en-US").await;
+        assert!(r.is_err(), "zero-length window must Err, got {r:?}");
     }
 }

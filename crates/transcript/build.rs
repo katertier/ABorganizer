@@ -124,7 +124,18 @@ fn main() {
     println!("cargo:rustc-link-lib=framework=Speech");
     println!("cargo:rustc-link-lib=framework=AVFoundation");
 
-    // 6. Flag the bridge as available so the Rust side compiles
+    // 6. Tell the final binary's dynamic loader where Swift's
+    //    runtime libraries live. swiftc -emit-library -static
+    //    statically links our code but leaves swift_Concurrency
+    //    and other runtime libs as dynamic refs; without an
+    //    rpath the binary fails to launch with
+    //    "Library not loaded: @rpath/libswift_Concurrency.dylib".
+    //    `/usr/lib/swift` is the system-shipped Swift runtime
+    //    on macOS 12+ (the OS bakes the ABI-stable Swift
+    //    runtime into the system).
+    println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
+
+    // 7. Flag the bridge as available so the Rust side compiles
     //    its `extern "C"` block.
     println!("cargo::rustc-cfg=aborg_ai_bridge");
 }
