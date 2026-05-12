@@ -100,55 +100,92 @@ async fn library_scan(
     // expensive enough to deserve its own Idle tier so it never
     // competes with the import-time pipeline. See PROJECT.md
     // "Pipeline priorities."
-    let stage_priorities: &[(&'static str, ab_pipeline::Priority)] = &[
-        ("tag-read", ab_pipeline::Priority::Interactive),
-        ("fingerprint", ab_pipeline::Priority::Interactive),
-        ("audible-search", ab_pipeline::Priority::Interactive),
-        ("audnexus-enrich", ab_pipeline::Priority::Interactive),
-        ("consensus", ab_pipeline::Priority::Interactive),
-        ("identity-resolve", ab_pipeline::Priority::Interactive),
-        ("audnexus-chapters", ab_pipeline::Priority::Interactive),
-        ("embedded-chapters", ab_pipeline::Priority::Interactive),
-        ("chapter-pick-winner", ab_pipeline::Priority::Interactive),
+    // (stage, priority) pairs — `StageId` is the typed
+    // single-source-of-truth for each stage's name; importing
+    // the stage's crate is a `Cargo.toml` edit, not a structural
+    // dep cost (all of these crates were already transitively in
+    // the daemon's compile graph). A renamed stage now surfaces
+    // as an unresolved-symbol error here, not a runtime
+    // "pipeline.stage.unknown" warning.
+    let stage_priorities: &[(ab_pipeline::StageId, ab_pipeline::Priority)] = &[
+        (ab_tag_read::STAGE_ID, ab_pipeline::Priority::Interactive),
+        (ab_fingerprint::STAGE_ID, ab_pipeline::Priority::Interactive),
+        (
+            ab_catalog::audible_search::STAGE_ID,
+            ab_pipeline::Priority::Interactive,
+        ),
+        (
+            ab_catalog::enrich::STAGE_ID,
+            ab_pipeline::Priority::Interactive,
+        ),
+        (
+            ab_catalog::consensus::STAGE_ID,
+            ab_pipeline::Priority::Interactive,
+        ),
+        (
+            ab_catalog::identity::STAGE_ID,
+            ab_pipeline::Priority::Interactive,
+        ),
+        (
+            ab_catalog::chapters::STAGE_ID,
+            ab_pipeline::Priority::Interactive,
+        ),
+        (
+            ab_catalog::embedded_chapters::STAGE_ID,
+            ab_pipeline::Priority::Interactive,
+        ),
+        (
+            ab_catalog::chapter_winner::STAGE_ID,
+            ab_pipeline::Priority::Interactive,
+        ),
         // 6-min head + 30-s tail. Heavier than the other
         // stages (multi-second per book at decode +
         // SpeechAnalyzer time) but seeded at scan time so the
         // language gate + downstream extractors have a
         // transcript by the time the user opens the book.
-        ("transcribe-head-tail", ab_pipeline::Priority::Interactive),
+        (
+            ab_transcript::stage::STAGE_ID,
+            ab_pipeline::Priority::Interactive,
+        ),
         // Description language detector runs right after
         // consensus (the description winner is picked there).
         (
-            "detect-description-lang",
+            ab_transcript::description_lang_stage::STAGE_ID,
             ab_pipeline::Priority::Interactive,
         ),
         // Transcript extractors — cheap pure-text heuristics
         // over the head transcript; runs at Interactive so the
         // user sees its candidates by the time the book opens.
         (
-            "run-transcript-extractors",
+            ab_transcript::extract_stage::STAGE_ID,
             ab_pipeline::Priority::Interactive,
         ),
         // Sampled transcribe — Background priority. Three 60-s
         // windows at 25/50/75%. Provides authoritative
         // post-transcribe language signal + a representative
         // DNA-tag corpus before the full-book transcribe lands.
-        ("transcribe-samples", ab_pipeline::Priority::Background),
+        (
+            ab_transcript::samples_stage::STAGE_ID,
+            ab_pipeline::Priority::Background,
+        ),
         // Whole-book transcribe — drains during quiet periods,
         // not in the import-time pipeline.
-        ("transcribe-full", ab_pipeline::Priority::Idle),
+        (
+            ab_transcript::full_stage::STAGE_ID,
+            ab_pipeline::Priority::Idle,
+        ),
     ];
     for book_id in &report.new_book_ids {
         for (stage, priority) in stage_priorities {
             if let Err(e) = state
                 .inner
                 .scheduler
-                .submit(*book_id, stage, *priority)
+                .submit(*book_id, *stage, *priority)
                 .await
             {
                 tracing::warn!(
                     book = %book_id,
-                    stage,
+                    stage = %stage,
                     error = %e,
                     "scan.scheduler_submit_failed"
                 );

@@ -36,7 +36,7 @@ use ab_db::EphemeralDb;
 use ab_pipeline::{Priority, Scheduler};
 use tokio_util::sync::CancellationToken;
 
-use crate::stage::STAGE_NAME;
+use crate::stage::STAGE_ID;
 use ab_speech::{BridgeError, install_speech_model_typed};
 
 /// Spawnable idle install loop. Wakes every
@@ -111,7 +111,7 @@ async fn process_one_tick(ephemeral: &EphemeralDb, scheduler: &Scheduler) -> Res
             let books = take_blocked_books(ephemeral, &locale).await?;
             for book_id in books {
                 if let Err(e) = scheduler
-                    .submit(book_id, STAGE_NAME, Priority::Background)
+                    .submit(book_id, STAGE_ID, Priority::Background)
                     .await
                 {
                     tracing::warn!(

@@ -6,12 +6,14 @@ version = 4
 name = "ab-api"
 version = "0.1.0"
 dependencies = [
+ "ab-catalog",
  "ab-core",
  "ab-db",
  "ab-fingerprint",
  "ab-pipeline",
  "ab-scan",
  "ab-speech",
+ "ab-tag-read",
  "ab-transcript",
  "axum",
  "serde",

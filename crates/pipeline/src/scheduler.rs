@@ -22,7 +22,7 @@ use ab_core::tunables::SchedulerTunables;
 use ab_core::{BookId, Result};
 
 use crate::dag::Dag;
-use crate::stage::StageContext;
+use crate::stage::{StageContext, StageId};
 
 /// Job priority.
 ///
@@ -46,7 +46,7 @@ pub enum Priority {
 #[derive(Debug, Clone)]
 struct Job {
     book_id: BookId,
-    stage: &'static str,
+    stage: StageId,
     /// Retained for logging + future re-prioritisation; the executor
     /// already routed based on this when picking the channel.
     #[allow(dead_code)]
@@ -145,6 +145,14 @@ impl Scheduler {
 
     /// Submit a book + stage for processing.
     ///
+    /// `stage` is the typed [`StageId`] for the stage you want to
+    /// run — every stage crate exposes `pub const STAGE_ID:
+    /// StageId`, so callers reference that const rather than a
+    /// loose string. A renamed stage propagates as an
+    /// unresolved-symbol error at every call site (slice C5.4
+    /// finished the migration; see ADR-0013 for the full
+    /// typed-cross-stage-primitives rationale).
+    ///
     /// # Errors
     ///
     /// Returns an error if the channel is closed (scheduler shutting
@@ -152,7 +160,7 @@ impl Scheduler {
     pub async fn submit(
         &self,
         book_id: BookId,
-        stage: &'static str,
+        stage: StageId,
         priority: Priority,
     ) -> Result<()> {
         let job = Job {
@@ -178,23 +186,24 @@ impl Scheduler {
     }
 
     async fn execute(dag: &Arc<Dag>, ctx: &StageContext, job: Job) {
+        let stage_str = job.stage.as_str();
         let stage_obj = dag
             .iter_topo()
-            .find_map(|(name, s)| (name == job.stage).then_some(s.clone()));
+            .find_map(|(name, s)| (name == stage_str).then_some(s.clone()));
         let Some(stage_obj) = stage_obj else {
-            tracing::warn!(stage = job.stage, "pipeline.stage.unknown");
+            tracing::warn!(stage = stage_str, "pipeline.stage.unknown");
             return;
         };
 
         let stage_ctx = StageContext {
-            stage_name: job.stage,
+            stage_name: stage_str,
             ..ctx.clone()
         };
 
         match stage_obj.run(&stage_ctx, job.book_id).await {
             Ok(outcome) => {
                 tracing::info!(
-                    stage = job.stage,
+                    stage = stage_str,
                     book = %job.book_id,
                     ?outcome,
                     "pipeline.stage.complete"
@@ -202,7 +211,7 @@ impl Scheduler {
             }
             Err(err) => {
                 tracing::warn!(
-                    stage = job.stage,
+                    stage = stage_str,
                     book = %job.book_id,
                     error = %err,
                     "pipeline.stage.failed"
@@ -306,7 +315,7 @@ mod tests {
         };
         let sched = Scheduler::spawn(dag, ctx, &tunables);
         sched
-            .submit(BookId(1), "idle-stage", Priority::Idle)
+            .submit(BookId(1), StageId::new("idle-stage"), Priority::Idle)
             .await
             .expect("submit");
         // Give the scheduler a moment to drain.
@@ -334,7 +343,7 @@ mod tests {
         };
         let sched = Scheduler::spawn(dag, ctx, &tunables);
         sched
-            .submit(BookId(1), "idle-stage", Priority::Idle)
+            .submit(BookId(1), StageId::new("idle-stage"), Priority::Idle)
             .await
             .expect("submit");
         sleep(Duration::from_millis(50)).await;
@@ -358,11 +367,11 @@ mod tests {
         // Submit idle FIRST, interactive SECOND.
         // Bias should still run interactive before idle.
         sched
-            .submit(BookId(1), "fast-stage", Priority::Idle)
+            .submit(BookId(1), StageId::new("fast-stage"), Priority::Idle)
             .await
             .expect("submit idle");
         sched
-            .submit(BookId(2), "fast-stage", Priority::Interactive)
+            .submit(BookId(2), StageId::new("fast-stage"), Priority::Interactive)
             .await
             .expect("submit interactive");
         sleep(Duration::from_millis(50)).await;
