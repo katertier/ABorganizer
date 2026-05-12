@@ -229,35 +229,47 @@ private func runComplete(prompt: String, maxTokens: Int) async throws -> String 
     if prompt.isEmpty {
         throw AborgFmError.promptEmpty
     }
-    // ── Guardrails — KNOWN GAP, see TODO below ──────────────────
+    // ── Guardrails — Apple has not exposed a public knob ─────────
     // The default `SystemLanguageModel.default` applies Apple's
-    // standard content-safety guardrails. That's wrong for an
-    // audiobook organiser: genre fiction routinely contains
-    // violence, sex, adult themes, drug use, etc., and the
-    // default guardrails will refuse to summarise / tag content
-    // the framework flags.
+    // standard content-safety guardrails. For an audiobook
+    // organiser this is suboptimal: genre fiction routinely
+    // contains violence, sex, adult themes, drug use, etc., and
+    // the default guardrails may refuse to summarise / tag
+    // content the framework flags.
     //
-    // The entro314 reference codebase uses
-    // `SystemLanguageModel(guardrails: Guardrails.developerProvided)`
-    // to trust the calling app to bound the output domain (which
-    // our DNA / summary extractors do via prompts and the closed
-    // CacheKey vocabulary). HOWEVER, that variant does not exist
-    // on our installed SDK as of macOS 26.5 / Swift 6.3.2 —
-    // `SystemLanguageModel.Guardrails` only exposes `.default`
-    // here. Both `.permissive` and `.developerProvided` are
-    // unresolved at compile time.
+    // We surveyed the entro314-labs/tauri-apple-intelligence
+    // reference (`apple-ai.swift`) which appears to expose a
+    // `Guardrails.developerProvided` knob. That turned out to be
+    // a private-memory mutation, NOT a public API:
     //
-    // TODO(C5.7-followup): revisit on the next SDK update. When
-    // a less-restrictive variant ships, swap in:
+    //     struct Guardrails {     // <-- entro314's OWN struct
+    //       static var developerProvided: SystemLanguageModel.Guardrails {
+    //         var guardrails = SystemLanguageModel.Guardrails.default
+    //         withUnsafeMutablePointer(to: &guardrails) { ptr in
+    //           let rawPtr = UnsafeMutableRawPointer(ptr)
+    //           let boolPtr = rawPtr.assumingMemoryBound(to: Bool.self)
+    //           boolPtr.pointee = false   // flips a private "strict" flag
+    //         }
+    //         return guardrails
+    //       }
+    //     }
     //
-    //     let model = SystemLanguageModel(guardrails: .developerProvided)
-    //     let session = LanguageModelSession(model: model)
+    // i.e. they cast `SystemLanguageModel.Guardrails.default`'s
+    // memory to a `Bool*` and write `false` at byte 0 to flip
+    // what looks like a private "strict" flag. We REJECT this
+    // approach: it depends on private memory layout, breaks
+    // silently on any SDK minor update, and would not survive
+    // notarisation review.
     //
-    // For now, stick with the default-guardrails session so the
-    // bridge compiles. Affected stages (DNA, summary, story
-    // arc, characters) should detect refusal-style outputs and
-    // surface a typed BridgeError::GenerationFailed("guardrails")
-    // for the Rust side to log + skip.
+    // The public `SystemLanguageModel.Guardrails` type as of
+    // macOS 26.5 / Swift 6.3.2 only exposes `.default`. Until
+    // Apple ships a documented developer-customisable Guardrails
+    // surface, we stick with `.default` here. Affected stages
+    // (DNA, summary, story arc, characters) should detect
+    // refusal-style outputs and surface a typed
+    // `BridgeError::GenerationFailed("guardrails")` for the Rust
+    // side to log + skip. Re-evaluate on each macOS / Xcode
+    // release.
     let session = LanguageModelSession()
     let options = GenerationOptions(maximumResponseTokens: max(1, maxTokens))
     do {
@@ -432,9 +444,11 @@ private func runCompleteStructured(
         throw AborgFmError.schemaUnsupportedShape("GenerationSchema build: \(error)")
     }
 
-    // TODO(C5.7-followup): once `Guardrails.developerProvided` lands on
-    // a public SDK, swap to `SystemLanguageModel(guardrails: …)` here
-    // so adult-content audiobooks aren't refused by default guardrails.
+    // Guardrails: stuck with `.default` until Apple ships a public
+    // developer-customisable Guardrails surface on
+    // `SystemLanguageModel`. See the long comment in
+    // `runComplete()` for the diagnostic + the reason we won't
+    // adopt the entro314-labs private-memory hack.
     let session = LanguageModelSession()
     let options = GenerationOptions(maximumResponseTokens: max(1, maxTokens))
     do {
