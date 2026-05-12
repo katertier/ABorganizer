@@ -241,6 +241,26 @@ fn tag_candidates_of(tagged: &lofty::file::TaggedFile) -> Vec<TagCandidate> {
             );
         }
     }
+    if let Some(genre) = tag.get_string(ItemKey::Genre) {
+        // Same normalize-on-write pattern as language: route
+        // through the central `genre_code` table so tag-read
+        // ("Sci-Fi"), Audnexus ("Science Fiction"), and any
+        // future source converge on the canonical slug
+        // ("science-fiction"). Multi-value genre tags split on
+        // common separators (`,` / `;` / `/`) — MP4 / ID3
+        // sometimes pack two genres into one string.
+        for raw in split_multi_value(genre) {
+            let raw = raw.trim();
+            if raw.is_empty() {
+                continue;
+            }
+            if let Some(canonical) = ab_core::genre_code::normalize(raw) {
+                push_candidate(&mut out, "genre", &canonical);
+            } else {
+                tracing::warn!(raw = %raw, "tag_read.genre.unparseable");
+            }
+        }
+    }
     if let Some(publisher) = tag.get_string(ItemKey::Publisher) {
         push_candidate(&mut out, "publisher", publisher);
     }
@@ -262,6 +282,18 @@ fn push_candidate(out: &mut Vec<TagCandidate>, field: &'static str, value: &str)
         field,
         value: trimmed.to_owned(),
     });
+}
+
+/// Split a multi-value tag string on common audiobook
+/// separators. MP4 / ID3 sometimes pack genre lists into one
+/// `;`- or `/`- or `,`-separated string; some encoders use the
+/// `0`-byte separator the spec permits, but lofty returns those
+/// pre-split. We handle the in-string case.
+///
+/// Returns an iterator of substrings (not trimmed — caller
+/// trims).
+fn split_multi_value(value: &str) -> impl Iterator<Item = &str> {
+    value.split([';', '/', ',', '|'])
 }
 
 async fn update_book_file_properties(

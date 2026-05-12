@@ -254,6 +254,37 @@ async fn write_scalar_provenance(
         let secs_str = secs.to_string();
         insert_scalar(tx, book_id, "duration_seconds", &secs_str, source).await?;
     }
+    // Genres + sub-genre tags. Each entry routes through the
+    // central `genre_code::normalize` (slice 3D.1 pattern) so
+    // tag-read / Audible / future scrapers all converge on the
+    // same canonical slug. Audnexus's per-genre ASIN goes into
+    // `external_id` so the future genre-resolve step can join
+    // against the `genres.audible_id` column.
+    for genre in &book.genres {
+        let raw = genre.name.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        let Some(canonical) = ab_core::genre_code::normalize(raw) else {
+            tracing::warn!(
+                raw = %raw,
+                book = %book_id,
+                "enrich.genre.unparseable"
+            );
+            continue;
+        };
+        insert_row(
+            tx,
+            ProvenanceRow {
+                book_id,
+                field: "genre",
+                value: &canonical,
+                source,
+                external_id: genre.asin.as_deref(),
+            },
+        )
+        .await?;
+    }
     Ok(())
 }
 

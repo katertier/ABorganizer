@@ -156,6 +156,31 @@ pub struct AudnexusBook {
     /// Narrators are an ordered array; can be 1..N people.
     #[serde(default)]
     pub narrators: Vec<AudnexusContributor>,
+    /// Genres + sub-categories Audnexus assigns to the book.
+    /// Includes both top-level genres ("Fantasy") and the
+    /// sub-genre tags Audible calls "tags". The `type` field
+    /// differentiates them; we currently treat both as genre
+    /// candidates (the consensus stage can refine later).
+    #[serde(default)]
+    pub genres: Vec<AudnexusGenre>,
+}
+
+/// One genre entry on an Audnexus book response.
+///
+/// Audnexus assigns its own ASINs to genres + sub-genres
+/// (`/genres/{asin}` endpoint). The ASIN goes into
+/// `genres.audible_id`; the name goes through
+/// [`ab_core::genre_code::normalize`] to produce the canonical
+/// slug stored in `book_field_provenance.value`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AudnexusGenre {
+    pub name: String,
+    #[serde(default)]
+    pub asin: Option<String>,
+    /// `"Genres"` for top-level, `"Tags"` for sub-genre tags.
+    /// Retained for future filtering; not currently used.
+    #[serde(default, rename = "type")]
+    pub kind: Option<String>,
 }
 
 /// One author or narrator entry on an Audnexus book response.
