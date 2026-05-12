@@ -154,7 +154,7 @@ impl Stage for TranscribeSamplesStage {
             book_id,
             &all_segments,
             &plan.locale,
-            &self.transcribe.model_version,
+            &self.transcribe.model_version, // ai_cache.extractor_version
         )
         .await?;
 
@@ -206,16 +206,6 @@ struct SamplePlan {
     windows: Vec<SampleWindow>,
 }
 
-#[derive(serde::Deserialize)]
-struct HeadPayload {
-    locale: String,
-}
-
-#[derive(serde::Deserialize)]
-struct CachedSamplesLocale {
-    locale: String,
-}
-
 /// Resolve file path, total duration, locale (from head cache),
 /// and the sample windows. Returns `None` on skip conditions.
 async fn plan_samples(
@@ -225,26 +215,20 @@ async fn plan_samples(
 ) -> Result<Option<SamplePlan>> {
     let id = book_id.0;
 
-    // Locale from head transcript.
+    // Locale from head transcript's `locale` column (B2 — no
+    // longer embedded in the JSON payload).
     let head_cache = CacheKey::TranscriptHead.as_str();
     let head_row = sqlx::query!(
-        "SELECT content FROM ai_cache WHERE book_id = ? AND cache_type = ?",
+        "SELECT locale FROM ai_cache WHERE book_id = ? AND cache_type = ?",
         id,
         head_cache,
     )
     .fetch_optional(library.pool())
     .await
     .map_err(|e| Error::Database(format!("samples head lookup: {e}")))?;
-    let Some(head_row) = head_row else {
+    let Some(Some(locale)) = head_row.map(|r| r.locale) else {
         return Ok(None);
     };
-    let Some(bytes) = head_row.content else {
-        return Ok(None);
-    };
-    let Ok(parsed) = serde_json::from_slice::<HeadPayload>(&bytes) else {
-        return Ok(None);
-    };
-    let locale = parsed.locale;
 
     // Idempotency.
     if samples_cache_fresh(library, book_id, &transcribe.model_version, &locale).await? {
@@ -316,17 +300,18 @@ fn build_windows(
 }
 
 /// Idempotency check matching the head/tail and full-book
-/// stages' approach.
+/// stages' approach. Reads `locale` from the column (B2)
+/// rather than from the embedded JSON.
 async fn samples_cache_fresh(
     library: &LibraryDb,
     book_id: BookId,
-    model_version: &str,
+    extractor_version: &str,
     current_locale: &str,
 ) -> Result<bool> {
     let id = book_id.0;
     let samples_cache = CacheKey::TranscriptSamples.as_str();
     let row = sqlx::query!(
-        "SELECT model_version, content FROM ai_cache WHERE book_id = ? AND cache_type = ?",
+        "SELECT extractor_version, locale FROM ai_cache WHERE book_id = ? AND cache_type = ?",
         id,
         samples_cache,
     )
@@ -334,23 +319,16 @@ async fn samples_cache_fresh(
     .await
     .map_err(|e| Error::Database(format!("samples cache lookup: {e}")))?;
     let Some(row) = row else { return Ok(false) };
-    if row.model_version.as_deref() != Some(model_version) {
+    if row.extractor_version.as_deref() != Some(extractor_version) {
         return Ok(false);
     }
-    let Some(bytes) = row.content else {
-        return Ok(false);
-    };
-    let Ok(parsed) = serde_json::from_slice::<CachedSamplesLocale>(&bytes) else {
-        return Ok(false);
-    };
-    Ok(parsed.locale == current_locale)
+    Ok(row.locale.as_deref() == Some(current_locale))
 }
 
 // ── Writes ──────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
 struct SamplesPayload<'a> {
-    locale: &'a str,
     segments: &'a [TranscriptSegment],
 }
 
@@ -359,9 +337,9 @@ async fn write_samples_cache(
     book_id: BookId,
     segments: &[TranscriptSegment],
     locale: &str,
-    model_version: &str,
+    extractor_version: &str,
 ) -> Result<()> {
-    let payload = SamplesPayload { locale, segments };
+    let payload = SamplesPayload { segments };
     let bytes = serde_json::to_vec(&payload)
         .map_err(|e| Error::stage("transcribe-samples", format!("encode payload: {e}")))?;
     let conf = mean_confidence(segments);
@@ -369,13 +347,14 @@ async fn write_samples_cache(
     let samples_cache = CacheKey::TranscriptSamples.as_str();
     sqlx::query!(
         "INSERT OR REPLACE INTO ai_cache \
-         (book_id, cache_type, content, compressed, confidence, model_version) \
-         VALUES (?, ?, ?, 0, ?, ?)",
+         (book_id, cache_type, content, compressed, confidence, extractor_version, locale) \
+         VALUES (?, ?, ?, 0, ?, ?, ?)",
         id,
         samples_cache,
         bytes,
         conf,
-        model_version,
+        extractor_version,
+        locale,
     )
     .execute(library.pool())
     .await

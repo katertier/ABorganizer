@@ -166,17 +166,12 @@ struct FullPlan {
     locale: String,
 }
 
-#[derive(serde::Deserialize)]
-struct HeadPayload {
-    locale: String,
-}
-
 /// Pull file path + total duration from the library DB and the
-/// locale from the head transcript's cached payload.
+/// locale from the head transcript's `locale` column.
 /// Returns `None` when the book should be skipped (no head
 /// transcript, no active file, duration below threshold, or the
 /// full transcript is already cached at the current
-/// `model_version` + locale).
+/// `extractor_version` + locale).
 async fn plan_full(
     library: &LibraryDb,
     book_id: BookId,
@@ -184,28 +179,20 @@ async fn plan_full(
 ) -> Result<Option<FullPlan>> {
     let id = book_id.0;
 
-    // Locale from head transcript cache.
+    // Locale from head transcript's `locale` column (B2 — no
+    // longer embedded in the JSON payload).
     let head_cache = CacheKey::TranscriptHead.as_str();
     let head_row = sqlx::query!(
-        "SELECT content FROM ai_cache WHERE book_id = ? AND cache_type = ?",
+        "SELECT locale FROM ai_cache WHERE book_id = ? AND cache_type = ?",
         id,
         head_cache,
     )
     .fetch_optional(library.pool())
     .await
     .map_err(|e| Error::Database(format!("transcribe-full head lookup: {e}")))?;
-    let Some(head_row) = head_row else {
+    let Some(Some(locale)) = head_row.map(|r| r.locale) else {
         return Ok(None);
     };
-    let Some(bytes) = head_row.content else {
-        return Ok(None);
-    };
-    let Ok(parsed) = serde_json::from_slice::<HeadPayload>(&bytes) else {
-        // Defensive: head row content unparseable. Wait for the
-        // head stage to rewrite it cleanly.
-        return Ok(None);
-    };
-    let locale = parsed.locale;
 
     // Idempotency.
     if full_cache_fresh(library, book_id, &transcribe.model_version, &locale).await? {
@@ -228,18 +215,17 @@ async fn plan_full(
 }
 
 /// Same shape as `stage::cache_fresh` but specialised to the
-/// full transcript row. Locale comes from the embedded payload
-/// (same as the head/tail freshness check).
+/// full transcript row. Reads `locale` from the column (B2).
 async fn full_cache_fresh(
     library: &LibraryDb,
     book_id: BookId,
-    model_version: &str,
+    extractor_version: &str,
     current_locale: &str,
 ) -> Result<bool> {
     let id = book_id.0;
     let full_cache = CacheKey::TranscriptFull.as_str();
     let row = sqlx::query!(
-        "SELECT model_version, content FROM ai_cache WHERE book_id = ? AND cache_type = ?",
+        "SELECT extractor_version, locale FROM ai_cache WHERE book_id = ? AND cache_type = ?",
         id,
         full_cache,
     )
@@ -247,21 +233,14 @@ async fn full_cache_fresh(
     .await
     .map_err(|e| Error::Database(format!("transcribe-full cache lookup: {e}")))?;
     let Some(row) = row else { return Ok(false) };
-    if row.model_version.as_deref() != Some(model_version) {
+    if row.extractor_version.as_deref() != Some(extractor_version) {
         return Ok(false);
     }
-    let Some(bytes) = row.content else {
-        return Ok(false);
-    };
-    let Ok(parsed) = serde_json::from_slice::<HeadPayload>(&bytes) else {
-        return Ok(false);
-    };
-    Ok(parsed.locale == current_locale)
+    Ok(row.locale.as_deref() == Some(current_locale))
 }
 
 #[derive(Debug, Serialize)]
 struct FullPayload<'a> {
-    locale: &'a str,
     segments: &'a [TranscriptSegment],
 }
 
@@ -270,9 +249,9 @@ async fn write_full_cache(
     book_id: BookId,
     segments: &[TranscriptSegment],
     locale: &str,
-    model_version: &str,
+    extractor_version: &str,
 ) -> Result<()> {
-    let payload = FullPayload { locale, segments };
+    let payload = FullPayload { segments };
     let bytes = serde_json::to_vec(&payload)
         .map_err(|e| Error::stage("transcribe-full", format!("encode payload: {e}")))?;
     let conf = mean_confidence(segments);
@@ -284,13 +263,14 @@ async fn write_full_cache(
     let full_cache = CacheKey::TranscriptFull.as_str();
     sqlx::query!(
         "INSERT OR REPLACE INTO ai_cache \
-         (book_id, cache_type, content, compressed, confidence, model_version) \
-         VALUES (?, ?, ?, 0, ?, ?)",
+         (book_id, cache_type, content, compressed, confidence, extractor_version, locale) \
+         VALUES (?, ?, ?, 0, ?, ?, ?)",
         id,
         full_cache,
         bytes,
         conf,
-        model_version,
+        extractor_version,
+        locale,
     )
     .execute(library.pool())
     .await

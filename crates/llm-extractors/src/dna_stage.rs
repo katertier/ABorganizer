@@ -143,7 +143,14 @@ impl Stage for ExtractDnaTagsStage {
 
         // 5. Write tags + cache.
         write_tags(&ctx.library, book_id, &dna, &spoilers).await?;
-        write_cache(&ctx.library, book_id, &raw, &self.tunables.model_version).await?;
+        write_cache(
+            &ctx.library,
+            book_id,
+            &raw,
+            &transcript.locale,
+            &self.tunables.model_version,
+        )
+        .await?;
 
         tracing::info!(
             book_id = book_id.0,
@@ -166,12 +173,10 @@ struct DnaResponse {
     spoiler_tags: Vec<String>,
 }
 
-/// What we pull out of the `transcript_full` cache row. Mirrors
-/// the producer in `crates/transcript/src/full_stage.rs` — keep
-/// in sync if that payload changes.
+/// Segment array (the only thing still in the JSON BLOB after
+/// slice B2 — locale moved to its own column).
 #[derive(Debug, Deserialize)]
 struct CachedTranscript {
-    locale: String,
     segments: Vec<Segment>,
 }
 
@@ -191,13 +196,9 @@ async fn load_full_transcript(
     book_id: BookId,
 ) -> Result<Option<TranscriptView>> {
     let id = book_id.0;
-    // We don't use sqlx::query! here because the cache_type
-    // string can't be a typed parameter at the macro layer
-    // (the macro substitutes literals for `?`, not strings) —
-    // but we already use the same idiom in full_stage.rs.
     let full_cache = CacheKey::TranscriptFull.as_str();
     let row = sqlx::query!(
-        "SELECT content FROM ai_cache WHERE book_id = ? AND cache_type = ?",
+        "SELECT content, locale FROM ai_cache WHERE book_id = ? AND cache_type = ?",
         id,
         full_cache,
     )
@@ -206,6 +207,9 @@ async fn load_full_transcript(
     .map_err(|e| Error::Database(format!("dna load transcript_full: {e}")))?;
     let Some(row) = row else { return Ok(None) };
     let Some(bytes) = row.content else {
+        return Ok(None);
+    };
+    let Some(locale) = row.locale else {
         return Ok(None);
     };
     let cached: CachedTranscript = match serde_json::from_slice(&bytes) {
@@ -222,21 +226,18 @@ async fn load_full_transcript(
         }
         text.push_str(&seg.text);
     }
-    Ok(Some(TranscriptView {
-        locale: cached.locale,
-        text,
-    }))
+    Ok(Some(TranscriptView { locale, text }))
 }
 
 async fn dna_cache_fresh(
     library: &LibraryDb,
     book_id: BookId,
-    model_version: &str,
+    extractor_version: &str,
 ) -> Result<bool> {
     let id = book_id.0;
     let dna_cache = CacheKey::DnaTags.as_str();
     let row = sqlx::query!(
-        "SELECT model_version FROM ai_cache WHERE book_id = ? AND cache_type = ?",
+        "SELECT extractor_version FROM ai_cache WHERE book_id = ? AND cache_type = ?",
         id,
         dna_cache,
     )
@@ -244,7 +245,7 @@ async fn dna_cache_fresh(
     .await
     .map_err(|e| Error::Database(format!("dna cache lookup: {e}")))?;
     let Some(row) = row else { return Ok(false) };
-    Ok(row.model_version.as_deref() == Some(model_version))
+    Ok(row.extractor_version.as_deref() == Some(extractor_version))
 }
 
 async fn write_tags(
@@ -309,7 +310,8 @@ async fn write_cache(
     library: &LibraryDb,
     book_id: BookId,
     raw: &str,
-    model_version: &str,
+    locale: &str,
+    extractor_version: &str,
 ) -> Result<()> {
     let id = book_id.0;
     let payload = CachePayload { raw };
@@ -318,12 +320,13 @@ async fn write_cache(
     let dna_cache = CacheKey::DnaTags.as_str();
     sqlx::query!(
         "INSERT OR REPLACE INTO ai_cache \
-         (book_id, cache_type, content, compressed, model_version) \
-         VALUES (?, ?, ?, 0, ?)",
+         (book_id, cache_type, content, compressed, extractor_version, locale) \
+         VALUES (?, ?, ?, 0, ?, ?)",
         id,
         dna_cache,
         bytes,
-        model_version,
+        extractor_version,
+        locale,
     )
     .execute(library.pool())
     .await

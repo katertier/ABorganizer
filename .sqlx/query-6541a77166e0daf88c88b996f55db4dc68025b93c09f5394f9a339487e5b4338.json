@@ -1,10 +1,10 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT model_version FROM ai_cache WHERE book_id = ? AND cache_type = ?",
+  "query": "SELECT locale FROM ai_cache WHERE book_id = ? AND cache_type = ?",
   "describe": {
     "columns": [
       {
-        "name": "model_version",
+        "name": "locale",
         "ordinal": 0,
         "type_info": "Text"
       }
@@ -16,5 +16,5 @@
       true
     ]
   },
-  "hash": "eb71c2c3cc7b309403e69f6e25914df54102f881e1eb6abf67efc050c07db3c5"
+  "hash": "6541a77166e0daf88c88b996f55db4dc68025b93c09f5394f9a339487e5b4338"
 }

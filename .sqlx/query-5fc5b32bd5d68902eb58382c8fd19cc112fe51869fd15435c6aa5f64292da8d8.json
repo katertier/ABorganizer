@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR REPLACE INTO ai_cache (book_id, cache_type, content, compressed, confidence, extractor_version, locale) VALUES (?, ?, ?, 0, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "5fc5b32bd5d68902eb58382c8fd19cc112fe51869fd15435c6aa5f64292da8d8"
+}

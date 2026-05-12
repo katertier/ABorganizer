@@ -1,17 +1,17 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT model_version, content FROM ai_cache WHERE book_id = ? AND cache_type = ?",
+  "query": "SELECT extractor_version, locale FROM ai_cache WHERE book_id = ? AND cache_type = ?",
   "describe": {
     "columns": [
       {
-        "name": "model_version",
+        "name": "extractor_version",
         "ordinal": 0,
         "type_info": "Text"
       },
       {
-        "name": "content",
+        "name": "locale",
         "ordinal": 1,
-        "type_info": "Blob"
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -22,5 +22,5 @@
       true
     ]
   },
-  "hash": "27ffe7e80d739c979b5c1d7303a1c9f442ae6e359bb1f76cc9b31db23cc46d45"
+  "hash": "c5b35498c2d236a8339ae0284a7426805fe4c47cd083e1c319e92d47294df67c"
 }

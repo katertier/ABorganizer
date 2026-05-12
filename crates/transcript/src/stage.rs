@@ -142,7 +142,7 @@ impl Stage for TranscribeHeadTailStage {
             CacheWrite {
                 segments: &head_segments,
                 locale: &locale,
-                model_version: &self.transcribe.model_version,
+                extractor_version: &self.transcribe.model_version,
             },
         )
         .await?;
@@ -173,7 +173,7 @@ impl Stage for TranscribeHeadTailStage {
                         CacheWrite {
                             segments: &segments,
                             locale: &locale,
-                            model_version: &self.transcribe.model_version,
+                            extractor_version: &self.transcribe.model_version,
                         },
                     )
                     .await?;
@@ -325,24 +325,24 @@ async fn plan_book(
 }
 
 /// Returns true when `ai_cache` already has a row at the
-/// configured `model_version` for `(book_id, cache_type)`.
+/// configured `extractor_version` for `(book_id, cache_type)`.
 async fn cache_fresh(
     library: &LibraryDb,
     book_id: BookId,
     cache_type: CacheKey,
-    model_version: &str,
+    extractor_version: &str,
 ) -> Result<bool> {
     let id = book_id.0;
     let cache_str = cache_type.as_str();
     let row = sqlx::query!(
-        "SELECT model_version FROM ai_cache WHERE book_id = ? AND cache_type = ?",
+        "SELECT extractor_version FROM ai_cache WHERE book_id = ? AND cache_type = ?",
         id,
         cache_str,
     )
     .fetch_optional(library.pool())
     .await
     .map_err(|e| Error::Database(format!("transcribe cache lookup: {e}")))?;
-    Ok(row.is_some_and(|r| r.model_version.as_deref() == Some(model_version)))
+    Ok(row.is_some_and(|r| r.extractor_version.as_deref() == Some(extractor_version)))
 }
 
 // ── Pre-transcribe language pick ─────────────────────────────────
@@ -428,14 +428,12 @@ async fn transcribe_window_with_skip_on_no_model(
 
 // ── Writes ──────────────────────────────────────────────────────
 
-/// JSON payload stored in `ai_cache.content`. We keep both the
-/// segment array AND the locale we transcribed in, so a
-/// re-extract can know what to expect from the text. Borrowing
-/// (`&str`, `&[T]`) because we only Serialize from here; decode
-/// uses an owned shape (see the test module).
+/// JSON payload stored in `ai_cache.content`. Just the segment
+/// array — the locale lives in its own `ai_cache.locale` column
+/// (per slice B2), not embedded here. Borrowing (`&[T]`) because
+/// we only Serialize from here.
 #[derive(Debug, Serialize)]
 struct TranscriptPayload<'a> {
-    locale: &'a str,
     segments: &'a [TranscriptSegment],
 }
 
@@ -446,7 +444,7 @@ struct TranscriptPayload<'a> {
 struct CacheWrite<'a> {
     segments: &'a [TranscriptSegment],
     locale: &'a str,
-    model_version: &'a str,
+    extractor_version: &'a str,
 }
 
 async fn write_transcript_cache(
@@ -456,7 +454,6 @@ async fn write_transcript_cache(
     args: CacheWrite<'_>,
 ) -> Result<()> {
     let payload = TranscriptPayload {
-        locale: args.locale,
         segments: args.segments,
     };
     let bytes = serde_json::to_vec(&payload)
@@ -466,17 +463,19 @@ async fn write_transcript_cache(
     // gate for downstream extractors.
     let conf = mean_confidence(args.segments);
     let id = book_id.0;
-    let model_version = args.model_version;
+    let extractor_version = args.extractor_version;
+    let locale = args.locale;
     let cache_str = cache_type.as_str();
     sqlx::query!(
         "INSERT OR REPLACE INTO ai_cache \
-         (book_id, cache_type, content, compressed, confidence, model_version) \
-         VALUES (?, ?, ?, 0, ?, ?)",
+         (book_id, cache_type, content, compressed, confidence, extractor_version, locale) \
+         VALUES (?, ?, ?, 0, ?, ?, ?)",
         id,
         cache_str,
         bytes,
         conf,
-        model_version,
+        extractor_version,
+        locale,
     )
     .execute(library.pool())
     .await
@@ -629,25 +628,22 @@ mod tests {
     /// regression.
     #[derive(serde::Deserialize)]
     struct OwnedPayload {
-        locale: String,
         segments: Vec<TranscriptSegment>,
     }
 
     #[test]
     fn transcript_payload_round_trips() {
+        // Post-B2 the payload is segments-only; locale lives in
+        // the ai_cache.locale column.
         let segs = vec![TranscriptSegment {
             start_ms: 0,
             end_ms: 1000,
             text: "hello".into(),
             confidence: 0.9,
         }];
-        let payload = TranscriptPayload {
-            locale: "en-US",
-            segments: &segs,
-        };
+        let payload = TranscriptPayload { segments: &segs };
         let bytes = serde_json::to_vec(&payload).expect("encode");
         let decoded: OwnedPayload = serde_json::from_slice(&bytes).expect("decode");
-        assert_eq!(decoded.locale, "en-US");
         assert_eq!(decoded.segments.len(), 1);
         assert_eq!(decoded.segments[0].text, "hello");
     }

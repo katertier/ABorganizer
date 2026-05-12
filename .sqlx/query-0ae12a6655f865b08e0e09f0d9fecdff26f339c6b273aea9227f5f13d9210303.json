@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT extractor_version FROM ai_cache WHERE book_id = ? AND cache_type = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "extractor_version",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "0ae12a6655f865b08e0e09f0d9fecdff26f339c6b273aea9227f5f13d9210303"
+}
