@@ -112,7 +112,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+      # `prefix-key: v1-rust` invalidates the prior `v0-rust-sqlx-…`
+      # slot which hit the same partial-restore corruption as the
+      # clippy job (`cargo` symlink replaced with `rustup-init`).
+      # See the clippy job above for the diagnostic + rationale.
       - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-rust"
       - run: cargo install --locked sqlx-cli --no-default-features --features sqlite,rustls --version "~0.8" || true
       - name: Apply all migrations to a prep DB
         run: |
