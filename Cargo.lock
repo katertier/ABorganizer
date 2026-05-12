@@ -137,6 +137,7 @@ dependencies = [
 name = "ab-llm-extractors"
 version = "0.1.0"
 dependencies = [
+ "ab-catalog",
  "ab-core",
  "ab-db",
  "ab-foundation-models",

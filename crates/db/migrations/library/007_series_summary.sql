@@ -1,0 +1,51 @@
+-- Migration 007: series-level spoiler-free summary (slice 3K.4.1).
+--
+-- Per ADR-0019 + ADR-pending-for-3K.4.1, the spoiler-free summary
+-- extractor produces both per-book (3K.4 → `books.summary_spoiler_free`)
+-- and per-series content (this slice). Series-level content is
+-- regenerated when the set of books in the series changes (a new
+-- `book_series` row is inserted, or a book's individual summary
+-- is re-extracted at a newer `extractor_version`).
+--
+-- ## Schema additions
+--
+-- Three new columns on `series`:
+--
+-- - `summary TEXT` — the spoiler-free synopsis for the series as
+--   a whole. NULL until the extractor runs.
+-- - `summary_lang TEXT` — BCP-47 tag. Set to the predominant
+--   `books.language` across the series' books (see ADR-0019's
+--   locale rule); fall back to `library_locale` when tied or no
+--   books yet contribute.
+-- - `summary_extractor_version TEXT` — version stamp. The stage
+--   compares this against `LlmTunables.extractor_version` to
+--   decide whether to regenerate. NULL = never extracted.
+--
+-- ## Why columns vs. a separate `series_ai_cache` table
+--
+-- The existing `ai_cache` PK is `(book_id, cache_type)` — no fit
+-- for series-level content. Two options were considered:
+--
+-- 1. Parallel `series_ai_cache` table with `(series_id, cache_type)`
+--    PK. Mirrors `ai_cache` shape; more schema surface.
+-- 2. Columns on `series` itself.
+--
+-- We picked #2 because:
+--
+-- - Series-level content is small (one summary per series, not
+--   per cache_type × series), so the table's columns can hold
+--   the whole shape.
+-- - Compressed-blob caching is unnecessary; summaries are short.
+-- - Re-extraction triggers are simpler — single column
+--   comparison, no join.
+-- - The number of series in a library is small (10² order) vs.
+--   books (10³-10⁴ order), so per-series stage runs cheap.
+--
+-- ## Migration shape
+--
+-- All three columns are nullable; `ALTER TABLE ADD COLUMN` is
+-- the natural SQLite move. No rebuild needed.
+
+ALTER TABLE series ADD COLUMN summary TEXT;
+ALTER TABLE series ADD COLUMN summary_lang TEXT;
+ALTER TABLE series ADD COLUMN summary_extractor_version TEXT;

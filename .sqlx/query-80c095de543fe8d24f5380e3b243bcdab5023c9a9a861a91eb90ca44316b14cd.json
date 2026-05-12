@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT summary_extractor_version FROM series WHERE series_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "summary_extractor_version",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "80c095de543fe8d24f5380e3b243bcdab5023c9a9a861a91eb90ca44316b14cd"
+}
