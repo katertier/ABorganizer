@@ -97,6 +97,63 @@ impl AudibleClient {
         Ok(body.products)
     }
 
+    /// List every book by an author. Paginates the catalog
+    /// endpoint until either no more results come back or
+    /// `max_pages` pages have been consumed.
+    ///
+    /// Calls Audible's `GET /1.0/catalog/products?author=…&page=N`
+    /// with `num_results=50` (Audible's per-page cap). Each call
+    /// returns up to 50 products; the loop stops when a page
+    /// returns fewer than 50 results. `max_pages` is the safety
+    /// limit (default 10 → up to 500 books, more than any real
+    /// author's catalog).
+    ///
+    /// # Errors
+    ///
+    /// Surfaces a [`ab_core::Error::Network`] on the first page
+    /// that fails. Already-collected pages are discarded — partial
+    /// results would mask underlying failures.
+    pub async fn list_books_by_author(
+        &self,
+        author: &str,
+        max_pages: u32,
+    ) -> Result<Vec<AudibleProduct>> {
+        let mut all: Vec<AudibleProduct> = Vec::new();
+        for page in 1..=max_pages {
+            let page_str = page.to_string();
+            let resp = self
+                .http
+                .get(format!("{BASE}/1.0/catalog/products"))
+                .query(&[
+                    ("author", author),
+                    ("response_groups", SEARCH_RESPONSE_GROUPS),
+                    ("num_results", "50"),
+                    ("page", &page_str),
+                    ("products_sort_by", "ReleaseDate"),
+                ])
+                .send()
+                .await
+                .map_err(|e| ab_core::Error::Network(format!("audible author p{page}: {e}")))?;
+            if !resp.status().is_success() {
+                return Err(ab_core::Error::Network(format!(
+                    "audible author p{page}: HTTP {}",
+                    resp.status()
+                )));
+            }
+            let body: SearchResponse = resp.json().await.map_err(|e| {
+                ab_core::Error::Network(format!("audible author parse p{page}: {e}"))
+            })?;
+            let got = body.products.len();
+            all.extend(body.products);
+            // Audible returns fewer than `num_results` on the last
+            // page; that's our termination signal.
+            if got < 50 {
+                break;
+            }
+        }
+        Ok(all)
+    }
+
     /// Underlying HTTP client.
     #[must_use]
     pub const fn http(&self) -> &Client {
