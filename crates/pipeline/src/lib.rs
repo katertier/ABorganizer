@@ -21,6 +21,7 @@
 //!   while running aborts cleanly; partial writes are rolled back via
 //!   transactions.
 
+pub mod cleanup;
 pub mod dag;
 // `dispatcher` is reachable only via `Scheduler::dispatcher_loop`
 // (which constructs and feeds it `DispatcherCtx`). The items here
@@ -31,6 +32,9 @@ pub mod dispatcher;
 pub mod scheduler;
 pub mod stage;
 
+pub use cleanup::{
+    CleanupCtx, CleanupLoopCtx, CleanupRegistry, CleanupTarget, run_category, run_cleanup_loop,
+};
 pub use dag::{Dag, DagBuildError};
 pub use scheduler::{Priority, Scheduler};
 pub use stage::{Stage, StageContext, StageId, StageOutcome, default_reset};

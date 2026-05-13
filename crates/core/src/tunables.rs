@@ -73,6 +73,10 @@ pub struct Tunables {
     /// translations, date / number formats). Distinct from any
     /// per-book language.
     pub library_display: LibraryDisplayTunables,
+
+    /// Cleanup subsystem — periodic-loop interval + age-ratchet
+    /// tiers. See [`CleanupTunables`] and ADR-0025.
+    pub cleanup: CleanupTunables,
 }
 
 impl Default for Tunables {
@@ -94,6 +98,7 @@ impl Default for Tunables {
             transcribe: TranscribeTunables::default(),
             llm: LlmTunables::default(),
             library_display: LibraryDisplayTunables::default(),
+            cleanup: CleanupTunables::default(),
         }
     }
 }
@@ -761,6 +766,107 @@ impl Default for LlmTunables {
             setting_target_words_low: 30,
             setting_target_words_high: 60,
             setting_max_tags: 25,
+        }
+    }
+}
+
+/// Cleanup-subsystem tunables (slice H.2, ADR-0025).
+///
+/// The daemon spawns a periodic loop that wakes every
+/// `check_secs`, asks each registered `CleanupTarget` to
+/// `report` what's eligible under the current age tier, then
+/// `apply` (if the loop is configured for auto-apply; v1 ships
+/// dry-run only — operator runs `aborg clean ... --apply` to
+/// actually delete).
+///
+/// `default_age_days` is the baseline gate; under disk
+/// pressure the loop walks `pressure` tiers and picks the
+/// smallest matching `age_days`. Both `free_percent` and
+/// `free_bytes` are valid triggers per tier (the operator
+/// picks whichever framing fits their hardware — % on small
+/// laptops, absolute bytes on NAS rigs).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CleanupTunables {
+    /// Wake interval of the periodic cleanup loop, in seconds.
+    /// `0` disables the loop (operator-triggered cleanups via
+    /// `aborg clean` still work). Default `3600` (1 h).
+    pub check_secs: u64,
+    /// Baseline age gate in days. Items older than this are
+    /// eligible to be cleaned during a non-pressure tick.
+    /// Default `14`.
+    pub default_age_days: u64,
+    /// Pressure tiers, evaluated in order. Each tier specifies
+    /// at least one trigger (`free_percent` or `free_bytes`)
+    /// and the `age_days` to apply when triggered. Tiers
+    /// stack: the smallest matching `age_days` across all hit
+    /// tiers wins (most-aggressive cleanup).
+    pub pressure: Vec<PressureTier>,
+}
+
+/// One ratchet step in [`CleanupTunables::pressure`].
+///
+/// Both threshold fields are optional but at least one should
+/// be set or the tier is dead config (silently skipped — no
+/// validation panic). The double-knob design covers both
+/// framings:
+///
+/// - `free_percent` — natural for a single-disk laptop (10 %,
+///   5 %).
+/// - `free_bytes`   — natural for a NAS or anything where %
+///   becomes finicky at scale (a 22 TB volume at 5 % free is
+///   still 1.1 TB, well past sane thresholds).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PressureTier {
+    /// Trigger when free disk % drops below this. `None` to
+    /// disable the percent trigger on this tier.
+    pub free_percent: Option<f32>,
+    /// Trigger when free disk bytes drops below this. `None`
+    /// to disable the absolute trigger on this tier.
+    pub free_bytes: Option<u64>,
+    /// Age gate (in days) to apply when this tier triggers.
+    pub age_days: u64,
+}
+
+impl Default for PressureTier {
+    fn default() -> Self {
+        Self {
+            free_percent: None,
+            free_bytes: None,
+            // Match `default_age_days` so an
+            // unspecialised-via-serde tier is a no-op rather
+            // than an aggressive surprise.
+            age_days: 14,
+        }
+    }
+}
+
+impl Default for CleanupTunables {
+    fn default() -> Self {
+        Self {
+            check_secs: 3_600,
+            default_age_days: 14,
+            // Two-tier ratchet — % and absolute thresholds set
+            // on each tier. The first-hit-wins logic means
+            // either framing triggers the same tier; on
+            // wildly-different disk sizes the operator
+            // overrides via config.
+            pressure: vec![
+                PressureTier {
+                    free_percent: Some(10.0),
+                    // 50 GB free is a reasonable floor on
+                    // smaller dev rigs; NAS-grade users
+                    // override.
+                    free_bytes: Some(50 * 1024 * 1024 * 1024),
+                    age_days: 7,
+                },
+                PressureTier {
+                    free_percent: Some(5.0),
+                    free_bytes: Some(10 * 1024 * 1024 * 1024),
+                    age_days: 3,
+                },
+            ],
         }
     }
 }
