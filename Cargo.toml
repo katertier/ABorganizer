@@ -12,6 +12,7 @@ members = [
     "crates/foundation-models",
     "crates/llm-extractors",
     "crates/audio",
+    "crates/transcode",
     "crates/api",
     "crates/shelf",
     "crates/webui-config",

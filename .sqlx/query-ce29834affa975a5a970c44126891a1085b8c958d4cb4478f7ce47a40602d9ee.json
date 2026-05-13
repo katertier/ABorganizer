@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO book_file_refs (file_id, holder_stage, holder_book_id)\n                 VALUES (?, ?, ?)\n           RETURNING ref_id AS \"ref_id!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "ref_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "ce29834affa975a5a970c44126891a1085b8c958d4cb4478f7ce47a40602d9ee"
+}
