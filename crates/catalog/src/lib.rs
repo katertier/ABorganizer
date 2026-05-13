@@ -21,6 +21,7 @@ pub mod chapters;
 pub mod consensus;
 pub mod embedded_chapters;
 pub mod enrich;
+pub mod franchise;
 pub mod identity;
 
 pub use audible::AudibleClient;
