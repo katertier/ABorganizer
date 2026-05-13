@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE book_file_audiologos SET status = 'rejected', rejected_at = strftime('%s','now') WHERE audiologo_row_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "6cd47aa405c54cc1409888acbeccd5295dca4478da854233181a2f99bd839dac"
+}

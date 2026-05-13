@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n              bfa.audiologo_row_id AS \"row_id!: i64\",\n              bf.book_id           AS \"book_id!: i64\",\n              bfa.file_id,\n              bfa.kind,\n              bfa.jingle_start_ms,\n              bfa.jingle_end_ms,\n              bfa.padding_ms,\n              bfa.method,\n              bfa.audiologo_id,\n              bfa.confidence\n            FROM book_file_audiologos bfa\n            JOIN book_files bf ON bf.file_id = bfa.file_id\n           WHERE bfa.audiologo_row_id = ? AND bfa.status = 'candidate'",
+  "describe": {
+    "columns": [
+      {
+        "name": "row_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "book_id!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "file_id",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "kind",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "jingle_start_ms",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "jingle_end_ms",
+        "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "padding_ms",
+        "ordinal": 6,
+        "type_info": "Integer"
+      },
+      {
+        "name": "method",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "audiologo_id",
+        "ordinal": 8,
+        "type_info": "Integer"
+      },
+      {
+        "name": "confidence",
+        "ordinal": 9,
+        "type_info": "Float"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "ab2e802e95c448272120379f1e43542b098e632b5171b92cfa1054de28e0b063"
+}

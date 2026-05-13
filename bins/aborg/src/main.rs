@@ -257,6 +257,38 @@ enum AudiologoAction {
         /// Path to the `ABtagger` export (JSON).
         path: PathBuf,
     },
+    /// List `book_file_audiologos` rows at `status='candidate'`
+    /// for operator review. Slice 4D.
+    Review {
+        /// Output format.
+        #[arg(short = 'o', long, default_value = "human")]
+        output: OutputFormat,
+    },
+    /// Approve a candidate audiologo row — promotes it to
+    /// `status='applied'`, runs the chapter shift, and may
+    /// auto-confirm the underlying `audiologos` row when its
+    /// `match_count` has crossed the auto-confirm threshold.
+    Approve {
+        /// `book_file_audiologos.audiologo_row_id` of the
+        /// candidate row to approve.
+        row_id: i64,
+        /// Optional operator note (currently logged only).
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Reject a candidate audiologo row — flips it to
+    /// `status='rejected'`. The chapter offsets are unchanged
+    /// (no apply happened). Applied rows can't be rejected this
+    /// way yet; the inverse chapter-shift maths is a future
+    /// slice.
+    Reject {
+        /// `book_file_audiologos.audiologo_row_id` of the
+        /// candidate row to reject.
+        row_id: i64,
+        /// Optional operator note (currently logged only).
+        #[arg(long)]
+        note: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -405,6 +437,15 @@ async fn main() -> Result<()> {
             }
             AudiologoAction::Import { path } => {
                 audiologo_import(&path, cli.output).await?;
+            }
+            AudiologoAction::Review { output } => {
+                audiologos_review(&cli.daemon, output).await?;
+            }
+            AudiologoAction::Approve { row_id, note } => {
+                audiologos_approve(&cli.daemon, row_id, note.as_deref(), cli.output).await?;
+            }
+            AudiologoAction::Reject { row_id, note } => {
+                audiologos_reject(&cli.daemon, row_id, note.as_deref(), cli.output).await?;
             }
         },
         Command::Names { action } => match action {
@@ -1568,5 +1609,155 @@ async fn audiologo_import(path: &std::path::Path, _output: OutputFormat) -> Resu
          (the ABtagger export shape needs to be confirmed against \
          the tmp HTML review report first). No rows inserted.",
     );
+    Ok(())
+}
+
+// ── Audiologos review (slice 4D) ─────────────────────────────────
+
+/// One row from `GET /api/v1/audiologos/review`. Mirrors
+/// `ab_api::audiologo_review::ReviewRow`.
+#[derive(serde::Deserialize, serde::Serialize)]
+struct ReviewRow {
+    row_id: i64,
+    book_id: i64,
+    book_title: String,
+    file_id: i64,
+    file_path: String,
+    kind: String,
+    jingle_start_ms: i64,
+    jingle_end_ms: i64,
+    method: String,
+    confidence: f64,
+    audiologo_id: Option<i64>,
+    audiologo_name: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct ReviewActionRequest<'a> {
+    note: Option<&'a str>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct ApproveResponse {
+    row_id: i64,
+    applied_row_id: i64,
+    chapters_shifted: i64,
+    auto_confirmed: bool,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct RejectResponse {
+    row_id: i64,
+}
+
+async fn audiologos_review(daemon: &str, output: OutputFormat) -> Result<()> {
+    let url = format!("{daemon}/api/v1/audiologos/review");
+    let resp = client()
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("review failed: HTTP {status}: {body}");
+    }
+    let rows: Vec<ReviewRow> = resp.json().await.context("parse review response")?;
+
+    match output {
+        OutputFormat::Json => {
+            let s = serde_json::to_string_pretty(&rows).context("encode json")?;
+            tracing::info!(message = %s, "audiologos.review.json");
+        }
+        OutputFormat::Human => {
+            if rows.is_empty() {
+                tracing::info!("audiologos.review.empty");
+                return Ok(());
+            }
+            for r in &rows {
+                let logo = r.audiologo_name.as_deref().unwrap_or("(no fingerprint)");
+                tracing::info!(
+                    row_id = r.row_id,
+                    book_id = r.book_id,
+                    title = %r.book_title,
+                    kind = %r.kind,
+                    method = %r.method,
+                    confidence = r.confidence,
+                    jingle_ms = format!("[{}, {}]", r.jingle_start_ms, r.jingle_end_ms),
+                    audiologo = %logo,
+                    "audiologos.review.row"
+                );
+            }
+            tracing::info!(total = rows.len(), "audiologos.review.summary");
+        }
+    }
+    Ok(())
+}
+
+async fn audiologos_approve(
+    daemon: &str,
+    row_id: i64,
+    note: Option<&str>,
+    output: OutputFormat,
+) -> Result<()> {
+    let url = format!("{daemon}/api/v1/audiologos/{row_id}/approve");
+    let resp = client()
+        .post(&url)
+        .json(&ReviewActionRequest { note })
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("approve failed: HTTP {status}: {body}");
+    }
+    let body: ApproveResponse = resp.json().await.context("parse approve response")?;
+    match output {
+        OutputFormat::Json => {
+            let s = serde_json::to_string_pretty(&body).context("encode")?;
+            tracing::info!(message = %s, "audiologos.approve.json");
+        }
+        OutputFormat::Human => {
+            tracing::info!(
+                row_id = body.row_id,
+                applied_row_id = body.applied_row_id,
+                chapters_shifted = body.chapters_shifted,
+                auto_confirmed = body.auto_confirmed,
+                "audiologos.approve.done"
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn audiologos_reject(
+    daemon: &str,
+    row_id: i64,
+    note: Option<&str>,
+    output: OutputFormat,
+) -> Result<()> {
+    let url = format!("{daemon}/api/v1/audiologos/{row_id}/reject");
+    let resp = client()
+        .post(&url)
+        .json(&ReviewActionRequest { note })
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("reject failed: HTTP {status}: {body}");
+    }
+    let body: RejectResponse = resp.json().await.context("parse reject response")?;
+    match output {
+        OutputFormat::Json => {
+            let s = serde_json::to_string_pretty(&body).context("encode")?;
+            tracing::info!(message = %s, "audiologos.reject.json");
+        }
+        OutputFormat::Human => {
+            tracing::info!(row_id = body.row_id, "audiologos.reject.done");
+        }
+    }
     Ok(())
 }

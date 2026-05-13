@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE book_file_audiologos SET status = 're_detected', re_detected_at = strftime('%s','now') WHERE audiologo_row_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "b3d357cba82c5086a092598afa83bbfd8858f92fb2264c7ea58a4952ec8ca2a5"
+}
