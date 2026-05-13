@@ -359,6 +359,162 @@ pub fn hamming(a: &[u32], b: &[u32]) -> u32 {
     bit_diff.saturating_add(len_diff_bits)
 }
 
+// ── Audiologo-scale matching ──────────────────────────────────────
+//
+// The whole-book fingerprint above operates on 30-second windows at
+// fixed offsets. The audiologo detector (slice 4B / ADR-0024) needs
+// a different shape: short (1-10 s) reference fingerprints from the
+// `audiologos` table, slid through the head/tail of a book file to
+// find the publisher jingle. The helpers below produce chromaprint
+// hashes from already-decoded sample buffers (so the FFI sampler in
+// `ab_audio` is the input source) and slide-match two hash
+// sequences against each other.
+
+/// Canonical sample rate for audiologo fingerprinting.
+///
+/// Chromaprint downsamples internally to ~11025 Hz mono; feeding
+/// it 22 050 Hz keeps a margin for the anti-aliasing filter
+/// without spending extra cycles. Callers ask the audio bridge
+/// for samples at this rate.
+pub const AUDIOLOGO_SAMPLE_RATE: u32 = 22_050;
+
+/// Where a sliding match landed in the haystack.
+///
+/// `hash_offset` is in chromaprint-hash positions, not seconds —
+/// callers translate using the algorithm's hash-per-second rate
+/// (`Configuration::item_duration_in_seconds()`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MatchPos {
+    /// Hash-position offset inside the haystack where the best
+    /// alignment of `needle` begins.
+    pub hash_offset: usize,
+    /// Hamming distance at that offset. Smaller is better; the
+    /// caller compares against an audiologo-specific threshold.
+    pub hamming: u32,
+}
+
+/// Fingerprint a mono i16 PCM sample buffer at `sample_rate`.
+///
+/// Used by the audiologo detector to fingerprint either:
+/// - A reference jingle clip (loaded from `audiologos.fingerprint`
+///   when persisted there) — usually fingerprinted once at insert
+///   time and read back as bytes; this path lets test fixtures
+///   regenerate references on the fly.
+/// - A windowed sample from the head/tail of a book file, sourced
+///   from the [`ab_audio::read_samples_window`] FFI bridge.
+///
+/// Mono only — chromaprint's `Fingerprinter::start` rejects 0
+/// channels and the slide-match logic assumes one channel of
+/// timing. F32 callers go through [`samples_f32_to_i16`] first.
+///
+/// # Errors
+///
+/// Returns an [`Error::Stage`] when chromaprint rejects the
+/// configuration (e.g. `sample_rate == 0`) or accepts no input.
+pub fn fingerprint_samples(samples_i16: &[i16], sample_rate: u32) -> Result<Vec<u32>> {
+    if samples_i16.is_empty() {
+        return Err(Error::stage("fingerprint", "no samples in window"));
+    }
+    let mut fp = Fingerprinter::new(&Configuration::preset_test1());
+    fp.start(sample_rate, 1)
+        .map_err(|e| Error::stage("fingerprint", format!("fp.start: {e}")))?;
+    fp.consume(samples_i16);
+    fp.finish();
+    Ok(fp.fingerprint().to_vec())
+}
+
+/// Convert mono Float32 PCM in `[-1.0, 1.0]` to i16 PCM.
+///
+/// Out-of-range values are clamped (Float32 from `AVAssetReader`
+/// is well-behaved, but the contract is unforgiving). Lossy on
+/// purpose — chromaprint downsamples + bit-reduces aggressively
+/// below 16 bit.
+#[must_use]
+pub fn samples_f32_to_i16(samples_f32: &[f32]) -> Vec<i16> {
+    samples_f32
+        .iter()
+        .map(|&s| {
+            let clamped = s.clamp(-1.0, 1.0);
+            // f32 → i16 via 32767.0 scale + round, then i16
+            // bounds-clamp. The scale matches the symmetric PCM
+            // convention so -1.0 lands at -32767 (one off i16::MIN).
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                clippy::cast_precision_loss
+            )]
+            let scaled = (clamped * 32_767.0).round() as i32;
+            i16::try_from(scaled.clamp(i32::from(i16::MIN), i32::from(i16::MAX)))
+                .unwrap_or(i16::MAX)
+        })
+        .collect()
+}
+
+/// Slide `needle` through `haystack` to find the closest match.
+///
+/// Returns the position of the smallest hamming distance, or
+/// `None` when `needle.len() > haystack.len()` (cannot align) or
+/// either is empty. Ties resolve by lowest offset (i.e. earliest
+/// in the haystack — useful when a publisher jingle repeats at
+/// the start of multiple back-to-back books).
+///
+/// Cost: `O(haystack.len() * needle.len())`. For the modal case
+/// — 60-second head window vs. 5-second jingle at chromaprint's
+/// ~3 hashes/sec rate, that's roughly 180 × 15 = 2700 word
+/// comparisons. Cheap.
+#[must_use]
+pub fn slide_match(haystack: &[u32], needle: &[u32]) -> Option<MatchPos> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    let max_offset = haystack.len() - needle.len();
+    let mut best = MatchPos {
+        hash_offset: 0,
+        hamming: u32::MAX,
+    };
+    for offset in 0..=max_offset {
+        let slice = &haystack[offset..offset + needle.len()];
+        let h = hamming(slice, needle);
+        if h < best.hamming {
+            best = MatchPos {
+                hash_offset: offset,
+                hamming: h,
+            };
+        }
+    }
+    Some(best)
+}
+
+/// Translate a slide-match hamming distance into a `[0.0, 1.0]`
+/// confidence score. Smaller hamming → higher confidence.
+///
+/// `bits_per_hash = 32` (chromaprint hash word width). The
+/// confidence is `1.0 - hamming / max_hamming`, where
+/// `max_hamming = needle_hashes * 32`. A perfect match (hamming
+/// 0) scores 1.0; an inverted-bits match (hamming
+/// `max_hamming`) scores 0.0.
+#[must_use]
+pub fn confidence_from_hamming(hamming: u32, needle_hashes: usize) -> f32 {
+    if needle_hashes == 0 {
+        return 0.0;
+    }
+    // usize→f32 loses precision above 2^24; needle_hashes for
+    // an audiologo is in the tens, max_hamming in the low
+    // thousands. Comfortably within f32 precision. The
+    // cast_possible_truncation lint is also pedantic-portable;
+    // capping at u32 keeps the arithmetic well-defined on every
+    // target.
+    let needle_hashes_u32 = u32::try_from(needle_hashes).unwrap_or(u32::MAX);
+    #[allow(clippy::cast_precision_loss)]
+    let max_hamming = (needle_hashes_u32 as f32) * 32.0;
+    if max_hamming <= 0.0 {
+        return 0.0;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let hd = hamming as f32;
+    (1.0 - hd / max_hamming).clamp(0.0, 1.0)
+}
+
 // ── Pipeline stage ────────────────────────────────────────────────
 
 /// Stage that fingerprints a book's first active file and stores
@@ -503,5 +659,111 @@ mod tests {
         let fp = vec![0xDEAD_BEEF_u32, 0x1234_5678, 0xFFFF_0000];
         let bytes = fingerprint_to_bytes(&fp);
         assert_eq!(fingerprint_from_bytes(&bytes), fp);
+    }
+
+    // ── Audiologo-scale matching tests ────────────────────────────
+
+    #[test]
+    fn samples_f32_to_i16_clamps_out_of_range() {
+        let f = [-1.5_f32, -1.0, 0.0, 0.5, 1.0, 2.0];
+        let i = samples_f32_to_i16(&f);
+        // We scale by 32767.0 (i16::MAX as f32), so -1.0 maps to
+        // -32767, NOT i16::MIN (-32768). The asymmetric one-bit
+        // gap is conventional for symmetric PCM quantization; the
+        // alternative (scaling by 32768 then clamping the +1.0
+        // case) wastes the bottom of the range. -1.5 clamps to
+        // -1.0 then scales, so it also lands at -32767.
+        assert_eq!(
+            i[0], -32_767,
+            "below -1.0 clamps to -1.0 then scales to -32767"
+        );
+        assert_eq!(i[1], -32_767, "exactly -1.0 → -32767");
+        assert_eq!(i[2], 0, "zero stays zero");
+        assert!(i[3] > 16_000 && i[3] < 17_000, "0.5 → ~16384");
+        assert_eq!(i[4], i16::MAX, "exactly 1.0 → i16::MAX (32767)");
+        assert_eq!(i[5], i16::MAX, "above 1.0 clamps to i16::MAX");
+    }
+
+    #[test]
+    fn fingerprint_samples_rejects_empty() {
+        let r = fingerprint_samples(&[], AUDIOLOGO_SAMPLE_RATE);
+        assert!(r.is_err(), "empty input must Err");
+    }
+
+    #[test]
+    fn fingerprint_samples_produces_nonempty_hashes() {
+        // 5 seconds of mono i16 PCM at 22050 Hz. Use a simple
+        // sine wave so the output is deterministic enough to pin.
+        let sr = AUDIOLOGO_SAMPLE_RATE;
+        let len = (sr * 5) as usize;
+        let mut samples = Vec::with_capacity(len);
+        for i in 0..len {
+            #[allow(clippy::cast_precision_loss)]
+            let t = (i as f64) / f64::from(sr);
+            let v = (2.0 * std::f64::consts::PI * 440.0 * t).sin();
+            #[allow(clippy::cast_possible_truncation)]
+            samples.push((v * 16_000.0) as i16);
+        }
+        let fp = fingerprint_samples(&samples, sr).expect("fingerprint");
+        assert!(!fp.is_empty(), "5s of audio must produce >=1 hash");
+    }
+
+    #[test]
+    fn slide_match_finds_exact_substring_at_offset_zero() {
+        let needle = vec![1_u32, 2, 3];
+        let haystack = vec![1_u32, 2, 3, 4, 5];
+        let m = slide_match(&haystack, &needle).expect("match");
+        assert_eq!(m.hash_offset, 0);
+        assert_eq!(m.hamming, 0);
+    }
+
+    #[test]
+    fn slide_match_finds_exact_substring_at_inner_offset() {
+        let needle = vec![3_u32, 4];
+        let haystack = vec![1_u32, 2, 3, 4, 5];
+        let m = slide_match(&haystack, &needle).expect("match");
+        assert_eq!(m.hash_offset, 2);
+        assert_eq!(m.hamming, 0);
+    }
+
+    #[test]
+    fn slide_match_returns_lowest_offset_on_tie() {
+        // Two equally-good (but imperfect) matches; the earlier
+        // one wins.
+        let needle = vec![0_u32];
+        let haystack = vec![1_u32, 0, 1, 0];
+        let m = slide_match(&haystack, &needle).expect("match");
+        assert_eq!(m.hash_offset, 1, "first 0 in haystack");
+        assert_eq!(m.hamming, 0);
+    }
+
+    #[test]
+    fn slide_match_none_when_needle_longer_than_haystack() {
+        let needle = vec![1_u32, 2, 3, 4];
+        let haystack = vec![1_u32, 2];
+        assert_eq!(slide_match(&haystack, &needle), None);
+    }
+
+    #[test]
+    fn slide_match_none_when_needle_empty() {
+        let haystack = vec![1_u32, 2, 3];
+        assert_eq!(slide_match(&haystack, &[]), None);
+    }
+
+    #[test]
+    fn confidence_perfect_match_is_one() {
+        assert!((confidence_from_hamming(0, 10) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn confidence_max_hamming_is_zero() {
+        let needle_hashes: usize = 10;
+        let max_h = u32::try_from(needle_hashes).expect("fits in u32") * 32;
+        assert!((confidence_from_hamming(max_h, needle_hashes)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn confidence_handles_zero_hashes() {
+        assert!(confidence_from_hamming(0, 0).abs() < 1e-6);
     }
 }
