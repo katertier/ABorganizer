@@ -31,6 +31,7 @@
 //! layer; tests can match on `ApiError::Internal` when needed.
 
 use crate::error::ApiError;
+use ab_audiologo::BookStatus;
 use sqlx::SqliteConnection;
 
 /// Inputs to [`apply_audiologo_cut`].
@@ -381,15 +382,23 @@ pub async fn recompute_audiologo_status(
     .await
     .map_err(|e| ab_core::Error::Database(format!("audiologo count rows: {e}")))?;
 
+    // Use the typed `ab_audiologo::BookStatus` enum (already
+    // ships with `.as_str()` for DB write + `.parse()` for read)
+    // instead of inline string literals. Cross-model code review
+    // (REVIEW.md § 2.3) flagged that the typed-primitive
+    // direction (slices B1, C2, C3) wasn't yet wired here. Goes
+    // through `BookStatus::*.as_str()` so every value lands in
+    // exactly one place and any future variant addition forces
+    // every reader to handle it at compile time.
     let new_status: &'static str = if counts.applied > 0 {
-        "applied"
+        BookStatus::Applied.as_str()
     } else if counts.candidate > 0 || counts.re_detected > 0 {
-        "detected"
+        BookStatus::Detected.as_str()
     } else if counts.rejected > 0 {
-        "rejected"
+        BookStatus::Rejected.as_str()
     } else if counts.total == 0 {
         // Defer to existing externally-derived status when no
-        // rows exist; 'stripped'/'none' carry catalog context
+        // rows exist; `Stripped`/`None` carry catalog context
         // that's not recoverable from book_file_audiologos.
         let cur: Option<String> = sqlx::query_scalar!(
             "SELECT audiologo_status FROM books WHERE book_id = ?",
@@ -398,12 +407,12 @@ pub async fn recompute_audiologo_status(
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| ab_core::Error::Database(format!("audiologo read status: {e}")))?;
-        match cur.as_deref() {
-            Some("stripped" | "none") => return Ok(()),
-            _ => "unknown",
+        match cur.as_deref().and_then(BookStatus::parse) {
+            Some(BookStatus::Stripped | BookStatus::None) => return Ok(()),
+            _ => BookStatus::Unknown.as_str(),
         }
     } else {
-        "unknown"
+        BookStatus::Unknown.as_str()
     };
 
     sqlx::query!(
