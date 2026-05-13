@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE books SET setting = ?, setting_lang = ?, setting_extractor_version = ? WHERE book_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "b12f70c569260404025fd724894013d27b0c10d2e2039b786c5afbb21aacf862"
+}

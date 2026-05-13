@@ -650,10 +650,67 @@ pub struct LlmTunables {
     /// `{step, label, summary}` rows — 1200 tokens covers a
     /// typical 5-7 act arc with 1-2 sentence summaries each.
     pub arc_max_tokens: usize,
+    /// Soft floor for the number of arc beats the prompt asks
+    /// for. Schema-constrained generation can't enforce array
+    /// lengths, so the prompt restates the range and the parse
+    /// path rejects out-of-range outputs. 5 beats is the
+    /// classical Freytag floor; fewer loses narrative shape.
+    pub arc_target_steps_low: usize,
+    /// Soft cap for the number of arc beats. 7 beats is the
+    /// modal upper end for a single-protagonist novel; beyond
+    /// that the model starts producing chapter-by-chapter
+    /// summaries instead of a true arc.
+    pub arc_target_steps_high: usize,
+    /// Soft floor for words per arc beat's `summary` field.
+    /// 30 words is enough for one sentence of narrative
+    /// signal; below that the beats become labels-only.
+    pub arc_step_target_words_low: usize,
+    /// Soft cap for words per arc beat's `summary` field.
+    /// 50 words is two sentences max; beyond that the
+    /// per-beat summary starts revealing plot resolutions
+    /// the UI hides by default (later-stage beats are
+    /// spoiler-gated, see ADR-0022's spoiler-handling row).
+    pub arc_step_target_words_high: usize,
     /// Token budget for the character extractor. JSON array of
     /// `{name, aliases, role, description}` rows — 1500 tokens
     /// covers up to ~15 characters with brief descriptions.
     pub characters_max_tokens: usize,
+    /// Soft cap for the number of characters the prompt asks
+    /// for. 12 is the modal upper end for an audiobook cast:
+    /// 3-5 principals + a handful of recurring secondaries.
+    /// Schema-constrained generation can't enforce the array
+    /// length; the prompt restates the cap and the runtime
+    /// truncates defensively.
+    pub characters_max: usize,
+    /// Soft floor for the per-character `description` word
+    /// count. 20 words is two sentences max; below that the
+    /// descriptions lose tone signal.
+    pub character_desc_target_words_low: usize,
+    /// Soft cap for the per-character `description` word
+    /// count. 40 words is the point above which descriptions
+    /// start incorporating plot beats that belong in the arc
+    /// or summary stages.
+    pub character_desc_target_words_high: usize,
+    /// Token budget for the setting extractor. Has to cover
+    /// a 30-60 word paragraph PLUS up to ~25 `$`-prefixed
+    /// tags across 10 categories — 800 tokens is the floor
+    /// that fits both without truncating the tag list.
+    pub setting_max_tokens: usize,
+    /// Soft floor for the setting paragraph word count.
+    /// 30 words is two sentences. Less than that and the
+    /// paragraph reads as a label, not a description.
+    pub setting_target_words_low: usize,
+    /// Soft cap for the setting paragraph word count.
+    /// 60 words is four sentences max. Beyond that the
+    /// paragraph drifts into plot territory; the `$`-tag
+    /// array carries the structured signal.
+    pub setting_target_words_high: usize,
+    /// Soft cap on the total number of `$`-prefixed setting
+    /// tags emitted per book (sum across all 10 categories).
+    /// 25 absorbs faction-heavy books (`$group-*` blooms);
+    /// the prompt restates the cap and the runtime truncates
+    /// defensively.
+    pub setting_max_tags: usize,
 }
 
 impl Default for LlmTunables {
@@ -667,7 +724,18 @@ impl Default for LlmTunables {
             summary_target_words_low: 100,
             summary_target_words_high: 150,
             arc_max_tokens: 1_200,
+            arc_target_steps_low: 5,
+            arc_target_steps_high: 7,
+            arc_step_target_words_low: 30,
+            arc_step_target_words_high: 50,
             characters_max_tokens: 1_500,
+            characters_max: 12,
+            character_desc_target_words_low: 20,
+            character_desc_target_words_high: 40,
+            setting_max_tokens: 800,
+            setting_target_words_low: 30,
+            setting_target_words_high: 60,
+            setting_max_tags: 25,
         }
     }
 }

@@ -22,7 +22,7 @@ pub mod tags;
 pub mod time_format;
 pub mod tunables;
 
-pub use cache::{CacheKey, ParseCacheKeyError};
+pub use cache::{CacheKey, ParseCacheKeyError, cache_keys_for_stage};
 pub use error::{Error, Result};
 pub use field::{Field, ParseFieldError};
 pub use ids::{BookId, FileId, JobId};

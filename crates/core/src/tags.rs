@@ -1,8 +1,8 @@
 //! Tag prefix convention — single source of truth for the
-//! `@` / `#` / `!` characters that classify rows in
+//! `@` / `#` / `!` / `$` characters that classify rows in
 //! `book_tags.tag`.
 //!
-//! Background: the storage layer is identical for all three
+//! Background: the storage layer is identical for all four
 //! prefixes — `book_tags(book_id, tag, source)`. The prefix
 //! lives inside the `tag` string. Filter / export semantics
 //! (e.g. "hide spoilers in the player UI by default") read the
@@ -34,6 +34,17 @@ pub const TAG_PREFIX_DNA: char = '#';
 /// queries.
 pub const TAG_PREFIX_SPOILER: char = '!';
 
+/// Prefix character for setting tags (ADR-0021).
+///
+/// Produced by the 3K.8 setting extractor. The body follows a
+/// `<category>-<value>` convention covering 10 categories:
+/// `magic` / `tech` / `tone` / `pace` / `theme` / `era` /
+/// `world` / `location` / `race` / `group` (ADR-0022).
+/// Examples: `$world-fantasy-medieval`, `$location-london`,
+/// `$race-elves`, `$group-imperial-navy`. Always shown in UI
+/// — setting tags describe the world, not the plot.
+pub const TAG_PREFIX_SETTING: char = '$';
+
 /// Tag category classified by the prefix in `book_tags.tag`.
 ///
 /// Returned by [`TagKind::from_tag`] — useful when reading
@@ -47,6 +58,8 @@ pub enum TagKind {
     Dna,
     /// `!`-prefixed.
     Spoiler,
+    /// `$`-prefixed (ADR-0021).
+    Setting,
 }
 
 impl TagKind {
@@ -57,12 +70,13 @@ impl TagKind {
             Self::Genre => TAG_PREFIX_GENRE,
             Self::Dna => TAG_PREFIX_DNA,
             Self::Spoiler => TAG_PREFIX_SPOILER,
+            Self::Setting => TAG_PREFIX_SETTING,
         }
     }
 
     /// Classify a stored `book_tags.tag` string by its prefix.
     /// Returns `None` when the first character isn't one of
-    /// the three known prefixes — those are treated as legacy
+    /// the four known prefixes — those are treated as legacy
     /// untyped tags.
     #[must_use]
     pub fn from_tag(tag: &str) -> Option<Self> {
@@ -70,6 +84,7 @@ impl TagKind {
             TAG_PREFIX_GENRE => Some(Self::Genre),
             TAG_PREFIX_DNA => Some(Self::Dna),
             TAG_PREFIX_SPOILER => Some(Self::Spoiler),
+            TAG_PREFIX_SETTING => Some(Self::Setting),
             _ => None,
         }
     }
@@ -92,6 +107,7 @@ mod tests {
         assert_eq!(TagKind::Genre.prefix(), TAG_PREFIX_GENRE);
         assert_eq!(TagKind::Dna.prefix(), TAG_PREFIX_DNA);
         assert_eq!(TagKind::Spoiler.prefix(), TAG_PREFIX_SPOILER);
+        assert_eq!(TagKind::Setting.prefix(), TAG_PREFIX_SETTING);
     }
 
     #[test]
@@ -99,6 +115,15 @@ mod tests {
         assert_eq!(TagKind::from_tag("@fantasy"), Some(TagKind::Genre));
         assert_eq!(TagKind::from_tag("#cozy"), Some(TagKind::Dna));
         assert_eq!(TagKind::from_tag("!hero-dies"), Some(TagKind::Spoiler));
+        assert_eq!(
+            TagKind::from_tag("$world-fantasy-medieval"),
+            Some(TagKind::Setting),
+        );
+        assert_eq!(
+            TagKind::from_tag("$location-london"),
+            Some(TagKind::Setting)
+        );
+        assert_eq!(TagKind::from_tag("$race-elves"), Some(TagKind::Setting));
         assert_eq!(TagKind::from_tag("unprefixed"), None);
         assert_eq!(TagKind::from_tag(""), None);
     }
@@ -108,5 +133,9 @@ mod tests {
         assert_eq!(TagKind::Dna.format_tag("cozy"), "#cozy");
         assert_eq!(TagKind::Spoiler.format_tag("hero-dies"), "!hero-dies");
         assert_eq!(TagKind::Genre.format_tag("fantasy"), "@fantasy");
+        assert_eq!(
+            TagKind::Setting.format_tag("world-fantasy-medieval"),
+            "$world-fantasy-medieval",
+        );
     }
 }

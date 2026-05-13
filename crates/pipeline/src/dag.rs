@@ -141,6 +141,33 @@ impl Dag {
     pub fn is_empty(&self) -> bool {
         self.stages.is_empty()
     }
+
+    /// Resolve a stage name (as a string) to the typed
+    /// [`StageId`] for that stage, if it's registered.
+    ///
+    /// Used by the retry endpoint (ADR-0023) to turn a
+    /// user-supplied string into the typed identifier that
+    /// [`crate::Scheduler::submit`] requires. Returns `None`
+    /// when the name doesn't match any registered stage.
+    ///
+    /// The returned `StageId` borrows from the static map key,
+    /// which is itself a `&'static str` (every stage's
+    /// `STAGE_ID` is a `const`), so the returned value is
+    /// freely cloneable + sized like a thin pointer.
+    #[must_use]
+    pub fn stage_id_by_name(&self, name: &str) -> Option<crate::StageId> {
+        self.stages
+            .get_key_value(name)
+            .map(|(k, _)| crate::StageId::new(k))
+    }
+
+    /// Sorted snapshot of every registered stage's name.
+    /// Used by the retry endpoint's 400-response body so clients
+    /// can recover from a typo without grepping source.
+    #[must_use]
+    pub fn known_stage_names(&self) -> Vec<&'static str> {
+        self.stages.keys().copied().collect()
+    }
 }
 
 #[cfg(test)]

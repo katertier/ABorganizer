@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT 1 AS \"ok!\" FROM books WHERE book_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "ok!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "528791308f3cd338ffb117d77f456a97ba66fcdec1c780ca91438a63edd540f8"
+}

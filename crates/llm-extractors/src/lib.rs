@@ -17,11 +17,20 @@
 //! - [`ExtractSeriesSummaryStage`] — spoiler-free series synopsis
 //!   into `series.summary` + `_lang` (regenerated when a book
 //!   joins a series or member-book summaries change).
-//!
-//! Planned (slices 3K.5 / 3K.6):
-//!
-//! - Story arc into `books.story_arc_json`.
-//! - Characters into the `characters` table.
+//! - [`ExtractStoryArcStage`] — 5-7 narrative beats into
+//!   `books.story_arc_json` (per ADR-0022 per-book content
+//!   extractor template).
+//! - [`ExtractCharactersStage`] — up to 12 characters per book
+//!   into the `characters` table, with `is_pov` + 6 optional
+//!   trait fields (species / condition / occupation / age /
+//!   gender / affiliation). Migration 008 adds the trait
+//!   columns; ADR-0022 § "Character trait taxonomy" is the
+//!   source of truth for what each field carries.
+//! - [`ExtractSettingStage`] — one-paragraph setting summary
+//!   into `books.setting` + 10-category `$`-prefixed tags into
+//!   `book_tags`. Migration 009 adds the paragraph columns;
+//!   ADR-0021 + ADR-0022 codify the prefix class and the
+//!   `$world` ↔ `$location` boundary the prompt enforces.
 //!
 //! All extractors follow the same pattern: idempotent re-runs
 //! keyed by `LlmTunables.extractor_version` stamped on the
@@ -35,10 +44,21 @@
 //! off-schema tokens; the DNA stage was retrofitted to the
 //! same pattern in slice C5.7.d.
 
+pub mod arc_stage;
+pub mod characters_stage;
 pub mod dna_stage;
 pub mod series_summary_stage;
+pub mod setting_stage;
 pub mod summary_stage;
 
+pub use arc_stage::{
+    ARC_SCHEMA_JSON, ArcBeat, ExtractStoryArcStage, STAGE_NAME as EXTRACT_STORY_ARC_STAGE,
+    build_prompt as build_arc_prompt,
+};
+pub use characters_stage::{
+    CHARACTERS_SCHEMA_JSON, Character, ExtractCharactersStage,
+    STAGE_NAME as EXTRACT_CHARACTERS_STAGE, build_prompt as build_characters_prompt,
+};
 pub use dna_stage::{
     DNA_SCHEMA_JSON, ExtractDnaTagsStage, STAGE_NAME as EXTRACT_DNA_TAGS_STAGE, TAG_SOURCE_DNA_LLM,
     build_prompt as build_dna_prompt, normalise_tag,
@@ -46,6 +66,10 @@ pub use dna_stage::{
 pub use series_summary_stage::{
     ExtractSeriesSummaryStage, SERIES_SUMMARY_SCHEMA_JSON,
     STAGE_NAME as EXTRACT_SERIES_SUMMARY_STAGE,
+};
+pub use setting_stage::{
+    ExtractSettingStage, SETTING_SCHEMA_JSON, STAGE_NAME as EXTRACT_SETTING_STAGE,
+    TAG_SOURCE_SETTING_LLM, build_prompt as build_setting_prompt, normalise_setting_body,
 };
 pub use summary_stage::{
     ExtractSummaryStage, STAGE_NAME as EXTRACT_SUMMARY_STAGE, SUMMARY_SCHEMA_JSON,

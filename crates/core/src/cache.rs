@@ -56,6 +56,11 @@ pub enum CacheKey {
     /// Raw LLM response for the character extractor. Promoted
     /// to rows in the `characters` table.
     Characters,
+    /// Raw LLM response for the setting extractor. Promoted
+    /// to `books.setting` + `books.setting_lang` (paragraph)
+    /// and `book_tags` rows with `source='setting_llm'`
+    /// (`$`-prefixed tags across 10 categories per ADR-0022).
+    Setting,
 }
 
 impl CacheKey {
@@ -73,6 +78,7 @@ impl CacheKey {
             Self::SummarySpoilerFree => "summary_spoiler_free",
             Self::StoryArc => "story_arc",
             Self::Characters => "characters",
+            Self::Setting => "setting",
         }
     }
 
@@ -93,6 +99,7 @@ impl CacheKey {
             "summary_spoiler_free" => Some(Self::SummarySpoilerFree),
             "story_arc" => Some(Self::StoryArc),
             "characters" => Some(Self::Characters),
+            "setting" => Some(Self::Setting),
             _ => None,
         }
     }
@@ -142,8 +149,73 @@ impl std::str::FromStr for CacheKey {
     }
 }
 
+/// Map a stage's name (as it appears in `pipeline_progress.stage`
+/// and `StageId::as_str()`) to the `ai_cache` rows the stage
+/// produces.
+///
+/// Used by the `aborg book retry` endpoint (ADR-0023) — the
+/// daemon clears all returned [`CacheKey`] rows alongside the
+/// `pipeline_progress` row so the stage re-runs from a clean
+/// slate. Stages that produce no `ai_cache` rows (scan,
+/// fingerprint, audnexus-*, identity-*, consensus, chapter-*,
+/// detect-description-lang, run-transcript-extractors,
+/// extract-summary-spoiler-free-series) return `&[]`.
+///
+/// Unknown stage names return `None` so the caller can
+/// distinguish "stage exists but has no caches" from "stage
+/// not registered." The DAG is the authoritative
+/// known-stages list; this lookup is purely cache-side.
+///
+/// Adding a new stage with cache output: extend the match
+/// arm. The schema-parity tests on each extractor guard
+/// against the cache-key string itself drifting.
+#[must_use]
+pub fn cache_keys_for_stage(stage: &str) -> Option<&'static [CacheKey]> {
+    use CacheKey::{
+        Characters, DnaTags, Setting, StoryArc, SummarySpoilerFree, TranscriptFull, TranscriptHead,
+        TranscriptSamples, TranscriptTail,
+    };
+    // `&'static` literals so the result is cheap to return.
+    const HEAD_TAIL: &[CacheKey] = &[TranscriptHead, TranscriptTail];
+    const SAMPLES: &[CacheKey] = &[TranscriptSamples];
+    const FULL: &[CacheKey] = &[TranscriptFull];
+    const DNA: &[CacheKey] = &[DnaTags];
+    const SUMMARY: &[CacheKey] = &[SummarySpoilerFree];
+    const ARC: &[CacheKey] = &[StoryArc];
+    const CHARS: &[CacheKey] = &[Characters];
+    const SETTING: &[CacheKey] = &[Setting];
+    const NONE: &[CacheKey] = &[];
+
+    Some(match stage {
+        "transcribe-head-tail" => HEAD_TAIL,
+        "transcribe-samples" => SAMPLES,
+        "transcribe-full" => FULL,
+        "extract-dna-tags" => DNA,
+        "extract-summary-spoiler-free" => SUMMARY,
+        "extract-story-arc" => ARC,
+        "extract-characters" => CHARS,
+        "extract-setting" => SETTING,
+        // Stages without ai_cache output. They still have
+        // pipeline_progress rows the retry endpoint clears,
+        // but no cache-side cleanup.
+        "tag-read"
+        | "fingerprint"
+        | "audible-search"
+        | "audnexus-enrich"
+        | "audnexus-chapters"
+        | "consensus"
+        | "identity-resolve"
+        | "embedded-chapters"
+        | "chapter-pick-winner"
+        | "detect-description-lang"
+        | "run-transcript-extractors"
+        | "extract-summary-spoiler-free-series" => NONE,
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -160,6 +232,7 @@ mod tests {
             CacheKey::SummarySpoilerFree,
             CacheKey::StoryArc,
             CacheKey::Characters,
+            CacheKey::Setting,
         ] {
             let s = key.as_str();
             assert_eq!(CacheKey::parse(s), Some(key), "round-trip {s}");
@@ -190,6 +263,7 @@ mod tests {
             CacheKey::SummarySpoilerFree,
             CacheKey::StoryArc,
             CacheKey::Characters,
+            CacheKey::Setting,
         ] {
             let parsed: CacheKey = key.as_str().parse().expect("from_str round trip");
             assert_eq!(parsed, key);
@@ -202,5 +276,72 @@ mod tests {
         assert_eq!(err.0, "transcribe_head");
         let msg = format!("{err}");
         assert!(msg.contains("transcribe_head"), "got: {msg}");
+    }
+
+    // ── cache_keys_for_stage (ADR-0023) ─────────────────────────
+
+    #[test]
+    fn stage_lookup_extract_stages_produce_their_cache_keys() {
+        // Each LLM extractor produces exactly one ai_cache row.
+        // The retry endpoint clears whatever this list returns.
+        for (stage, expected) in [
+            ("extract-dna-tags", &[CacheKey::DnaTags][..]),
+            (
+                "extract-summary-spoiler-free",
+                &[CacheKey::SummarySpoilerFree][..],
+            ),
+            ("extract-story-arc", &[CacheKey::StoryArc][..]),
+            ("extract-characters", &[CacheKey::Characters][..]),
+            ("extract-setting", &[CacheKey::Setting][..]),
+        ] {
+            assert_eq!(
+                cache_keys_for_stage(stage),
+                Some(expected),
+                "lookup for `{stage}`",
+            );
+        }
+    }
+
+    #[test]
+    fn stage_lookup_transcribe_head_tail_returns_both_caches() {
+        // head-tail is the one multi-output stage. The retry
+        // endpoint deletes BOTH rows; missing one would leave
+        // a stale tail row pointing at the old extractor_version.
+        let keys = cache_keys_for_stage("transcribe-head-tail").expect("known stage");
+        assert_eq!(keys.len(), 2);
+        assert!(keys.contains(&CacheKey::TranscriptHead));
+        assert!(keys.contains(&CacheKey::TranscriptTail));
+    }
+
+    #[test]
+    fn stage_lookup_non_cache_stages_return_empty_slice() {
+        // Cache-less stages must not return None — None means
+        // "stage not registered". An empty slice is the right
+        // signal for "registered, but no caches to clear".
+        for stage in [
+            "tag-read",
+            "fingerprint",
+            "audnexus-enrich",
+            "consensus",
+            "identity-resolve",
+            "chapter-pick-winner",
+            "detect-description-lang",
+            "run-transcript-extractors",
+            "extract-summary-spoiler-free-series",
+        ] {
+            let keys = cache_keys_for_stage(stage)
+                .unwrap_or_else(|| panic!("`{stage}` should be a known no-cache stage"));
+            assert!(
+                keys.is_empty(),
+                "`{stage}` claims to produce {keys:?} but is a no-cache stage",
+            );
+        }
+    }
+
+    #[test]
+    fn stage_lookup_unknown_stage_returns_none() {
+        assert!(cache_keys_for_stage("not-a-real-stage").is_none());
+        assert!(cache_keys_for_stage("").is_none());
+        assert!(cache_keys_for_stage("EXTRACT-DNA-TAGS").is_none()); // case-sensitive
     }
 }

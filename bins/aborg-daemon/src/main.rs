@@ -158,6 +158,28 @@ fn build_pipeline_stages(tunables: &Tunables) -> Vec<Arc<dyn Stage>> {
         // policy — library_locale is reserved for genre
         // vocabulary).
         Arc::new(ab_llm_extractors::ExtractSummaryStage::new(&tunables.llm)),
+        // `extract-story-arc` (slice 3K.5) — Apple-Intelligence
+        // pass producing a 5-7 beat narrative arc into
+        // `books.story_arc_json`. Depends on transcribe-full
+        // + extract-summary-spoiler-free (per ADR-0022, the
+        // summary dependency sequences LLM calls per book).
+        // Spoiler-gating happens at the read surface, not the
+        // model.
+        Arc::new(ab_llm_extractors::ExtractStoryArcStage::new(&tunables.llm)),
+        // `extract-characters` (slice 3K.6) — Apple-Intelligence
+        // pass producing up to 12 characters per book into the
+        // `characters` table, with `is_pov` + 6 trait columns
+        // (migration 008). Depends on transcribe-full + summary
+        // per ADR-0022's per-book content extractor template.
+        Arc::new(ab_llm_extractors::ExtractCharactersStage::new(
+            &tunables.llm,
+        )),
+        // `extract-setting` (slice 3K.8) — Apple-Intelligence
+        // pass producing a one-paragraph setting summary
+        // (books.setting + _lang + _extractor_version,
+        // migration 009) plus 10-category `$`-prefixed tags
+        // into book_tags. ADR-0021 + ADR-0022.
+        Arc::new(ab_llm_extractors::ExtractSettingStage::new(&tunables.llm)),
         // `extract-summary-spoiler-free-series` (slice 3K.4.1) —
         // per-series spoiler-free synopsis, regenerated when a
         // book completes its own summary AND identity-resolve
@@ -219,7 +241,15 @@ async fn main() -> Result<()> {
         cancel: cancel.clone(),
         stage_name: "",
     };
-    let scheduler = Arc::new(Scheduler::spawn(dag, stage_ctx, &tunables.scheduler));
+    // Scheduler keeps its own Arc<Dag> to drive execution; we
+    // also hand a clone to ApiState so handlers (notably the
+    // retry endpoint, ADR-0023) can resolve user-supplied
+    // stage strings into the typed StageId.
+    let scheduler = Arc::new(Scheduler::spawn(
+        Arc::clone(&dag),
+        stage_ctx,
+        &tunables.scheduler,
+    ));
 
     // Idle-priority Speech-model installer. Spawned once at
     // startup; wakes every `tunables.transcribe.idle_install_check_secs`
@@ -235,7 +265,7 @@ async fn main() -> Result<()> {
 
     // Shared state for the API router. Carries the scheduler handle
     // so the scan endpoint can submit new BookIds.
-    let api_state = ab_api::ApiState::new(library.clone(), ephemeral.clone(), scheduler);
+    let api_state = ab_api::ApiState::new(library.clone(), ephemeral.clone(), scheduler, dag);
 
     // Build the unified Router for the API port (api + webuis).
     let mut router = Router::new()

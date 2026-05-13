@@ -26,6 +26,7 @@ ab-scan         = { workspace = true }
 ab-transcript   = { workspace = true }
 ab-speech       = { workspace = true }
 axum        = { workspace = true }
+chrono      = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 sqlx        = { workspace = true }

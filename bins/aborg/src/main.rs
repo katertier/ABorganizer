@@ -104,6 +104,22 @@ enum BookAction {
     List,
     /// Show details of one book (not yet implemented).
     Show { id: i64 },
+    /// Force re-extraction of one stage for one book.
+    ///
+    /// Clears the matching `ai_cache` row (if any) and the
+    /// `pipeline_progress` row, then submits a new background-
+    /// priority job. ADR-0023. Generic across every registered
+    /// pipeline stage (`tag-read`, `extract-summary-spoiler-free`,
+    /// `transcribe-full`, …).
+    Retry {
+        /// Book ID — matches `books.book_id`.
+        book_id: i64,
+        /// Stage to retry — matches a registered stage name.
+        /// On unknown stage the daemon returns 400 with a list
+        /// of known names in the response body.
+        #[arg(long)]
+        stage: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -159,6 +175,9 @@ async fn main() -> Result<()> {
         Command::Book { action } => match action {
             BookAction::List => books_list(&cli.daemon, cli.output).await?,
             BookAction::Show { id } => tracing::info!(id, "book.show: not yet implemented"),
+            BookAction::Retry { book_id, stage } => {
+                book_retry(&cli.daemon, book_id, &stage, cli.output).await?;
+            }
         },
         Command::Daemon { action: _ } => {
             tracing::warn!("daemon control not yet implemented in slice 1A");
@@ -250,6 +269,84 @@ struct BookRow {
 #[derive(Deserialize, Debug, Serialize)]
 struct BooksResponse {
     books: Vec<BookRow>,
+}
+
+#[derive(Serialize, Debug)]
+struct RetryRequest<'a> {
+    stage: &'a str,
+}
+
+#[derive(Deserialize, Debug, Serialize)]
+struct RetryResponse {
+    book_id: i64,
+    stage: String,
+    submitted_at: String,
+    cache_cleared: bool,
+    pipeline_progress_cleared: bool,
+}
+
+#[derive(Deserialize, Debug)]
+struct UnknownStageProblem {
+    detail: String,
+    known_stages: Vec<String>,
+}
+
+/// `aborg book retry <book_id> --stage <stage>` — thin shim
+/// over `POST /api/v1/books/{book_id}/retry`. ADR-0023.
+///
+/// On a 400 the daemon body carries `known_stages`; we surface
+/// those to the user so a typo is recoverable. On a 404 we
+/// surface the body's `detail` field. Network failures (daemon
+/// down) propagate as `anyhow::Error`.
+async fn book_retry(daemon: &str, book_id: i64, stage: &str, output: OutputFormat) -> Result<()> {
+    let url = format!("{daemon}/api/v1/books/{book_id}/retry");
+    let resp = client()
+        .post(&url)
+        .json(&RetryRequest { stage })
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+
+    let status = resp.status();
+    if status == reqwest::StatusCode::BAD_REQUEST {
+        // Try to decode the known_stages list. Surface as a
+        // clean human-readable message; fall through to the
+        // generic error path on a malformed body.
+        let problem: UnknownStageProblem = resp
+            .json()
+            .await
+            .context("decode 400 body for unknown-stage detail")?;
+        anyhow::bail!(
+            "{}\nknown stages: {}",
+            problem.detail,
+            problem.known_stages.join(", "),
+        );
+    }
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("retry failed: HTTP {status}: {body}");
+    }
+
+    let body: RetryResponse = resp.json().await.context("parse retry response")?;
+    match output {
+        OutputFormat::Json => {
+            tracing::info!(
+                "{}",
+                serde_json::to_string_pretty(&body).unwrap_or_default()
+            );
+        }
+        OutputFormat::Human => {
+            tracing::info!(
+                book_id = body.book_id,
+                stage = %body.stage,
+                cache_cleared = body.cache_cleared,
+                progress_cleared = body.pipeline_progress_cleared,
+                submitted_at = %body.submitted_at,
+                "retry submitted",
+            );
+        }
+    }
+    Ok(())
 }
 
 async fn books_list(daemon: &str, output: OutputFormat) -> Result<()> {
