@@ -209,6 +209,35 @@ pub struct AudiologoTunables {
     pub silence_min_secs: f64,
     /// Pre-content headroom retained when cutting (seconds).
     pub cut_headroom_secs: f64,
+
+    // ── Auto-apply confidence floors (per ADR-0024 Revision 2) ──
+    //
+    // Slice 4B.5 reads these to decide whether a candidate row
+    // produced by `detect-audiologo` should auto-promote to
+    // `applied` (with chapter shift) or stay at `candidate` for
+    // user review. Transcript-bearing tiers ship with 0.0 floors
+    // → they never auto-apply by design; the user reviews every
+    // transcript-aided candidate (4D review UI).
+    /// Auto-apply floor for `Method::FingerprintFull`.
+    pub fp_full_min_confidence: f32,
+    /// Auto-apply floor for `Method::FingerprintBookend`.
+    pub fp_bookend_min_confidence: f32,
+    /// Auto-apply floor for `Method::FingerprintAndTranscript`.
+    /// Set to 0.0 to keep the tier as candidate-only.
+    pub fp_and_transcript_min_confidence: f32,
+    /// Auto-apply floor for `Method::TranscriptOnly`. Set to
+    /// 0.0 to keep the tier as candidate-only.
+    pub transcript_only_min_confidence: f32,
+
+    // ── Splice padding (ms) ───────────────────────────────────
+    //
+    // Slice 4B.5 inserts this much silence after the cut to
+    // soften mid-utterance splices. Used as the default when
+    // `book_file_audiologos.padding_ms` is NULL.
+    /// Padding after an intro cut (ms).
+    pub intro_padding_ms: u32,
+    /// Padding after an outro cut (ms).
+    pub outro_padding_ms: u32,
 }
 
 impl Default for AudiologoTunables {
@@ -219,6 +248,12 @@ impl Default for AudiologoTunables {
             silence_noise_db: -40.0,
             silence_min_secs: 0.6,
             cut_headroom_secs: 0.3,
+            fp_full_min_confidence: 0.85,
+            fp_bookend_min_confidence: 0.80,
+            fp_and_transcript_min_confidence: 0.0,
+            transcript_only_min_confidence: 0.0,
+            intro_padding_ms: 250,
+            outro_padding_ms: 250,
         }
     }
 }
