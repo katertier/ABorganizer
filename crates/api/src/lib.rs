@@ -18,6 +18,7 @@
 
 #![allow(missing_docs)] // scaffold
 
+pub mod audiologo_apply;
 pub mod error;
 pub mod router;
 pub mod state;
