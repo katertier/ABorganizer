@@ -168,6 +168,19 @@ impl Dag {
     pub fn known_stage_names(&self) -> Vec<&'static str> {
         self.stages.keys().copied().collect()
     }
+
+    /// Look up a stage by name. Returns the
+    /// `Arc<dyn Stage>` clone so callers can invoke
+    /// [`Stage::reset`] / [`Stage::run`] dynamically.
+    ///
+    /// Used by the multi-stage retry endpoint (H.1.6, ADR-0023)
+    /// to call `reset()` for each requested stage before
+    /// resubmitting. Returns `None` when `name` isn't a
+    /// registered stage.
+    #[must_use]
+    pub fn stage_by_name(&self, name: &str) -> Option<Arc<dyn Stage>> {
+        self.stages.get(name).map(Arc::clone)
+    }
 }
 
 #[cfg(test)]
