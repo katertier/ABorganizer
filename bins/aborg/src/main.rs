@@ -377,6 +377,17 @@ struct BookRow {
     book_id: i64,
     title: String,
     file_path: Option<String>,
+    /// Display author (post-H.3.3). `is_prime` alias from
+    /// `author_aliases` if any, else `authors.name`. `None` when
+    /// the book has no resolved author yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    author: Option<String>,
+    /// Display narrator(s), comma-separated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    narrators: Option<String>,
+    /// Display primary series.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    series: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Serialize)]
@@ -544,7 +555,18 @@ async fn books_list(daemon: &str, output: OutputFormat) -> Result<()> {
             } else {
                 for b in &body.books {
                     let file = b.file_path.as_deref().unwrap_or("<no file>");
-                    tracing::info!(book_id = b.book_id, title = %b.title, file = %file, "book");
+                    let author = b.author.as_deref().unwrap_or("");
+                    let narrators = b.narrators.as_deref().unwrap_or("");
+                    let series = b.series.as_deref().unwrap_or("");
+                    tracing::info!(
+                        book_id = b.book_id,
+                        title = %b.title,
+                        author = %author,
+                        narrators = %narrators,
+                        series = %series,
+                        file = %file,
+                        "book"
+                    );
                 }
                 tracing::info!(count = body.books.len(), "total");
             }

@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n              b.book_id AS \"book_id!\",\n              b.title,\n              (SELECT file_path FROM book_files\n               WHERE book_id = b.book_id LIMIT 1) AS file_path,\n              COALESCE(\n                  (SELECT alias FROM author_aliases\n                     WHERE author_id = b.author_id AND is_prime = 1 LIMIT 1),\n                  (SELECT name FROM authors WHERE author_id = b.author_id LIMIT 1)\n              ) AS author,\n              (SELECT GROUP_CONCAT(\n                          COALESCE(\n                              (SELECT alias FROM narrator_aliases na\n                                 WHERE na.narrator_id = n.narrator_id AND is_prime = 1 LIMIT 1),\n                              n.name\n                          ), ', ')\n                 FROM book_narrator bn\n                 JOIN narrators n ON n.narrator_id = bn.narrator_id\n                 WHERE bn.book_id = b.book_id) AS narrators,\n              (SELECT COALESCE(\n                          (SELECT alias FROM series_aliases sa\n                             WHERE sa.series_id = s.series_id AND is_prime = 1 LIMIT 1),\n                          s.name)\n                 FROM book_series bs\n                 JOIN series s ON s.series_id = bs.series_id\n                 WHERE bs.book_id = b.book_id AND bs.is_primary = 1 LIMIT 1) AS series\n           FROM books b\n           ORDER BY b.book_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "book_id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "title",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "file_path",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "author",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "narrators",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "series",
+        "ordinal": 5,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "6ba47c4d52696c4a68718b0fa4af6ef87d6e9be4b66bf4a3c60886e71b8de0f9"
+}
