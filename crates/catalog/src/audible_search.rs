@@ -142,9 +142,14 @@ impl Stage for AudibleSearchStage {
 async fn has_asin_candidate(library: &ab_db::LibraryDb, book_id: BookId) -> Result<bool> {
     let id = book_id.0;
     let asin_field = Field::Asin.as_str();
+    // The `1 AS "hit!: i64"` annotation pins the column type so
+    // sqlx-prepare doesn't fall back to NULL inference on the
+    // literal `1` (which it does when the prep DB is empty and
+    // the table has been rebuilt by a recent migration —
+    // migration 011 was the trigger for fixing this).
     let row = sqlx::query!(
-        "SELECT 1 AS hit FROM book_field_provenance \
-         WHERE book_id = ? AND field = ? AND value IS NOT NULL LIMIT 1",
+        r#"SELECT 1 AS "hit!: i64" FROM book_field_provenance
+           WHERE book_id = ? AND field = ? AND value IS NOT NULL LIMIT 1"#,
         id,
         asin_field,
     )
@@ -183,14 +188,16 @@ async fn write_asin_candidate(
 ) -> Result<()> {
     let id = book_id.0;
     let asin_field = Field::Asin.as_str();
+    let stage_str = STAGE_ID.as_str();
     sqlx::query!(
         "INSERT INTO book_field_provenance \
-         (book_id, field, value, source, confidence, is_winner) \
-         VALUES (?, ?, ?, ?, ?, 0)",
+         (book_id, field, value, source, stage, confidence, is_winner) \
+         VALUES (?, ?, ?, ?, ?, ?, 0)",
         id,
         asin_field,
         asin,
         PROVENANCE_SOURCE,
+        stage_str,
         AUDIBLE_SEARCH_CONFIDENCE,
     )
     .execute(library.pool())
@@ -259,9 +266,9 @@ mod tests {
             .expect("seed book");
         sqlx::query(
             "INSERT INTO book_field_provenance \
-             (book_id, field, value, source, confidence) \
-             VALUES (1, 'asin', 'B07XYZ1234', 'tag_file', 0.7), \
-                    (1, 'title', 'Some Book', 'tag_file', 0.7)",
+             (book_id, field, value, source, stage, confidence) \
+             VALUES (1, 'asin',  'B07XYZ1234', 'tag_file', 'tag-read', 0.7), \
+                    (1, 'title', 'Some Book',  'tag_file', 'tag-read', 0.7)",
         )
         .execute(ctx.library.pool())
         .await

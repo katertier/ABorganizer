@@ -472,14 +472,16 @@ async fn insert_row(
 ) -> Result<()> {
     let id = row.book_id.0;
     let field = row.field.as_str();
+    let stage = STAGE_ID.as_str();
     sqlx::query!(
         "INSERT INTO book_field_provenance \
-         (book_id, field, value, source, confidence, is_winner, external_id) \
-         VALUES (?, ?, ?, ?, ?, 0, ?)",
+         (book_id, field, value, source, stage, confidence, is_winner, external_id) \
+         VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
         id,
         field,
         row.value,
         row.source,
+        stage,
         AUDNEXUS_CONFIDENCE,
         row.external_id,
     )

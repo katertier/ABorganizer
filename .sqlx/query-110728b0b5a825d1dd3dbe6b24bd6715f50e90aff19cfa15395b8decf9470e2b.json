@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT 1 AS \"hit!: i64\" FROM book_field_provenance\n           WHERE book_id = ? AND field = ? AND value = ? AND source = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "hit!: i64",
+        "ordinal": 0,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "110728b0b5a825d1dd3dbe6b24bd6715f50e90aff19cfa15395b8decf9470e2b"
+}
