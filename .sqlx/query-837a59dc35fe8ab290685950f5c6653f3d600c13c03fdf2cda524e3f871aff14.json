@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE pipeline_progress SET status = 'pending', completed_at = NULL, failure_reason = NULL WHERE book_id = ? AND stage = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "837a59dc35fe8ab290685950f5c6653f3d600c13c03fdf2cda524e3f871aff14"
+}

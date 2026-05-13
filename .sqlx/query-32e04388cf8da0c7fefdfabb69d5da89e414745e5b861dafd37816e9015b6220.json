@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE pipeline_progress SET status = ?, completed_at = strftime('%s','now'), failure_reason = ? WHERE book_id = ? AND stage = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "32e04388cf8da0c7fefdfabb69d5da89e414745e5b861dafd37816e9015b6220"
+}

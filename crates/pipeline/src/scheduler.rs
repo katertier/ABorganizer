@@ -20,9 +20,10 @@ use tracing::info;
 
 use ab_core::tunables::SchedulerTunables;
 use ab_core::{BookId, Result};
+use ab_db::EphemeralDb;
 
 use crate::dag::Dag;
-use crate::stage::{StageContext, StageId};
+use crate::stage::{StageContext, StageId, StageOutcome};
 
 /// Job priority.
 ///
@@ -44,13 +45,13 @@ pub enum Priority {
 
 /// Internal job envelope passed through queues.
 #[derive(Debug, Clone)]
-struct Job {
-    book_id: BookId,
-    stage: StageId,
+pub(crate) struct Job {
+    pub(crate) book_id: BookId,
+    pub(crate) stage: StageId,
     /// Retained for logging + future re-prioritisation; the executor
     /// already routed based on this when picking the channel.
     #[allow(dead_code)]
-    priority: Priority,
+    pub(crate) priority: Priority,
 }
 
 /// The pipeline scheduler. Holds the DAG and three mpsc senders.
@@ -80,6 +81,11 @@ impl Scheduler {
         let cancel = ctx.cancel.clone();
         let idle_wait = Duration::from_secs(tunables.idle_wait_secs);
 
+        // A.2: the worker dispatches dependent stages once a
+        // job completes, so it needs a producer-side handle on
+        // the background queue. Cloned now — the original is
+        // also retained on `Self` for external submit() calls.
+        let worker_bg_tx = background_tx.clone();
         let worker_dag = Arc::clone(&dag);
         tokio::spawn(async move {
             info!(stages = worker_dag.len(), "pipeline.scheduler.started");
@@ -102,11 +108,11 @@ impl Scheduler {
                     }
                     Some(job) = interactive_rx.recv() => {
                         last_busy = Instant::now();
-                        Self::execute(&worker_dag, &ctx, job).await;
+                        Self::execute(&worker_dag, &ctx, job, &worker_bg_tx).await;
                     }
                     Some(job) = background_rx.recv() => {
                         last_busy = Instant::now();
-                        Self::execute(&worker_dag, &ctx, job).await;
+                        Self::execute(&worker_dag, &ctx, job, &worker_bg_tx).await;
                     }
                     // Idle arm — only selectable once the wait
                     // window has elapsed. Doesn't reset
@@ -116,7 +122,7 @@ impl Scheduler {
                     // doesn't accidentally block other idle work
                     // forever.
                     Some(job) = idle_rx.recv(), if idle_ready => {
-                        Self::execute(&worker_dag, &ctx, job).await;
+                        Self::execute(&worker_dag, &ctx, job, &worker_bg_tx).await;
                     }
                     // Wake the loop at the moment the wait window
                     // expires so the idle arm becomes selectable
@@ -141,6 +147,30 @@ impl Scheduler {
             idle_tx,
             cancel,
         }
+    }
+
+    /// Read-only view of the DAG. Used by the dispatcher loop
+    /// (A.3) to walk stage dependencies during periodic
+    /// re-evaluation passes.
+    #[must_use]
+    pub const fn dag(&self) -> &Arc<Dag> {
+        &self.dag
+    }
+
+    /// Producer handle on the background queue, cloned per
+    /// caller. Lets the dispatcher loop submit work without
+    /// going through `submit()` (which is `async` because the
+    /// public API has to absorb arbitrary backpressure; the
+    /// dispatcher uses `try_send` instead, so it can stay
+    /// synchronous and just drop the over-buffer attempt for
+    /// the next tick to retry).
+    ///
+    /// Unused at the A.1/A.2 boundary; consumed by the
+    /// dispatcher loop landing in A.3 of the same slice.
+    #[must_use]
+    #[allow(dead_code)]
+    pub(crate) fn background_sender(&self) -> mpsc::Sender<Job> {
+        self.background_tx.clone()
     }
 
     /// Submit a book + stage for processing.
@@ -180,7 +210,12 @@ impl Scheduler {
         self.cancel.cancel();
     }
 
-    async fn execute(dag: &Arc<Dag>, ctx: &StageContext, job: Job) {
+    async fn execute(
+        dag: &Arc<Dag>,
+        ctx: &StageContext,
+        job: Job,
+        background_tx: &mpsc::Sender<Job>,
+    ) {
         let stage_str = job.stage.as_str();
         let stage_obj = dag
             .iter_topo()
@@ -195,16 +230,48 @@ impl Scheduler {
             ..ctx.clone()
         };
 
+        // A.1: pipeline_progress 'running' write before the stage
+        // body. Failures are logged but don't abort the run — a
+        // missing progress row is recoverable on the next tick
+        // (the dispatcher loop reseeds it), but a stage that
+        // never executes because the DB hiccupped on bookkeeping
+        // is not.
+        write_progress_start(&ctx.ephemeral, job.book_id, stage_str).await;
+
         match stage_obj.run(&stage_ctx, job.book_id).await {
             Ok(outcome) => {
+                write_progress_outcome(&ctx.ephemeral, job.book_id, stage_str, outcome).await;
                 tracing::info!(
                     stage = stage_str,
                     book = %job.book_id,
                     ?outcome,
                     "pipeline.stage.complete"
                 );
+                // A.2: dispatch dependents whose requirements
+                // are now satisfied. Done + Skipped both count
+                // as "this stage no longer blocks dependents";
+                // Continue means we'll be back, no dispatch yet.
+                if matches!(outcome, StageOutcome::Done | StageOutcome::Skipped) {
+                    dispatch_ready_dependents(
+                        dag,
+                        &ctx.ephemeral,
+                        job.book_id,
+                        job.stage,
+                        background_tx,
+                    )
+                    .await;
+                }
             }
             Err(err) => {
+                let msg = err.to_string();
+                write_progress_terminal(
+                    &ctx.ephemeral,
+                    job.book_id,
+                    stage_str,
+                    "failed",
+                    Some(&msg),
+                )
+                .await;
                 tracing::warn!(
                     stage = stage_str,
                     book = %job.book_id,
@@ -216,8 +283,250 @@ impl Scheduler {
     }
 }
 
+// ── pipeline_progress helpers (A.1) ──────────────────────────────────
+// Free functions rather than methods so the dispatcher loop (A.3)
+// can call the same primitives without depending on a Scheduler
+// instance.
+
+/// Write the `running` marker before a stage body starts. Uses
+/// `INSERT … ON CONFLICT DO UPDATE` so the `(book_id, stage)`
+/// PK is preserved across runs (keeps `last_chunk_idx` for
+/// chunked stages mid-resume; everything else is reset).
+async fn write_progress_start(ephemeral: &EphemeralDb, book_id: BookId, stage: &str) {
+    let id = book_id.0;
+    if let Err(e) = sqlx::query!(
+        "INSERT INTO pipeline_progress (book_id, stage, status, started_at, completed_at, failure_reason) \
+         VALUES (?, ?, 'running', strftime('%s','now'), NULL, NULL) \
+         ON CONFLICT(book_id, stage) DO UPDATE SET \
+             status = 'running', \
+             started_at = strftime('%s','now'), \
+             completed_at = NULL, \
+             failure_reason = NULL",
+        id,
+        stage,
+    )
+    .execute(ephemeral.pool())
+    .await
+    {
+        tracing::warn!(book = %book_id, stage, error = %e, "pipeline.progress.start_failed");
+    }
+}
+
+/// Translate a [`StageOutcome`] into the appropriate
+/// `pipeline_progress` write. `Done`/`Skipped` set
+/// `completed_at`; `Continue` leaves it NULL and flips the row
+/// back to `'pending'` so the dispatcher loop sees it as ready
+/// for the next chunk.
+async fn write_progress_outcome(
+    ephemeral: &EphemeralDb,
+    book_id: BookId,
+    stage: &str,
+    outcome: StageOutcome,
+) {
+    match outcome {
+        StageOutcome::Done => {
+            write_progress_terminal(ephemeral, book_id, stage, "succeeded", None).await;
+        }
+        StageOutcome::Skipped => {
+            write_progress_terminal(ephemeral, book_id, stage, "skipped", None).await;
+        }
+        StageOutcome::Continue => {
+            write_progress_continue(ephemeral, book_id, stage).await;
+        }
+    }
+}
+
+async fn write_progress_terminal(
+    ephemeral: &EphemeralDb,
+    book_id: BookId,
+    stage: &str,
+    status: &str,
+    failure_reason: Option<&str>,
+) {
+    let id = book_id.0;
+    if let Err(e) = sqlx::query!(
+        "UPDATE pipeline_progress \
+         SET status = ?, completed_at = strftime('%s','now'), failure_reason = ? \
+         WHERE book_id = ? AND stage = ?",
+        status,
+        failure_reason,
+        id,
+        stage,
+    )
+    .execute(ephemeral.pool())
+    .await
+    {
+        tracing::warn!(book = %book_id, stage, status, error = %e, "pipeline.progress.update_failed");
+    }
+}
+
+async fn write_progress_continue(ephemeral: &EphemeralDb, book_id: BookId, stage: &str) {
+    let id = book_id.0;
+    if let Err(e) = sqlx::query!(
+        "UPDATE pipeline_progress \
+         SET status = 'pending', completed_at = NULL, failure_reason = NULL \
+         WHERE book_id = ? AND stage = ?",
+        id,
+        stage,
+    )
+    .execute(ephemeral.pool())
+    .await
+    {
+        tracing::warn!(book = %book_id, stage, error = %e, "pipeline.progress.continue_failed");
+    }
+}
+
+// ── auto-dispatch (A.2) ──────────────────────────────────────────────
+
+/// After a stage finishes (Done / Skipped), submit every
+/// dependent stage whose `requires()` are now fully satisfied
+/// in `pipeline_progress`. Best-effort: a full channel drops
+/// the submission for this tick; the periodic dispatcher loop
+/// (A.3) will retry it on the next wake.
+async fn dispatch_ready_dependents(
+    dag: &Arc<Dag>,
+    ephemeral: &EphemeralDb,
+    book_id: BookId,
+    completed_stage: StageId,
+    background_tx: &mpsc::Sender<Job>,
+) {
+    let completed_str = completed_stage.as_str();
+    // Collect candidates up front so we don't hold a borrow on
+    // the DAG across `await` points.
+    let candidates: Vec<&'static str> = dag
+        .iter_topo()
+        .filter_map(|(name, stage)| {
+            stage
+                .requires()
+                .iter()
+                .any(|r| r.as_str() == completed_str)
+                .then_some(name)
+        })
+        .collect();
+
+    for name in candidates {
+        let Some(stage_id) = dag.stage_id_by_name(name) else {
+            continue;
+        };
+        let Some(reqs) = dag_requires(dag, name) else {
+            continue;
+        };
+        if !all_satisfied(ephemeral, book_id, &reqs).await {
+            continue;
+        }
+        if already_terminal_or_running(ephemeral, book_id, name).await {
+            continue;
+        }
+        let job = Job {
+            book_id,
+            stage: stage_id,
+            priority: Priority::Background,
+        };
+        match background_tx.try_send(job) {
+            Ok(()) => {
+                tracing::debug!(
+                    book = %book_id,
+                    stage = name,
+                    "pipeline.autodispatch.submitted"
+                );
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                tracing::debug!(
+                    book = %book_id,
+                    stage = name,
+                    "pipeline.autodispatch.deferred_full"
+                );
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                tracing::warn!(
+                    book = %book_id,
+                    stage = name,
+                    "pipeline.autodispatch.channel_closed"
+                );
+            }
+        }
+    }
+}
+
+/// Look up a stage's `requires()` by name. Returns the
+/// dependency names as strings (the typed [`StageId`] values
+/// aren't useful outside dispatch — we only need them to
+/// SELECT-by-name against `pipeline_progress`).
+pub(crate) fn dag_requires(dag: &Arc<Dag>, name: &str) -> Option<Vec<&'static str>> {
+    dag.iter_topo()
+        .find(|(n, _)| *n == name)
+        .map(|(_, s)| s.requires().iter().map(|r| r.as_str()).collect())
+}
+
+/// True iff every `dep` name has a `pipeline_progress` row
+/// with status in (`'succeeded'`, `'skipped'`) for this book.
+pub(crate) async fn all_satisfied(
+    ephemeral: &EphemeralDb,
+    book_id: BookId,
+    deps: &[&'static str],
+) -> bool {
+    if deps.is_empty() {
+        return true;
+    }
+    let id = book_id.0;
+    for dep in deps {
+        let dep_name: &str = dep;
+        let row = sqlx::query!(
+            "SELECT status FROM pipeline_progress WHERE book_id = ? AND stage = ?",
+            id,
+            dep_name,
+        )
+        .fetch_optional(ephemeral.pool())
+        .await;
+        match row {
+            Ok(Some(r)) if r.status == "succeeded" || r.status == "skipped" => {}
+            Ok(_) => return false,
+            Err(e) => {
+                tracing::warn!(
+                    book = %book_id,
+                    dep = dep_name,
+                    error = %e,
+                    "pipeline.dispatch.read_progress_failed"
+                );
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// True iff the `(book_id, stage)` row exists with status
+/// already in (`'succeeded'`, `'skipped'`, `'running'`). The
+/// dispatcher uses this to avoid resubmitting in-flight or
+/// finished work — only `'pending'` / `'failed'` / NULL-row
+/// states are eligible.
+pub(crate) async fn already_terminal_or_running(
+    ephemeral: &EphemeralDb,
+    book_id: BookId,
+    stage: &str,
+) -> bool {
+    let id = book_id.0;
+    let row = sqlx::query!(
+        "SELECT status FROM pipeline_progress WHERE book_id = ? AND stage = ?",
+        id,
+        stage,
+    )
+    .fetch_optional(ephemeral.pool())
+    .await;
+    matches!(
+        row,
+        Ok(Some(r)) if r.status == "succeeded"
+                    || r.status == "skipped"
+                    || r.status == "running"
+    )
+}
+
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::items_after_statements
+)]
 mod tests {
     use std::sync::Arc as StdArc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -345,6 +654,301 @@ mod tests {
         // With idle_wait_secs=0 the idle arm is immediately
         // selectable, so the job ran.
         assert_eq!(running.load(Ordering::SeqCst), 1);
+        sched.shutdown();
+    }
+
+    /// Configurable test stage. Used by the A.1/A.2 tests where
+    /// the cheap `RecordingStage` (no dependencies, always Done)
+    /// isn't enough — we need controlled `requires()` and
+    /// per-stage outcomes (Done / Skipped / failure).
+    struct ConfigurableStage {
+        name_str: &'static str,
+        deps: &'static [StageId],
+        outcome: ConfiguredOutcome,
+        log: StdArc<tokio::sync::Mutex<Vec<&'static str>>>,
+    }
+
+    #[derive(Clone, Copy)]
+    enum ConfiguredOutcome {
+        Done,
+        Skipped,
+        Failure,
+    }
+
+    #[async_trait]
+    impl Stage for ConfigurableStage {
+        fn name(&self) -> &'static str {
+            self.name_str
+        }
+        fn requires(&self) -> &'static [StageId] {
+            self.deps
+        }
+        async fn run(&self, _ctx: &StageContext, _id: BookId) -> Result<StageOutcome> {
+            self.log.lock().await.push(self.name_str);
+            match self.outcome {
+                ConfiguredOutcome::Done => Ok(StageOutcome::Done),
+                ConfiguredOutcome::Skipped => Ok(StageOutcome::Skipped),
+                ConfiguredOutcome::Failure => Err(ab_core::Error::Invariant("test failure")),
+            }
+        }
+    }
+
+    /// Poll `pipeline_progress` until the row exists with a
+    /// non-running status, up to ~500ms. Returns the row's
+    /// (status, `failure_reason`). Async-test helper — used by
+    /// the A.1/A.2 tests to avoid hard-coded sleeps.
+    ///
+    /// Runtime `sqlx::query()` rather than the macro: the
+    /// project's sqlx-prepare workflow doesn't reach
+    /// `#[cfg(test)]` code cleanly, so test-only queries stay
+    /// on the runtime path (see `.claude/CLAUDE.md` § SQL).
+    async fn await_progress(
+        ephemeral: &EphemeralDb,
+        book_id: BookId,
+        stage: &str,
+    ) -> Option<(String, Option<String>)> {
+        for _ in 0..100 {
+            let row: Option<(String, Option<String>)> = sqlx::query_as(
+                "SELECT status, failure_reason FROM pipeline_progress \
+                 WHERE book_id = ? AND stage = ?",
+            )
+            .bind(book_id.0)
+            .bind(stage)
+            .fetch_optional(ephemeral.pool())
+            .await
+            .expect("read progress");
+            if let Some((status, failure)) = row
+                && status != "running"
+            {
+                return Some((status, failure));
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+        None
+    }
+
+    #[tokio::test]
+    async fn progress_writes_succeeded_on_done() {
+        // A.1: when a stage returns `Done`, pipeline_progress
+        // must show the row with status='succeeded' and a
+        // non-NULL completed_at after the run.
+        let (ctx, _tmp) = fresh_ctx().await;
+        let log = StdArc::new(tokio::sync::Mutex::new(Vec::<&'static str>::new()));
+        let stages: Vec<Arc<dyn Stage>> = vec![Arc::new(ConfigurableStage {
+            name_str: "done-stage",
+            deps: &[],
+            outcome: ConfiguredOutcome::Done,
+            log: log.clone(),
+        })];
+        let dag = Arc::new(Dag::build(stages).expect("build dag"));
+        let eph = ctx.ephemeral.clone();
+        let tunables = SchedulerTunables {
+            idle_wait_secs: 0,
+            ..SchedulerTunables::default()
+        };
+        let sched = Scheduler::spawn(dag, ctx, &tunables);
+        sched
+            .submit(BookId(42), StageId::new("done-stage"), Priority::Background)
+            .await
+            .expect("submit");
+        let (status, failure) = await_progress(&eph, BookId(42), "done-stage")
+            .await
+            .expect("progress row appears");
+        assert_eq!(status, "succeeded");
+        assert!(failure.is_none());
+        sched.shutdown();
+    }
+
+    #[tokio::test]
+    async fn progress_writes_failed_with_reason_on_err() {
+        // A.1: when a stage returns Err(...), pipeline_progress
+        // must show status='failed' and failure_reason set to
+        // the stringified error.
+        let (ctx, _tmp) = fresh_ctx().await;
+        let log = StdArc::new(tokio::sync::Mutex::new(Vec::<&'static str>::new()));
+        let stages: Vec<Arc<dyn Stage>> = vec![Arc::new(ConfigurableStage {
+            name_str: "fail-stage",
+            deps: &[],
+            outcome: ConfiguredOutcome::Failure,
+            log: log.clone(),
+        })];
+        let dag = Arc::new(Dag::build(stages).expect("build dag"));
+        let eph = ctx.ephemeral.clone();
+        let tunables = SchedulerTunables {
+            idle_wait_secs: 0,
+            ..SchedulerTunables::default()
+        };
+        let sched = Scheduler::spawn(dag, ctx, &tunables);
+        sched
+            .submit(BookId(7), StageId::new("fail-stage"), Priority::Background)
+            .await
+            .expect("submit");
+        let (status, failure) = await_progress(&eph, BookId(7), "fail-stage")
+            .await
+            .expect("progress row appears");
+        assert_eq!(status, "failed");
+        let msg = failure.expect("failure_reason non-null on err");
+        assert!(
+            msg.contains("test failure"),
+            "failure_reason should carry the stringified error, got {msg:?}"
+        );
+        sched.shutdown();
+    }
+
+    #[tokio::test]
+    async fn auto_dispatch_runs_dependents_when_deps_satisfied() {
+        // A.2: stage `b` depends on `a`. Submit only `a`; once
+        // `a` finishes, the scheduler must auto-submit `b`,
+        // which then runs and lands as 'succeeded' in
+        // pipeline_progress.
+        let (ctx, _tmp) = fresh_ctx().await;
+        let log = StdArc::new(tokio::sync::Mutex::new(Vec::<&'static str>::new()));
+        const A: StageId = StageId::new("a");
+        let stages: Vec<Arc<dyn Stage>> = vec![
+            Arc::new(ConfigurableStage {
+                name_str: "a",
+                deps: &[],
+                outcome: ConfiguredOutcome::Done,
+                log: log.clone(),
+            }),
+            Arc::new(ConfigurableStage {
+                name_str: "b",
+                deps: &[A],
+                outcome: ConfiguredOutcome::Done,
+                log: log.clone(),
+            }),
+        ];
+        let dag = Arc::new(Dag::build(stages).expect("build dag"));
+        let eph = ctx.ephemeral.clone();
+        let tunables = SchedulerTunables {
+            idle_wait_secs: 0,
+            ..SchedulerTunables::default()
+        };
+        let sched = Scheduler::spawn(dag, ctx, &tunables);
+        // Submit ONLY `a`.
+        sched
+            .submit(BookId(1), A, Priority::Background)
+            .await
+            .expect("submit a");
+        // After `a` runs, `b` should be auto-dispatched. Both
+        // rows must end up 'succeeded'.
+        let (a_status, _) = await_progress(&eph, BookId(1), "a")
+            .await
+            .expect("a progress");
+        assert_eq!(a_status, "succeeded");
+        let (b_status, _) = await_progress(&eph, BookId(1), "b")
+            .await
+            .expect("b progress (auto-dispatch)");
+        assert_eq!(b_status, "succeeded");
+        // Run log includes both.
+        let history = log.lock().await.clone();
+        assert!(history.contains(&"a"), "a ran");
+        assert!(history.contains(&"b"), "b auto-ran");
+        sched.shutdown();
+    }
+
+    #[tokio::test]
+    async fn auto_dispatch_treats_skipped_as_dep_satisfied() {
+        // A.2 + StageOutcome::Skipped contract: a dependent
+        // stage is still dispatched when its requires() return
+        // Skipped (treated as Done for dispatch purposes).
+        let (ctx, _tmp) = fresh_ctx().await;
+        let log = StdArc::new(tokio::sync::Mutex::new(Vec::<&'static str>::new()));
+        const A: StageId = StageId::new("a");
+        let stages: Vec<Arc<dyn Stage>> = vec![
+            Arc::new(ConfigurableStage {
+                name_str: "a",
+                deps: &[],
+                outcome: ConfiguredOutcome::Skipped,
+                log: log.clone(),
+            }),
+            Arc::new(ConfigurableStage {
+                name_str: "b",
+                deps: &[A],
+                outcome: ConfiguredOutcome::Done,
+                log: log.clone(),
+            }),
+        ];
+        let dag = Arc::new(Dag::build(stages).expect("build dag"));
+        let eph = ctx.ephemeral.clone();
+        let tunables = SchedulerTunables {
+            idle_wait_secs: 0,
+            ..SchedulerTunables::default()
+        };
+        let sched = Scheduler::spawn(dag, ctx, &tunables);
+        sched
+            .submit(BookId(1), A, Priority::Background)
+            .await
+            .expect("submit a");
+        let (a_status, _) = await_progress(&eph, BookId(1), "a")
+            .await
+            .expect("a progress");
+        assert_eq!(a_status, "skipped");
+        let (b_status, _) = await_progress(&eph, BookId(1), "b")
+            .await
+            .expect("b progress (skipped is dep-satisfied)");
+        assert_eq!(b_status, "succeeded");
+        sched.shutdown();
+    }
+
+    #[tokio::test]
+    async fn auto_dispatch_holds_when_only_some_deps_satisfied() {
+        // A.2: `c` depends on (a, b). After only `a` runs, `c`
+        // must NOT have been dispatched — partial satisfaction
+        // is not enough.
+        let (ctx, _tmp) = fresh_ctx().await;
+        let log = StdArc::new(tokio::sync::Mutex::new(Vec::<&'static str>::new()));
+        const A: StageId = StageId::new("a");
+        const B: StageId = StageId::new("b");
+        let stages: Vec<Arc<dyn Stage>> = vec![
+            Arc::new(ConfigurableStage {
+                name_str: "a",
+                deps: &[],
+                outcome: ConfiguredOutcome::Done,
+                log: log.clone(),
+            }),
+            Arc::new(ConfigurableStage {
+                name_str: "b",
+                deps: &[],
+                outcome: ConfiguredOutcome::Done,
+                log: log.clone(),
+            }),
+            Arc::new(ConfigurableStage {
+                name_str: "c",
+                deps: &[A, B],
+                outcome: ConfiguredOutcome::Done,
+                log: log.clone(),
+            }),
+        ];
+        let dag = Arc::new(Dag::build(stages).expect("build dag"));
+        let eph = ctx.ephemeral.clone();
+        let tunables = SchedulerTunables {
+            idle_wait_secs: 0,
+            ..SchedulerTunables::default()
+        };
+        let sched = Scheduler::spawn(dag, ctx, &tunables);
+        sched
+            .submit(BookId(1), A, Priority::Background)
+            .await
+            .expect("submit a");
+        // Wait for `a` to finish.
+        let (a_status, _) = await_progress(&eph, BookId(1), "a")
+            .await
+            .expect("a progress");
+        assert_eq!(a_status, "succeeded");
+        // Give the worker an extra slice to *attempt* to
+        // dispatch c (shouldn't, but we want a chance for the
+        // bug to show).
+        sleep(Duration::from_millis(50)).await;
+        // c must not have run; no progress row.
+        let c_row: Option<(String,)> =
+            sqlx::query_as("SELECT status FROM pipeline_progress WHERE book_id = ? AND stage = ?")
+                .bind(BookId(1).0)
+                .bind("c")
+                .fetch_optional(eph.pool())
+                .await
+                .expect("read c");
+        assert!(c_row.is_none(), "c must NOT have been dispatched yet");
         sched.shutdown();
     }
 
