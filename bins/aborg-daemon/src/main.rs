@@ -290,8 +290,14 @@ async fn main() -> Result<()> {
         cleanup.clone(),
         &cancel,
     );
-    let api_state =
-        ab_api::ApiState::new(library.clone(), ephemeral.clone(), scheduler, dag, cleanup);
+    let api_state = ab_api::ApiState::new(
+        library.clone(),
+        ephemeral.clone(),
+        scheduler,
+        dag,
+        cleanup,
+        cancel.clone(),
+    );
 
     // Build the unified Router for the API port (api + webuis).
     let mut router = Router::new()

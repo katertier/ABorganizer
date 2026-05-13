@@ -121,6 +121,15 @@ async fn select_eligible(pool: &sqlx::SqlitePool) -> Result<Vec<EligibleRow>> {
 
 #[async_trait]
 impl CleanupTarget for PostTranscodeSourcesTarget {
+    /// `Disk`, not `Audio`.
+    ///
+    /// ADR-0027 § "Source-file removal" wrote "Category: Audio"
+    /// in its design phase, but the `ab_core::Category` enum
+    /// (added in slice H.2) settled on three variants: `Disk`,
+    /// `Db`, `Queue`. The target's effect — freeing space by
+    /// unlinking source files — sits squarely on the `Disk`
+    /// side, so the implementation lands there and the ADR was
+    /// updated post-hoc (cross-model code review).
     fn category(&self) -> Category {
         Category::Disk
     }
