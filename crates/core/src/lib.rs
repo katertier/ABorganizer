@@ -12,6 +12,7 @@ pub mod build_info {
 }
 
 pub mod cache;
+pub mod cleanup;
 pub mod error;
 pub mod field;
 pub mod genre_code;
@@ -23,6 +24,7 @@ pub mod time_format;
 pub mod tunables;
 
 pub use cache::{CacheKey, ParseCacheKeyError, cache_keys_for_stage};
+pub use cleanup::{Category, CleanupReport, Policy, compute_age_seconds};
 pub use error::{Error, Result};
 pub use field::{Field, ParseFieldError};
 pub use ids::{BookId, FileId, JobId};
