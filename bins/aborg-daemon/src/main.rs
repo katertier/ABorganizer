@@ -18,6 +18,7 @@
     clippy::redundant_pub_crate
 )]
 
+mod disk_usage;
 mod lockfile;
 mod logging;
 
@@ -34,6 +35,7 @@ use std::sync::Arc;
 
 use ab_core::{Tunables, paths};
 use ab_db::{EphemeralDb, LibraryDb};
+use ab_pipeline::cleanup::{CleanupCtx, CleanupLoopCtx, CleanupRegistry, run_cleanup_loop};
 use ab_pipeline::{Dag, Scheduler, Stage, StageContext};
 
 #[derive(Debug, Parser)]
@@ -219,12 +221,10 @@ async fn main() -> Result<()> {
 
     // Open both databases. Pool sizing + busy-timeout come from
     // `tunables.db` (single source of truth in `ab_core::tunables`).
-    let library_path = storage_root.join("library.db");
-    let ephemeral_path = storage_root.join("ephemeral.db");
-    let library = LibraryDb::open(&library_path, &tunables.db)
+    let library = LibraryDb::open(&storage_root.join("library.db"), &tunables.db)
         .await
         .context("open library db")?;
-    let ephemeral = EphemeralDb::open(&ephemeral_path, &tunables.db)
+    let ephemeral = EphemeralDb::open(&storage_root.join("ephemeral.db"), &tunables.db)
         .await
         .context("open ephemeral db")?;
 
@@ -281,6 +281,16 @@ async fn main() -> Result<()> {
         tunables.scheduler.clone(),
         cancel.clone(),
     ));
+
+    // Periodic cleanup loop (slice H.2.2, ADR-0025). Empty registry
+    // until H.2.3 — empty tick is a logging no-op.
+    spawn_cleanup_loop(
+        &library,
+        &ephemeral,
+        &storage_root,
+        &tunables,
+        cancel.clone(),
+    );
 
     // Shared state for the API router. Carries the scheduler handle
     // so the scan endpoint can submit new BookIds.
@@ -343,6 +353,37 @@ async fn main() -> Result<()> {
 
     info!("daemon.stop");
     Ok(())
+}
+
+/// Spawn the periodic cleanup loop (slice H.2.2, ADR-0025).
+///
+/// Wakes every `tunables.check_secs`, computes the age cut-off from
+/// disk pressure on `storage_root` via `statvfs`, and asks every
+/// registered `CleanupTarget` to report what's eligible. v1 is
+/// observability-only — `auto_apply = false` inside the loop;
+/// operator applies via `aborg clean … --apply` (lands in H.2.3).
+fn spawn_cleanup_loop(
+    library: &LibraryDb,
+    ephemeral: &EphemeralDb,
+    storage_root: &std::path::Path,
+    tunables: &Tunables,
+    cancel: CancellationToken,
+) {
+    let registry = CleanupRegistry::new(vec![]);
+    let cleanup_ctx = CleanupCtx {
+        library: library.clone(),
+        ephemeral: ephemeral.clone(),
+    };
+    let disk_free = disk_usage::disk_free_for(storage_root);
+    tokio::spawn(run_cleanup_loop(
+        CleanupLoopCtx {
+            cleanup_ctx,
+            registry,
+            tunables: tunables.cleanup.clone(),
+            disk_free,
+        },
+        cancel,
+    ));
 }
 
 fn spawn_signal_handlers(cancel: &CancellationToken) {
