@@ -148,3 +148,18 @@ ALTER TABLE audiologos_v2 RENAME TO audiologos;
 CREATE INDEX idx_audiologos_kind ON audiologos(kind);
 CREATE INDEX idx_audiologos_match_count
     ON audiologos(match_count DESC);
+
+-- Reset the sqlite_sequence row to track the renamed table's
+-- highest existing audiologo_id, so post-migration INSERTs
+-- continue the existing PK sequence instead of starting from
+-- 1 and colliding with existing rows. No-op when the table is
+-- empty (current state); future-proofs when later slices
+-- populate audiologos before this migration runs against
+-- an older DB snapshot.
+DELETE FROM sqlite_sequence WHERE name = 'audiologos_v2';
+INSERT INTO sqlite_sequence (name, seq)
+    SELECT 'audiologos', COALESCE(MAX(audiologo_id), 0) FROM audiologos
+    WHERE NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name = 'audiologos');
+UPDATE sqlite_sequence
+    SET seq = COALESCE((SELECT MAX(audiologo_id) FROM audiologos), 0)
+    WHERE name = 'audiologos';

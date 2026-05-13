@@ -35,6 +35,12 @@ pub enum ApiError {
     /// Request body was malformed.
     #[error("bad request: {0}")]
     BadRequest(String),
+    /// Request conflicts with current resource state — e.g. the
+    /// audiologo endpoint refusing to apply a second cut to a
+    /// `(file_id, kind)` pair that already has one applied. The
+    /// caller resolves by issuing a reject / re-detect first.
+    #[error("conflict: {0}")]
+    Conflict(String),
     /// Underlying core error.
     #[error("internal: {0}")]
     Internal(#[from] ab_core::Error),
@@ -76,6 +82,15 @@ impl IntoResponse for ApiError {
                     kind: "about:blank#bad-request",
                     title: "Bad Request",
                     status: 400,
+                    detail: self.to_string(),
+                },
+            ),
+            Self::Conflict(_) => (
+                StatusCode::CONFLICT,
+                Problem {
+                    kind: "about:blank#conflict",
+                    title: "Conflict",
+                    status: 409,
                     detail: self.to_string(),
                 },
             ),

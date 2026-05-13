@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT audiologo_row_id AS \"id!: i64\"\n           FROM book_file_audiologos\n           WHERE file_id = ? AND kind = ? AND status = 'applied'",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "36df4653d069388b95a3ffa09b9855c26e4cc31b124f80dc4661fc48cb300dc6"
+}

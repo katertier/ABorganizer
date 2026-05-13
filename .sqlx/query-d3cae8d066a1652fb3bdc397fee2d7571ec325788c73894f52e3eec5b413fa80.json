@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT (\n              COALESCE(\n                  (SELECT SUM(duration_ms) FROM book_files\n                   WHERE book_id = ? AND file_id < ?), 0)\n              -\n              COALESCE(\n                  (SELECT SUM(\n                       MAX((jingle_end_ms - jingle_start_ms)\n                           - COALESCE(padding_ms, 0), 0))\n                   FROM book_file_audiologos\n                   WHERE status = 'applied'\n                     AND file_id IN (\n                       SELECT file_id FROM book_files\n                       WHERE book_id = ? AND file_id < ?)\n                  ), 0)\n           ) AS \"v!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "v!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d3cae8d066a1652fb3bdc397fee2d7571ec325788c73894f52e3eec5b413fa80"
+}

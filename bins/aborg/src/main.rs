@@ -752,6 +752,8 @@ struct AudiologoCutResponse {
     kind: String,
     row_id: i64,
     audiologo_id: Option<i64>,
+    #[serde(default)]
+    fingerprint_deferred: bool,
     chapters_shifted: i64,
     new_duration_ms: Option<i64>,
 }
@@ -813,6 +815,13 @@ async fn audiologo_cut(
                 new_duration_ms = ?response.new_duration_ms,
                 "audiologo cut applied",
             );
+            if response.fingerprint_deferred {
+                tracing::warn!(
+                    "fingerprint persistence requested (`--add-fingerprint`) but \
+                     deferred to slice 4B — cut applied to this book only; re-run \
+                     after 4B lands to share the fingerprint across the library",
+                );
+            }
         }
     }
     Ok(())

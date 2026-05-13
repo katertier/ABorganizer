@@ -4,7 +4,7 @@
 //!
 //! See ADR-0024 for the full design. This crate covers slice 4A's
 //! foundational surface: the [`Method`] enum, the [`Kind`] +
-//! [`Status`] enums, the [`Detection`] / [`AppliedCut`] data types,
+//! [`Status`] + [`BookStatus`] enums, the [`Detection`] data type,
 //! and the [`rank()`] helper. Detection algorithms (catalog
 //! bootstrap, fingerprint matching, transcript-aided) ship in
 //! slices 4B-4D. Review workflow ships in slice 4E.
