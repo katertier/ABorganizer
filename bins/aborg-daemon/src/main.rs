@@ -174,6 +174,12 @@ fn build_pipeline_stages(tunables: &Tunables) -> Vec<Arc<dyn Stage>> {
         Arc::new(ab_llm_extractors::ExtractCharactersStage::new(
             &tunables.llm,
         )),
+        // `extract-setting` (slice 3K.8) — Apple-Intelligence
+        // pass producing a one-paragraph setting summary
+        // (books.setting + _lang + _extractor_version,
+        // migration 009) plus 10-category `$`-prefixed tags
+        // into book_tags. ADR-0021 + ADR-0022.
+        Arc::new(ab_llm_extractors::ExtractSettingStage::new(&tunables.llm)),
         // `extract-summary-spoiler-free-series` (slice 3K.4.1) —
         // per-series spoiler-free synopsis, regenerated when a
         // book completes its own summary AND identity-resolve

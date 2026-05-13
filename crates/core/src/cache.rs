@@ -56,6 +56,11 @@ pub enum CacheKey {
     /// Raw LLM response for the character extractor. Promoted
     /// to rows in the `characters` table.
     Characters,
+    /// Raw LLM response for the setting extractor. Promoted
+    /// to `books.setting` + `books.setting_lang` (paragraph)
+    /// and `book_tags` rows with `source='setting_llm'`
+    /// (`$`-prefixed tags across 10 categories per ADR-0022).
+    Setting,
 }
 
 impl CacheKey {
@@ -73,6 +78,7 @@ impl CacheKey {
             Self::SummarySpoilerFree => "summary_spoiler_free",
             Self::StoryArc => "story_arc",
             Self::Characters => "characters",
+            Self::Setting => "setting",
         }
     }
 
@@ -93,6 +99,7 @@ impl CacheKey {
             "summary_spoiler_free" => Some(Self::SummarySpoilerFree),
             "story_arc" => Some(Self::StoryArc),
             "characters" => Some(Self::Characters),
+            "setting" => Some(Self::Setting),
             _ => None,
         }
     }
@@ -165,7 +172,7 @@ impl std::str::FromStr for CacheKey {
 #[must_use]
 pub fn cache_keys_for_stage(stage: &str) -> Option<&'static [CacheKey]> {
     use CacheKey::{
-        Characters, DnaTags, StoryArc, SummarySpoilerFree, TranscriptFull, TranscriptHead,
+        Characters, DnaTags, Setting, StoryArc, SummarySpoilerFree, TranscriptFull, TranscriptHead,
         TranscriptSamples, TranscriptTail,
     };
     // `&'static` literals so the result is cheap to return.
@@ -176,6 +183,7 @@ pub fn cache_keys_for_stage(stage: &str) -> Option<&'static [CacheKey]> {
     const SUMMARY: &[CacheKey] = &[SummarySpoilerFree];
     const ARC: &[CacheKey] = &[StoryArc];
     const CHARS: &[CacheKey] = &[Characters];
+    const SETTING: &[CacheKey] = &[Setting];
     const NONE: &[CacheKey] = &[];
 
     Some(match stage {
@@ -186,6 +194,7 @@ pub fn cache_keys_for_stage(stage: &str) -> Option<&'static [CacheKey]> {
         "extract-summary-spoiler-free" => SUMMARY,
         "extract-story-arc" => ARC,
         "extract-characters" => CHARS,
+        "extract-setting" => SETTING,
         // Stages without ai_cache output. They still have
         // pipeline_progress rows the retry endpoint clears,
         // but no cache-side cleanup.
@@ -206,7 +215,7 @@ pub fn cache_keys_for_stage(stage: &str) -> Option<&'static [CacheKey]> {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -223,6 +232,7 @@ mod tests {
             CacheKey::SummarySpoilerFree,
             CacheKey::StoryArc,
             CacheKey::Characters,
+            CacheKey::Setting,
         ] {
             let s = key.as_str();
             assert_eq!(CacheKey::parse(s), Some(key), "round-trip {s}");
@@ -253,6 +263,7 @@ mod tests {
             CacheKey::SummarySpoilerFree,
             CacheKey::StoryArc,
             CacheKey::Characters,
+            CacheKey::Setting,
         ] {
             let parsed: CacheKey = key.as_str().parse().expect("from_str round trip");
             assert_eq!(parsed, key);
@@ -281,6 +292,7 @@ mod tests {
             ),
             ("extract-story-arc", &[CacheKey::StoryArc][..]),
             ("extract-characters", &[CacheKey::Characters][..]),
+            ("extract-setting", &[CacheKey::Setting][..]),
         ] {
             assert_eq!(
                 cache_keys_for_stage(stage),

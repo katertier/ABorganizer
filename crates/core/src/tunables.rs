@@ -691,6 +691,26 @@ pub struct LlmTunables {
     /// start incorporating plot beats that belong in the arc
     /// or summary stages.
     pub character_desc_target_words_high: usize,
+    /// Token budget for the setting extractor. Has to cover
+    /// a 30-60 word paragraph PLUS up to ~25 `$`-prefixed
+    /// tags across 10 categories — 800 tokens is the floor
+    /// that fits both without truncating the tag list.
+    pub setting_max_tokens: usize,
+    /// Soft floor for the setting paragraph word count.
+    /// 30 words is two sentences. Less than that and the
+    /// paragraph reads as a label, not a description.
+    pub setting_target_words_low: usize,
+    /// Soft cap for the setting paragraph word count.
+    /// 60 words is four sentences max. Beyond that the
+    /// paragraph drifts into plot territory; the `$`-tag
+    /// array carries the structured signal.
+    pub setting_target_words_high: usize,
+    /// Soft cap on the total number of `$`-prefixed setting
+    /// tags emitted per book (sum across all 10 categories).
+    /// 25 absorbs faction-heavy books (`$group-*` blooms);
+    /// the prompt restates the cap and the runtime truncates
+    /// defensively.
+    pub setting_max_tags: usize,
 }
 
 impl Default for LlmTunables {
@@ -712,6 +732,10 @@ impl Default for LlmTunables {
             characters_max: 12,
             character_desc_target_words_low: 20,
             character_desc_target_words_high: 40,
+            setting_max_tokens: 800,
+            setting_target_words_low: 30,
+            setting_target_words_high: 60,
+            setting_max_tags: 25,
         }
     }
 }
