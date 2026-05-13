@@ -10,19 +10,34 @@
 //! the samples via `ab_fingerprint::fingerprint_samples`, and
 //! `slide_match`-es every candidate audiologo against the result.
 //!
-//! ## Slice ladder
+//! ## Slice ladder (4B complete as of slice 4B.6)
 //!
-//! - **4B.3 (this slice):** stage skeleton. `Stage` trait impl +
-//!   `STAGE_ID` + `Stage::reset` override + minimal `run()` body
-//!   that bails Skipped (no detection logic). Pinned at this
-//!   slice so the dispatcher + retry surface (ADR-0023) can wire
-//!   the stage in cleanly before the detection logic lands.
-//! - **4B.4:** wire `FingerprintFull` + `FingerprintBookend` into
-//!   `run()`; auto-apply high-confidence matches.
-//! - **4B.5:** chapter-shift maths on apply + Libation-stripped
-//!   path (when `brand_intro_duration_ms` is non-NULL but no
-//!   fingerprint hit).
-//! - **4B.6:** integration tests + ADR-0024 closure note.
+//! - **4B.0:** rename `books.audiologo_intro_ms` →
+//!   `brand_intro_duration_ms` (migration 017); audnexus-chapters
+//!   stage restores the writeback. ✓
+//! - **4B.1:** Swift `AVAssetReader` FFI in `crates/audio` for
+//!   windowed Float32 PCM decode. ✓
+//! - **4B.2:** chromaprint matching helpers in `ab-fingerprint`
+//!   (`fingerprint_samples`, `slide_match`,
+//!   `confidence_from_hamming`). ✓
+//! - **4B.3:** stage skeleton + `Method` enum prune (drop
+//!   `CatalogBrandDuration`) + `Stage::reset` override. ✓
+//! - **4B.4a:** load helpers + tunables wiring; `run()` data
+//!   plumbing only. ✓
+//! - **4B.4b:** detection-loop body — sample-fingerprint-slide-
+//!   match-persist; candidate rows only. ✓
+//! - **4B.5:** auto-apply path (candidate → applied for
+//!   high-confidence `FingerprintFull` / `FingerprintBookend`) +
+//!   chapter-shift maths on apply + Libation-stripped path. ✓
+//! - **4B.6:** integration tests + ADR-0024 closure note; auto-
+//!   apply runs every pass (not just when this run produced
+//!   candidates). ✓
+//!
+//! What's still owed for the audiologo theme overall (not 4B):
+//! - **4C:** transcript-aided tiers (`FingerprintAndTranscript` +
+//!   `TranscriptOnly`) + tier-4 vocab.
+//! - **4D:** review CLI / GUI + `match_count`-driven
+//!   `verified_via` auto-promotion.
 //!
 //! ## `Stage::reset` semantics
 //!
@@ -595,16 +610,21 @@ impl Stage for DetectAudiologoStage {
             }
         }
 
-        // Auto-apply path (4B.5): promote high-confidence
-        // candidates to `applied` + shift chapter offsets.
-        let promoted = if any_candidate {
+        if any_candidate {
             update_book_audiologo_status(&ctx.library, book_id, crate::BookStatus::Detected)
                 .await?;
+        }
+
+        // Auto-apply path (4B.5): promote candidate rows whose
+        // method auto-applies AND whose confidence clears the
+        // per-method tunable floor to `applied`, shifting
+        // chapter offsets. Always runs — picks up rows from this
+        // detection pass, from prior detection runs (e.g. after
+        // a tunable change), and from the 4A manual-cut CLI path.
+        // No-op when no candidates exist.
+        let promoted =
             crate::apply::apply_auto_applicable_candidates(&ctx.library, book_id, &self.tunables)
-                .await?
-        } else {
-            0
-        };
+                .await?;
 
         // Libation-stripped path (4B.5): brand_intro_duration_ms
         // is non-NULL but no fingerprint hit landed → audio has
@@ -621,7 +641,7 @@ impl Stage for DetectAudiologoStage {
             false
         };
 
-        if any_candidate || libation_applied {
+        if any_candidate || promoted > 0 || libation_applied {
             tracing::info!(
                 book = %book_id,
                 any_candidate,
@@ -1062,6 +1082,167 @@ mod tests {
         .expect("fetch");
         assert_eq!(count, 6, "5 → 6");
         assert!(last_matched_at.is_some(), "last_matched_at populated");
+    }
+
+    #[tokio::test]
+    async fn run_auto_applies_pre_existing_candidate_rows() {
+        // Integration test: seed a candidate row from a prior
+        // detection run (or a manual cut via the 4A CLI) and
+        // verify that run() promotes it through the auto-apply
+        // path even though *this* detection pass produces no
+        // hits (the seeded file doesn't exist on disk). Covers
+        // the slice-4B.6 fix that decouples auto-apply from
+        // any_candidate-in-this-run.
+        let tmp = TempDir::new().expect("tmpdir");
+        let ctx = fresh_ctx(tmp.path()).await;
+
+        sqlx::query(
+            "INSERT INTO books (book_id, title, duration_ms, raw_duration_ms) \
+             VALUES (1, 'fixture', 3_600_000, 3_600_000)",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed book");
+        sqlx::query(
+            "INSERT INTO book_files (file_id, book_id, file_path, is_active, duration_ms) \
+             VALUES (10, 1, '/tmp/does-not-exist.m4b', 1, 3_600_000)",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed file");
+        // Pre-existing high-confidence FingerprintFull candidate.
+        sqlx::query(
+            "INSERT INTO book_file_audiologos \
+             (audiologo_row_id, file_id, kind, jingle_start_ms, jingle_end_ms, \
+              padding_ms, method, confidence, status) \
+             VALUES (100, 10, 'intro', 0, 5000, NULL, 'fingerprint_full', 0.95, 'candidate')",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed candidate");
+        // Chapters that will get shifted.
+        sqlx::query(
+            "INSERT INTO chapters (book_id, idx, start_ms, end_ms, title, source) \
+             VALUES (1, 0, 5_000, 60_000, 'Ch1', 'audnexus')",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed chapters");
+
+        let outcome = fresh_stage()
+            .run(&ctx, BookId(1))
+            .await
+            .expect("run does not error");
+        match outcome {
+            StageOutcome::Done => {}
+            other => panic!("expected Done when auto-apply runs, got {other:?}"),
+        }
+
+        // Candidate promoted to applied.
+        let status: String = sqlx::query_scalar(
+            "SELECT status FROM book_file_audiologos WHERE audiologo_row_id = 100",
+        )
+        .fetch_one(ctx.library.pool())
+        .await
+        .expect("status");
+        assert_eq!(status, "applied");
+
+        // Book status flipped to applied.
+        let book_status: String =
+            sqlx::query_scalar("SELECT audiologo_status FROM books WHERE book_id = 1")
+                .fetch_one(ctx.library.pool())
+                .await
+                .expect("book status");
+        assert_eq!(book_status, "applied");
+
+        // Chapter shifted.
+        let start: i64 =
+            sqlx::query_scalar("SELECT start_ms FROM chapters WHERE book_id = 1 AND idx = 0")
+                .fetch_one(ctx.library.pool())
+                .await
+                .expect("chapter start");
+        // cut_ms = (5000 - 0) - 250 = 4750. chapter at 5000 →
+        // start_ms >= jingle_end_ms (5000 >= 5000), so case-1
+        // fires → 5000 - 4750 = 250.
+        assert_eq!(start, 250);
+    }
+
+    #[tokio::test]
+    async fn run_applies_libation_path_when_brand_set_and_no_hit() {
+        // brand_intro_duration_ms is non-NULL; the audiologos
+        // table has an intro entry whose fingerprint won't match
+        // /dev/null. Stage should NOT insert a candidate row,
+        // but SHOULD fire the Libation-stripped path and flip
+        // book status to 'stripped' + shift chapters.
+        let tmp = TempDir::new().expect("tmpdir");
+        let ctx = fresh_ctx(tmp.path()).await;
+        sqlx::query(
+            "INSERT INTO books (book_id, title, duration_ms, raw_duration_ms, brand_intro_duration_ms) \
+             VALUES (1, 'fixture', 3_600_000, 3_600_000, 4_500)",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed book");
+        sqlx::query(
+            "INSERT INTO book_files (file_id, book_id, file_path, is_active, duration_ms) \
+             VALUES (10, 1, '/tmp/does-not-exist.m4b', 1, 3_600_000)",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed file");
+        // An audiologos intro row so the load path is non-empty
+        // and the detect_window code runs (will fail FFI → no
+        // candidate inserted).
+        let fp = ab_fingerprint::fingerprint_to_bytes(&[1_u32, 2, 3]);
+        sqlx::query(
+            "INSERT INTO audiologos \
+             (audiologo_id, name, kind, fingerprint, duration_ms, match_threshold, verified_via) \
+             VALUES (1, 'intro-A', 'intro', ?, 5000, 0.85, 'seed')",
+        )
+        .bind(&fp)
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed audiologo");
+        sqlx::query(
+            "INSERT INTO chapters (book_id, idx, start_ms, end_ms, title, source) \
+             VALUES (1, 0, 5_000, 60_000, 'Ch1', 'audnexus')",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed chapters");
+
+        let outcome = fresh_stage()
+            .run(&ctx, BookId(1))
+            .await
+            .expect("run does not error");
+        match outcome {
+            StageOutcome::Done => {}
+            other => panic!("expected Done on libation path, got {other:?}"),
+        }
+
+        // No candidate row.
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM book_file_audiologos WHERE file_id = 10")
+                .fetch_one(ctx.library.pool())
+                .await
+                .expect("count");
+        assert_eq!(count, 0);
+
+        // Book status flipped to stripped.
+        let book_status: String =
+            sqlx::query_scalar("SELECT audiologo_status FROM books WHERE book_id = 1")
+                .fetch_one(ctx.library.pool())
+                .await
+                .expect("status");
+        assert_eq!(book_status, "stripped");
+
+        // Chapter shifted by -4500.
+        let start: i64 =
+            sqlx::query_scalar("SELECT start_ms FROM chapters WHERE book_id = 1 AND idx = 0")
+                .fetch_one(ctx.library.pool())
+                .await
+                .expect("start");
+        assert_eq!(start, 500, "5000 - 4500 = 500");
     }
 
     #[tokio::test]
