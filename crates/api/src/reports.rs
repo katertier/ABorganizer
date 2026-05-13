@@ -98,8 +98,12 @@ pub async fn report_gaps(
     let tunables = Tunables::default();
     let client = AudibleClient::new(&tunables.http_client);
     let max_pages = q.max_pages.unwrap_or(5);
+    // Use the home region for the report endpoint; region-walk
+    // is a follow-up slice (the audible-search Stage walks; the
+    // report just needs one region to produce a useful list).
+    let region = audible_home_region(&tunables);
     let products = client
-        .list_books_by_author(&author_row.name, max_pages)
+        .list_books_by_author(&region, &author_row.name, max_pages)
         .await?;
 
     let books = annotate_against_library(&state, products).await?;
@@ -171,9 +175,10 @@ pub async fn report_upcoming(
 
     let tunables = Tunables::default();
     let client = AudibleClient::new(&tunables.http_client);
+    let region = audible_home_region(&tunables);
     let mut all_candidates: Vec<BookCandidate> = Vec::new();
     for (_aid, name) in &author_ids {
-        let products = match client.list_books_by_author(name, max_pages).await {
+        let products = match client.list_books_by_author(&region, name, max_pages).await {
             Ok(p) => p,
             Err(e) => {
                 // Per-author failure shouldn't abort the whole sweep —
@@ -259,6 +264,20 @@ async fn annotate_against_library(
 /// "YYYY-MM-DD" today in UTC. Audible's `release_date` format is
 /// ISO-style yyyy-mm-dd which sorts lexicographically; we compare
 /// as bytes.
+/// The home Audible region — first entry of
+/// `tunables.network.audible_region_order`, or `"us"` as the
+/// fallback when the list is empty (matching `AudibleClient`'s
+/// pre-region-walk default). Used by the report endpoints,
+/// which don't walk regions; the `audible-search` Stage walks.
+fn audible_home_region(tunables: &Tunables) -> String {
+    tunables
+        .network
+        .audible_region_order
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "us".to_owned())
+}
+
 fn compute_today_date() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

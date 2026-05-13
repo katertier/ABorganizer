@@ -44,17 +44,34 @@ pub const PROVENANCE_SOURCE: &str = "audible_search";
 
 /// Stage that discovers an ASIN for ASIN-less books by querying
 /// Audible's catalog search.
+///
+/// Walks `NetworkTunables.audible_region_order` on miss: the
+/// home region is tried first, then each fallback (`uk` →
+/// `de` → ...). The first region that returns at least one
+/// product wins; the matched region is surfaced in the
+/// `audible.search.hit` tracing event so operators can see
+/// which store actually carries the book.
 pub struct AudibleSearchStage {
     client: AudibleClient,
+    region_order: Vec<String>,
     allowed: bool,
 }
 
 impl AudibleSearchStage {
     /// Build with a pre-configured client + network tunables.
+    /// Empty `audible_region_order` falls back to a single
+    /// `"us"` entry so the stage always tries at least one
+    /// region (matching the `AudnexusEnrichStage` pattern).
     #[must_use]
-    pub const fn new(client: AudibleClient, network: &NetworkTunables) -> Self {
+    pub fn new(client: AudibleClient, network: &NetworkTunables) -> Self {
+        let region_order = if network.audible_region_order.is_empty() {
+            vec!["us".to_owned()]
+        } else {
+            network.audible_region_order.clone()
+        };
         Self {
             client,
+            region_order,
             allowed: network.audible_allowed,
         }
     }
@@ -103,22 +120,41 @@ impl Stage for AudibleSearchStage {
             .await?
             .unwrap_or_default();
 
-        let products = match self.client.search(&title, &author).await {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(
-                    book = %book_id,
-                    title = %title,
-                    error = %e,
-                    "audible.search.failed"
-                );
-                return Err(e);
+        // Region walk: try each configured region in order, stop
+        // on the first non-empty response. Transport errors in
+        // one region log + continue to the next — a single
+        // regional outage shouldn't take the whole search down.
+        // The order in `NetworkTunables.audible_region_order` is
+        // set by the user; default is us → uk → de → fr → ca →
+        // au → jp → in → it.
+        let mut hit: Option<(String, crate::audible::AudibleProduct)> = None;
+        for region in &self.region_order {
+            match self.client.search(region, &title, &author).await {
+                Ok(products) => {
+                    if let Some(first) = products.into_iter().next() {
+                        hit = Some((region.clone(), first));
+                        break;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        book = %book_id,
+                        title = %title,
+                        region = %region,
+                        error = %e,
+                        "audible.search.region_failed"
+                    );
+                    // Continue to the next region — one regional
+                    // outage shouldn't abort the walk.
+                }
             }
-        };
-        let Some(first) = products.into_iter().next() else {
+        }
+
+        let Some((region, first)) = hit else {
             tracing::info!(
                 book = %book_id,
                 title = %title,
+                regions_tried = self.region_order.len(),
                 "audible.search.no_results"
             );
             return Ok(StageOutcome::Skipped);
@@ -130,6 +166,7 @@ impl Stage for AudibleSearchStage {
             title = %title,
             asin = %first.asin,
             matched_title = %first.title,
+            region = %region,
             "audible.search.hit"
         );
         Ok(StageOutcome::Done)
