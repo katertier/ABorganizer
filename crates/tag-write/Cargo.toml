@@ -23,6 +23,10 @@ lofty         = { workspace = true }
 sqlx          = { workspace = true }
 tokio         = { workspace = true }
 tracing       = { workspace = true }
+# Provenance-audit (`mass_edit_history`) needs a per-run batch
+# id; UUID v4 is the convention the schema's `batch_id` comment
+# pins.
+uuid          = { workspace = true }
 
 [dev-dependencies]
 tempfile      = { workspace = true }

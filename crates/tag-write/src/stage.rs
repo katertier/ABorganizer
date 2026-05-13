@@ -29,10 +29,11 @@ use async_trait::async_trait;
 use ab_core::{BookId, Error, FileId, Result};
 use ab_db::book_file_refs;
 use ab_pipeline::{Stage, StageContext, StageId, StageOutcome};
+use uuid::Uuid;
 
 use crate::USER_EDIT_SOURCE;
 use crate::winners::{FieldWinner, select_winners_for_book};
-use crate::write::{WriteReport, write_winners};
+use crate::write::{FieldChange, WriteReport, write_winners};
 
 /// Typed stage identifier for the early tag-write pass.
 pub const TAG_WRITE_EARLY_STAGE_ID: StageId = StageId::new("tag-write-early");
@@ -135,16 +136,40 @@ impl Stage for TagWriteEarlyStage {
         // future final-stage author find the constant.
         let _ = USER_EDIT_SOURCE;
 
-        let mut totals = WriteReport::default();
+        // One batch_id per Stage::run invocation. Per the
+        // `mass_edit_history` schema comment, batch_id "links
+        // edits made in one operation" — every per-file
+        // per-field row inserted by this run shares the UUID.
+        let batch_id = Uuid::new_v4().to_string();
+        let mut total_changes: usize = 0;
+        let mut total_matched: usize = 0;
+        let mut total_unmapped: usize = 0;
         let mut any_changed = false;
         for (file_id, file_path) in files {
             match write_one_file(ctx, book_id, file_id, &file_path, &winners).await {
                 Ok(report) => {
-                    totals.fields_changed += report.fields_changed;
-                    totals.fields_already_matched += report.fields_already_matched;
-                    totals.fields_unmapped += report.fields_unmapped;
-                    if report.fields_changed > 0 {
+                    total_changes += report.fields_changed();
+                    total_matched += report.fields_already_matched;
+                    total_unmapped += report.fields_unmapped;
+                    if !report.changes.is_empty() {
                         any_changed = true;
+                        // Mirror each per-field mutation to
+                        // mass_edit_history. Per `PROJECT.md`
+                        // § Tag-write history: "Every tag write
+                        // logs before/after to mass_edit_history."
+                        // Failures here are non-fatal (audit-log
+                        // gaps shouldn't roll back the on-disk
+                        // write) — log and continue.
+                        if let Err(e) =
+                            record_audit_rows(ctx, &batch_id, file_id, &report.changes).await
+                        {
+                            tracing::warn!(
+                                book = %book_id,
+                                file_id = file_id.0,
+                                error = %e,
+                                "tag-write.early.audit_log_failed"
+                            );
+                        }
                     }
                 }
                 Err(e) => {
@@ -167,9 +192,10 @@ impl Stage for TagWriteEarlyStage {
         tracing::info!(
             book = %book_id,
             stage = TAG_WRITE_EARLY_STAGE_NAME,
-            fields_changed = totals.fields_changed,
-            fields_already_matched = totals.fields_already_matched,
-            fields_unmapped = totals.fields_unmapped,
+            batch_id = %batch_id,
+            fields_changed = total_changes,
+            fields_already_matched = total_matched,
+            fields_unmapped = total_unmapped,
             "tag-write.early.done"
         );
 
@@ -182,6 +208,77 @@ impl Stage for TagWriteEarlyStage {
             Ok(StageOutcome::Skipped)
         }
     }
+}
+
+/// Insert one `mass_edit_history` row per `FieldChange` for the
+/// given file. Each row encodes the before / after string as a
+/// JSON-quoted scalar (matching the schema's `-- JSON` column
+/// comment) so future structured values (cover art metadata,
+/// multi-value tag arrays) can land in the same column without
+/// a schema change.
+///
+/// `batch_id` is the shared UUID for the run. `actor = 'system'`
+/// per PROJECT.md § Tag-write history.
+async fn record_audit_rows(
+    ctx: &StageContext,
+    batch_id: &str,
+    file_id: FileId,
+    changes: &[FieldChange],
+) -> Result<()> {
+    let target_kind = "book_files";
+    let target_id = file_id.0;
+    let actor = "system";
+    for change in changes {
+        let field_str = change.field.as_str();
+        // JSON-quote the string scalars. `serde_json` is
+        // already in the workspace; rolling a manual escape
+        // here avoids the dep on a hot path.
+        let before_json = change.before.as_deref().map(json_quote_string);
+        let after_json = json_quote_string(&change.after);
+        sqlx::query!(
+            r#"INSERT INTO mass_edit_history
+                   (target_kind, target_id, field,
+                    before_value, after_value, batch_id, actor)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)"#,
+            target_kind,
+            target_id,
+            field_str,
+            before_json,
+            after_json,
+            batch_id,
+            actor,
+        )
+        .execute(ctx.library.pool())
+        .await
+        .map_err(|e| Error::Database(format!("mass_edit_history insert: {e}")))?;
+    }
+    Ok(())
+}
+
+/// Minimal JSON string quoter for the `before_value` /
+/// `after_value` columns. Escapes `\` / `"` / `\n` / `\r` /
+/// `\t` / control bytes — sufficient for the tag strings we
+/// write (which are UTF-8 free text). Pulled inline to avoid
+/// a `serde_json` dep on this leaf module.
+fn json_quote_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Active `book_files` rows for the book — `(file_id, file_path)`
@@ -464,5 +561,78 @@ mod tests {
             StageOutcome::Skipped => {}
             other => panic!("expected Skipped (no successful write), got {other:?}"),
         }
+    }
+
+    // ── Audit-log helpers (PROJECT.md § Tag-write history) ──
+
+    #[test]
+    fn json_quote_escapes_control_and_quote_chars() {
+        assert_eq!(json_quote_string("hello"), "\"hello\"");
+        assert_eq!(json_quote_string(""), "\"\"");
+        assert_eq!(json_quote_string("a\"b"), "\"a\\\"b\"");
+        assert_eq!(json_quote_string("c\\d"), "\"c\\\\d\"");
+        assert_eq!(json_quote_string("e\nf"), "\"e\\nf\"");
+        assert_eq!(json_quote_string("g\tt"), "\"g\\tt\"");
+        // U+0001 (control byte) → 
+        assert_eq!(json_quote_string("h\x01i"), "\"h\\u0001i\"");
+        // Multibyte UTF-8 is left as-is — strings in this column
+        // are valid UTF-8 by construction (lofty returns UTF-8
+        // tag values).
+        assert_eq!(json_quote_string("Bjørk"), "\"Bjørk\"");
+    }
+
+    /// Row shape for the audit-log read-back in
+    /// `record_audit_rows_writes_one_row_per_change_with_shared_batch_id`.
+    type AuditTuple = (String, i64, String, Option<String>, String, String, String);
+
+    #[tokio::test]
+    async fn record_audit_rows_writes_one_row_per_change_with_shared_batch_id() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let ctx = fresh_ctx(tmp.path(), TAG_WRITE_EARLY_STAGE_NAME).await;
+        seed_book(&ctx, 1).await;
+
+        let batch = Uuid::new_v4().to_string();
+        let changes = vec![
+            FieldChange {
+                field: ab_core::Field::Title,
+                before: None,
+                after: "Foundation".to_owned(),
+            },
+            FieldChange {
+                field: ab_core::Field::Author,
+                before: Some("Asimov, I.".to_owned()),
+                after: "Isaac Asimov".to_owned(),
+            },
+        ];
+
+        record_audit_rows(&ctx, &batch, FileId(7), &changes)
+            .await
+            .expect("audit insert");
+
+        let rows: Vec<AuditTuple> = sqlx::query_as(
+            "SELECT target_kind, target_id, field, before_value, after_value, \
+             batch_id, actor \
+             FROM mass_edit_history \
+             ORDER BY edit_id",
+        )
+        .fetch_all(ctx.library.pool())
+        .await
+        .expect("read audit");
+
+        assert_eq!(rows.len(), 2, "one row per FieldChange");
+        // Row 0: Title, before NULL → before_value column is None
+        assert_eq!(rows[0].0, "book_files");
+        assert_eq!(rows[0].1, 7);
+        assert_eq!(rows[0].2, "title");
+        assert_eq!(rows[0].3, None, "absent before-value stays NULL");
+        assert_eq!(rows[0].4, "\"Foundation\"");
+        assert_eq!(rows[0].5, batch);
+        assert_eq!(rows[0].6, "system");
+        // Row 1: Author, before captured + escaped.
+        assert_eq!(rows[1].2, "author");
+        assert_eq!(rows[1].3.as_deref(), Some("\"Asimov, I.\""));
+        assert_eq!(rows[1].4, "\"Isaac Asimov\"");
+        // Shared batch_id across rows.
+        assert_eq!(rows[1].5, batch);
     }
 }
