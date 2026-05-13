@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM book_field_provenance WHERE book_id = ? AND stage = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "febcbbfefae9afd153d5a3f78e05add0d44eefa9929a93779bffb25ef866a2c3"
+}
