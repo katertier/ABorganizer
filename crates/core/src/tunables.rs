@@ -340,6 +340,25 @@ pub struct SchedulerTunables {
     /// (e.g. 600) on a headless daemon. The starting default is a
     /// compromise; revisit once we have real-usage telemetry.
     pub idle_wait_secs: u64,
+    /// Periodic dispatcher tick interval (seconds). Slice 1F.A3:
+    /// the daemon spawns a loop that wakes every
+    /// `dispatcher_check_secs` to (a) reap `pipeline_progress`
+    /// rows for books that no longer exist or have no active
+    /// files, and (b) sweep books that have an eligible
+    /// next-stage waiting and submit one each at Background
+    /// priority. 60 s default — fast enough that a new book
+    /// from scan starts moving within a minute; slow enough
+    /// that an empty queue costs negligible CPU. Set to 0 to
+    /// disable the loop entirely (daemon-wiring path checks
+    /// this).
+    pub dispatcher_check_secs: u64,
+    /// Cap on how many `(book, stage)` submissions the
+    /// dispatcher can fan out per tick. Bounds worst-case work
+    /// on a freshly-imported large library so a single tick
+    /// can't blast thousands of jobs into the background queue
+    /// at once. The next tick (one `dispatcher_check_secs`
+    /// later) picks up where this one stopped.
+    pub dispatcher_max_submissions_per_tick: usize,
 }
 
 impl Default for SchedulerTunables {
@@ -355,6 +374,12 @@ impl Default for SchedulerTunables {
             // enough that an unattended daemon doesn't sit idle
             // forever.
             idle_wait_secs: 300,
+            dispatcher_check_secs: 60,
+            // 256 ≈ "biggest sustained library import that
+            // still keeps each tick under a second of DB work
+            // on the dev mini." Operational tuning; bump if a
+            // tick takes >5s on a real workload.
+            dispatcher_max_submissions_per_tick: 256,
         }
     }
 }

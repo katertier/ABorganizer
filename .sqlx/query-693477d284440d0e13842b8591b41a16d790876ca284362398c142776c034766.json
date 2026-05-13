@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT stage, status FROM pipeline_progress WHERE book_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "stage",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "status",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "693477d284440d0e13842b8591b41a16d790876ca284362398c142776c034766"
+}
