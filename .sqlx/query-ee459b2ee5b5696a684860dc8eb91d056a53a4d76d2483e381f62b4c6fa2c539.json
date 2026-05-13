@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT file_id AS \"file_id!\" FROM book_files\n               WHERE file_id = ? AND book_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "file_id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ee459b2ee5b5696a684860dc8eb91d056a53a4d76d2483e381f62b4c6fa2c539"
+}

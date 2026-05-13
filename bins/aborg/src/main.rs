@@ -81,8 +81,58 @@ enum Command {
         #[command(subcommand)]
         action: Option<DoctorAction>,
     },
+    /// Audiologo (publisher-jingle) operations (ADR-0024).
+    Audiologos {
+        #[command(subcommand)]
+        action: AudiologoAction,
+    },
     /// Show daemon health.
     Health,
+}
+
+#[derive(Debug, Subcommand)]
+enum AudiologoAction {
+    /// Apply a manual audiologo cut to a book.
+    ///
+    /// Inserts a `book_file_audiologos` row at `status='applied'`
+    /// with `method='manual'`, recomputes `books.duration_ms`,
+    /// and shifts the affected `chapters` rows. ADR-0024 slice 4A.
+    Cut {
+        /// Book ID — matches `books.book_id`.
+        book_id: i64,
+        /// `intro` or `outro`.
+        #[arg(long)]
+        kind: String,
+        /// Where the jingle starts (ms from file start).
+        #[arg(long)]
+        jingle_start: i64,
+        /// Where the jingle ends (ms from file start).
+        #[arg(long)]
+        jingle_end: i64,
+        /// Optional silence padding inserted after the cut
+        /// (defaults to `AudiologoTunables.{intro|outro}_padding_ms`).
+        #[arg(long)]
+        padding: Option<i64>,
+        /// Sample + fingerprint the range and persist to
+        /// `audiologos` so the cut is reusable across the
+        /// library. Slice 4A logs the request; the actual
+        /// fingerprint insert lands in slice 4B.
+        #[arg(long)]
+        add_fingerprint: bool,
+        /// Specific `file_id` within the book (default: file[0]
+        /// for intro, file[N-1] for outro).
+        #[arg(long)]
+        file_id: Option<i64>,
+    },
+    /// One-shot import of `ABtagger`'s audiologo fingerprints.
+    ///
+    /// Inserts rows with `verified_via='ab_tagger_import'`,
+    /// `confidence=0.0`. User reviews each imported row via
+    /// the slice-4E review pass before they fire on matches.
+    Import {
+        /// Path to the `ABtagger` export (JSON).
+        path: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -187,6 +237,35 @@ async fn main() -> Result<()> {
             None | Some(DoctorAction::Speech) => doctor_speech(&cli.daemon, cli.output).await?,
             Some(DoctorAction::Install { language, all }) => {
                 doctor_speech_install(&cli.daemon, language, all, cli.output).await?;
+            }
+        },
+        Command::Audiologos { action } => match action {
+            AudiologoAction::Cut {
+                book_id,
+                kind,
+                jingle_start,
+                jingle_end,
+                padding,
+                add_fingerprint,
+                file_id,
+            } => {
+                audiologo_cut(
+                    &cli.daemon,
+                    AudiologoCutArgs {
+                        book_id,
+                        kind: &kind,
+                        jingle_start,
+                        jingle_end,
+                        padding,
+                        add_fingerprint,
+                        file_id,
+                    },
+                    cli.output,
+                )
+                .await?;
+            }
+            AudiologoAction::Import { path } => {
+                audiologo_import(&path, cli.output).await?;
             }
         },
         Command::Health => health(&cli.daemon, cli.output).await?,
@@ -649,5 +728,120 @@ async fn doctor_speech_install(
     if resp.installed.is_empty() && resp.failed.is_empty() {
         println!("Nothing to do.");
     }
+    Ok(())
+}
+
+// ── Audiologos (slice 4A) ────────────────────────────────────────
+
+#[derive(Serialize, Debug)]
+struct AudiologoCutBody<'a> {
+    kind: &'a str,
+    jingle_start_ms: i64,
+    jingle_end_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    padding_ms: Option<i64>,
+    add_fingerprint: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_id: Option<i64>,
+}
+
+#[derive(Deserialize, Debug, Serialize)]
+struct AudiologoCutResponse {
+    book_id: i64,
+    file_id: i64,
+    kind: String,
+    row_id: i64,
+    audiologo_id: Option<i64>,
+    chapters_shifted: i64,
+    new_duration_ms: Option<i64>,
+}
+
+/// Args for `audiologo_cut`. Bundled to stay under the
+/// project's 5-arg ceiling on `aborg` helpers.
+struct AudiologoCutArgs<'a> {
+    book_id: i64,
+    kind: &'a str,
+    jingle_start: i64,
+    jingle_end: i64,
+    padding: Option<i64>,
+    add_fingerprint: bool,
+    file_id: Option<i64>,
+}
+
+/// `aborg audiologos cut` — POSTs to
+/// `/api/v1/books/{id}/audiologo`.
+async fn audiologo_cut(
+    daemon: &str,
+    args: AudiologoCutArgs<'_>,
+    output: OutputFormat,
+) -> Result<()> {
+    let url = format!("{daemon}/api/v1/books/{}/audiologo", args.book_id);
+    let body = AudiologoCutBody {
+        kind: args.kind,
+        jingle_start_ms: args.jingle_start,
+        jingle_end_ms: args.jingle_end,
+        padding_ms: args.padding,
+        add_fingerprint: args.add_fingerprint,
+        file_id: args.file_id,
+    };
+    let resp = client()
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        anyhow::bail!("audiologo cut failed: HTTP {status}: {text}");
+    }
+    let response: AudiologoCutResponse = resp.json().await.context("parse cut response")?;
+    match output {
+        OutputFormat::Json => {
+            tracing::info!(
+                "{}",
+                serde_json::to_string_pretty(&response).unwrap_or_default()
+            );
+        }
+        OutputFormat::Human => {
+            tracing::info!(
+                book_id = response.book_id,
+                file_id = response.file_id,
+                kind = %response.kind,
+                row_id = response.row_id,
+                chapters_shifted = response.chapters_shifted,
+                new_duration_ms = ?response.new_duration_ms,
+                "audiologo cut applied",
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `aborg audiologos import <path>` — one-shot `ABtagger`
+/// fingerprint import.
+///
+/// Slice 4A reads + validates the JSON shape, prints a summary
+/// of what *would* be imported, but does NOT yet insert into
+/// `audiologos`. The actual insert lands once we know the
+/// `ABtagger` export format (mapped via the user's tmp HTML
+/// report). This is a deliberate stub — pre-flight the format
+/// before committing to a writer.
+async fn audiologo_import(path: &std::path::Path, _output: OutputFormat) -> Result<()> {
+    if !path.exists() {
+        anyhow::bail!("import path does not exist: {}", path.display());
+    }
+    let bytes = tokio::fs::read(path)
+        .await
+        .with_context(|| format!("read {}", path.display()))?;
+    let _peek: serde_json::Value = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse JSON: {}", path.display()))?;
+    tracing::warn!(
+        path = ?path,
+        size = bytes.len(),
+        "audiologo.import: parser stub — schema mapping defers to slice 4B \
+         (the ABtagger export shape needs to be confirmed against \
+         the tmp HTML review report first). No rows inserted.",
+    );
     Ok(())
 }

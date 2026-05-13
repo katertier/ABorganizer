@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT file_id AS \"file_id!\" FROM book_files\n               WHERE book_id = ?\n               ORDER BY file_id ASC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "file_id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "229b60cfb57e94d887de547f843a02f99b1eccdd566d635d5140fed9db31ec18"
+}

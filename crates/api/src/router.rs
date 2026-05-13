@@ -31,6 +31,7 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/doctor/speech/install", post(doctor_speech_install))
         .route("/books", get(books_list))
         .route("/books/{book_id}/retry", post(books_retry_stage))
+        .route("/books/{book_id}/audiologo", post(books_audiologo_cut))
         .with_state(state)
 }
 
@@ -802,4 +803,431 @@ async fn books_retry_stage(
         pipeline_progress_cleared,
     })
     .into_response()
+}
+
+// ── /books/{book_id}/audiologo ────────────────────────────────
+
+/// Body for `POST /api/v1/books/{book_id}/audiologo` (ADR-0024
+/// slice 4A).
+///
+/// Operator-driven manual cut. The endpoint inserts a row at
+/// `book_file_audiologos.status='applied'`, `method='manual'`,
+/// then recomputes `books.duration_ms` and shifts the affected
+/// `chapters` rows (the chapter-shift maths is encapsulated in
+/// [`apply_audiologo_cut`]).
+///
+/// `add_fingerprint=true` additionally samples the audio at
+/// `[jingle_start_ms, jingle_end_ms]` and inserts an
+/// `audiologos` row with `verified_via='manual'` so the cut
+/// becomes reusable across the library. The fingerprint
+/// sampling code itself lives in slice 4B; for 4A the field is
+/// accepted but the fingerprint insert is deferred (logged +
+/// returns `audiologo_id: null`).
+#[derive(Deserialize, Debug)]
+struct AudiologoCutRequest {
+    /// `"intro"` or `"outro"`.
+    kind: String,
+    /// Where the jingle begins, ms from file start.
+    jingle_start_ms: i64,
+    /// Where the jingle ends, ms from file start.
+    jingle_end_ms: i64,
+    /// Optional padding override; NULL = use
+    /// `AudiologoTunables.{intro|outro}_padding_ms`.
+    padding_ms: Option<i64>,
+    /// When true, sample + fingerprint the range and insert
+    /// into `audiologos`. Deferred to 4B; 4A accepts the
+    /// field but does not insert.
+    #[serde(default)]
+    add_fingerprint: bool,
+    /// Optional `file_id` — when omitted, applies to the
+    /// first file for intros, last file for outros.
+    file_id: Option<i64>,
+}
+
+/// Successful response body.
+#[derive(Serialize)]
+struct AudiologoCutResponse {
+    book_id: i64,
+    file_id: i64,
+    kind: String,
+    row_id: i64,
+    /// `null` when `add_fingerprint=false` or when the
+    /// fingerprint insert is deferred (4A).
+    audiologo_id: Option<i64>,
+    /// How many `chapters` rows were shifted by this cut.
+    chapters_shifted: i64,
+    /// `books.duration_ms` after the cut applied.
+    new_duration_ms: Option<i64>,
+}
+
+/// Look up the target `file_id` given an optional explicit
+/// override + the kind. For intros (no override): file with
+/// minimum `file_id` ordered ascending. For outros
+/// (no override): file with maximum `file_id`. Validated
+/// against `book_files` joined to `books`.
+async fn resolve_target_file(
+    state: &ApiState,
+    book_id: i64,
+    kind: &str,
+    explicit_file_id: Option<i64>,
+) -> Result<Option<i64>, ApiError> {
+    if let Some(file_id) = explicit_file_id {
+        let row = sqlx::query_scalar!(
+            r#"SELECT file_id AS "file_id!" FROM book_files
+               WHERE file_id = ? AND book_id = ?"#,
+            file_id,
+            book_id,
+        )
+        .fetch_optional(state.inner.library.pool())
+        .await
+        .map_err(|e| ab_core::Error::Database(format!("audiologo file lookup: {e}")))?;
+        return Ok(row);
+    }
+
+    // Default: file[0] for intro, file[N-1] for outro. Order
+    // by file_id ascending; the scan stage inserts them in
+    // path-sorted order so this matches the playback sequence.
+    let row = if kind == "outro" {
+        sqlx::query_scalar!(
+            r#"SELECT file_id AS "file_id!" FROM book_files
+               WHERE book_id = ?
+               ORDER BY file_id DESC LIMIT 1"#,
+            book_id,
+        )
+        .fetch_optional(state.inner.library.pool())
+        .await
+    } else {
+        sqlx::query_scalar!(
+            r#"SELECT file_id AS "file_id!" FROM book_files
+               WHERE book_id = ?
+               ORDER BY file_id ASC LIMIT 1"#,
+            book_id,
+        )
+        .fetch_optional(state.inner.library.pool())
+        .await
+    };
+    row.map_err(|e| ab_core::Error::Database(format!("audiologo default file: {e}")).into())
+}
+
+/// `POST /api/v1/books/{book_id}/audiologo`. Manual cut path
+/// from ADR-0024. The fingerprint insert side (when
+/// `add_fingerprint=true`) is deferred to slice 4B; this 4A
+/// endpoint records the cut and shifts chapters but logs a
+/// deferred note when fingerprinting is requested.
+async fn books_audiologo_cut(
+    State(state): State<ApiState>,
+    Path(book_id): Path<i64>,
+    Json(req): Json<AudiologoCutRequest>,
+) -> Result<Json<AudiologoCutResponse>, ApiError> {
+    // Validate kind.
+    if req.kind != "intro" && req.kind != "outro" {
+        return Err(ApiError::BadRequest(format!(
+            "kind must be 'intro' or 'outro', got {:?}",
+            req.kind,
+        )));
+    }
+    if req.jingle_start_ms < 0 || req.jingle_end_ms <= req.jingle_start_ms {
+        return Err(ApiError::BadRequest(format!(
+            "jingle_start_ms ({}) must be >= 0 and < jingle_end_ms ({})",
+            req.jingle_start_ms, req.jingle_end_ms,
+        )));
+    }
+
+    // Validate book.
+    let book_known =
+        sqlx::query_scalar!(r#"SELECT 1 AS "ok!" FROM books WHERE book_id = ?"#, book_id,)
+            .fetch_optional(state.inner.library.pool())
+            .await
+            .map_err(|e| ab_core::Error::Database(format!("audiologo book lookup: {e}")))?;
+    if book_known.is_none() {
+        return Err(ApiError::NotFound(format!("book_id {book_id} unknown")));
+    }
+
+    // Resolve the target file.
+    let Some(file_id) = resolve_target_file(&state, book_id, &req.kind, req.file_id).await? else {
+        return Err(ApiError::BadRequest(format!(
+            "book {book_id} has no files matching the request",
+        )));
+    };
+
+    // Insert the cut + shift chapters + recompute duration.
+    // Encapsulated in a helper so the catalog-bootstrap path
+    // (4B) can reuse the same maths.
+    let outcome = apply_audiologo_cut(
+        &state,
+        ApplyCutParams {
+            book_id,
+            file_id,
+            kind: &req.kind,
+            jingle_start_ms: req.jingle_start_ms,
+            jingle_end_ms: req.jingle_end_ms,
+            padding_ms: req.padding_ms,
+            method: ab_audiologo::Method::Manual.as_str(),
+            audiologo_id: None, // deferred fingerprint insert
+            confidence: 1.0,
+        },
+    )
+    .await?;
+
+    if req.add_fingerprint {
+        // Slice 4B wires the actual sample+fingerprint pass.
+        // 4A logs that the fingerprint persistence was
+        // requested so the eventual 4B run can pick up the
+        // deferred work (or the operator can re-issue the
+        // cut with --add-fingerprint once 4B ships).
+        tracing::info!(
+            book_id,
+            file_id,
+            kind = %req.kind,
+            jingle_start_ms = req.jingle_start_ms,
+            jingle_end_ms = req.jingle_end_ms,
+            "audiologo.manual.add_fingerprint_deferred_to_4b",
+        );
+    }
+
+    Ok(Json(AudiologoCutResponse {
+        book_id,
+        file_id,
+        kind: req.kind,
+        row_id: outcome.row_id,
+        audiologo_id: None,
+        chapters_shifted: outcome.chapters_shifted,
+        new_duration_ms: outcome.new_duration_ms,
+    }))
+}
+
+/// Bundled inputs to [`apply_audiologo_cut`]. Bundled to stay
+/// under the workspace 5-arg ceiling on functions.
+struct ApplyCutParams<'a> {
+    book_id: i64,
+    file_id: i64,
+    kind: &'a str,
+    jingle_start_ms: i64,
+    jingle_end_ms: i64,
+    padding_ms: Option<i64>,
+    method: &'a str,
+    audiologo_id: Option<i64>,
+    confidence: f64,
+}
+
+struct ApplyCutOutcome {
+    row_id: i64,
+    chapters_shifted: i64,
+    new_duration_ms: Option<i64>,
+}
+
+/// Insert an `applied` row in `book_file_audiologos`, shift the
+/// chapters attached to the affected file, recompute
+/// `books.duration_ms`, and flip `books.audiologo_status`.
+///
+/// Encapsulates the full apply-pipeline for any Method —
+/// `Manual` (4A), `CatalogBrandDuration` (4B), and the
+/// fingerprint-bearing tiers (4C) all share this path.
+///
+/// Chapter shift rule per ADR-0024:
+/// - `start_ms >= jingle_end_ms` → both `start_ms` and `end_ms`
+///   shift earlier by `cut_ms`.
+/// - chapter spans the trim → `end_ms` shifts only.
+/// - chapter ends before the trim → unchanged.
+///
+/// `cut_ms = (jingle_end_ms - jingle_start_ms) - padding_ms`.
+/// Boundary verification (`chapters.boundary_verified` flag) is
+/// deferred to slice 4B (needs the transcript surface).
+async fn apply_audiologo_cut(
+    state: &ApiState,
+    p: ApplyCutParams<'_>,
+) -> Result<ApplyCutOutcome, ApiError> {
+    let mut tx = state
+        .inner
+        .library
+        .pool()
+        .begin()
+        .await
+        .map_err(|e| ab_core::Error::Database(format!("audiologo begin tx: {e}")))?;
+
+    let row_id = insert_audiologo_row(&mut tx, &p).await?;
+
+    // cut_ms = (jingle_end - jingle_start) - padding.
+    // Negative cut would mean padding > jingle range; clamp
+    // to 0 (effectively no shift). NULL padding → 0.
+    let padding = p.padding_ms.unwrap_or(0);
+    let cut_ms: i64 = ((p.jingle_end_ms - p.jingle_start_ms) - padding).max(0);
+
+    let chapters_shifted = shift_chapters_for_cut(
+        &mut tx,
+        ShiftArgs {
+            book_id: p.book_id,
+            file_id: p.file_id,
+            jingle_start_ms: p.jingle_start_ms,
+            jingle_end_ms: p.jingle_end_ms,
+            cut_ms,
+        },
+    )
+    .await?;
+
+    let new_duration = recompute_book_duration(&mut tx, p.book_id, cut_ms).await?;
+
+    tx.commit()
+        .await
+        .map_err(|e| ab_core::Error::Database(format!("audiologo commit: {e}")))?;
+
+    Ok(ApplyCutOutcome {
+        row_id,
+        chapters_shifted,
+        new_duration_ms: new_duration,
+    })
+}
+
+/// Insert the `book_file_audiologos` row at status='applied'.
+async fn insert_audiologo_row(
+    tx: &mut sqlx::SqliteConnection,
+    p: &ApplyCutParams<'_>,
+) -> Result<i64, ApiError> {
+    let insert = sqlx::query!(
+        r#"INSERT INTO book_file_audiologos
+           (file_id, kind, jingle_start_ms, jingle_end_ms,
+            padding_ms, method, audiologo_id, confidence,
+            status, applied_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'applied',
+                   strftime('%s','now'))"#,
+        p.file_id,
+        p.kind,
+        p.jingle_start_ms,
+        p.jingle_end_ms,
+        p.padding_ms,
+        p.method,
+        p.audiologo_id,
+        p.confidence,
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| ab_core::Error::Database(format!("audiologo insert: {e}")))?;
+    Ok(insert.last_insert_rowid())
+}
+
+/// Args for [`shift_chapters_for_cut`]. Bundled so the
+/// function stays under the workspace's 5-arg ceiling.
+struct ShiftArgs {
+    book_id: i64,
+    file_id: i64,
+    jingle_start_ms: i64,
+    jingle_end_ms: i64,
+    cut_ms: i64,
+}
+
+/// Shift the `chapters` rows affected by a cut.
+///
+/// Per ADR-0024 the shift covers ALL `source` rows (not just
+/// `is_winner=1`) so a later winner-switch reads already-shifted
+/// data. The cut is file-local; chapters are book-cumulative
+/// (per slice 2H), so we translate by summing the durations of
+/// preceding files. Returns the count of shifted rows.
+async fn shift_chapters_for_cut(
+    tx: &mut sqlx::SqliteConnection,
+    args: ShiftArgs,
+) -> Result<i64, ApiError> {
+    let ShiftArgs {
+        book_id,
+        file_id,
+        jingle_start_ms,
+        jingle_end_ms,
+        cut_ms,
+    } = args;
+    // NULL `book_files.duration_ms` counts as 0 (best-effort;
+    // the shift will be re-pass-able once the file gets a
+    // duration). Same query result for empty preceding-file
+    // sets — 0.
+    let cumulative_before: i64 = sqlx::query_scalar!(
+        r#"SELECT COALESCE(SUM(duration_ms), 0) AS "v!: i64"
+           FROM book_files
+           WHERE book_id = ? AND file_id < ?"#,
+        book_id,
+        file_id,
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| ab_core::Error::Database(format!("audiologo cumulative offset: {e}")))?;
+    let jingle_start_book_ms = cumulative_before + jingle_start_ms;
+    let jingle_end_book_ms = cumulative_before + jingle_end_ms;
+
+    // (a) chapter entirely after the trim → shift both
+    //     start_ms and end_ms by cut_ms.
+    let after = sqlx::query!(
+        r#"UPDATE chapters
+           SET start_ms = start_ms - ?,
+               end_ms   = end_ms - ?
+           WHERE book_id = ?
+             AND start_ms >= ?"#,
+        cut_ms,
+        cut_ms,
+        book_id,
+        jingle_end_book_ms,
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| ab_core::Error::Database(format!("audiologo shift chapters (after): {e}")))?;
+
+    // (b) chapter spans the trim window (started before or at
+    //     trim; ends after the trim's start) → shift end_ms only.
+    let spanning = sqlx::query!(
+        r#"UPDATE chapters
+           SET end_ms = end_ms - ?
+           WHERE book_id = ?
+             AND start_ms < ?
+             AND end_ms > ?"#,
+        cut_ms,
+        book_id,
+        jingle_end_book_ms,
+        jingle_start_book_ms,
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| ab_core::Error::Database(format!("audiologo shift chapters (spanning): {e}")))?;
+
+    // u64 → i64 cast: row counts are inside i64 by design.
+    #[allow(clippy::cast_possible_wrap)]
+    let shifted = (after.rows_affected() + spanning.rows_affected()) as i64;
+    Ok(shifted)
+}
+
+/// Subtract the cut from `books.duration_ms` (when non-NULL)
+/// and flip `books.audiologo_status='applied'`. Returns the
+/// post-cut `duration_ms` for the response.
+async fn recompute_book_duration(
+    tx: &mut sqlx::SqliteConnection,
+    book_id: i64,
+    cut_ms: i64,
+) -> Result<Option<i64>, ApiError> {
+    // duration_ms is post-trim; raw_duration_ms is pre-trim.
+    // Subtract this cut's cut_ms from the current duration_ms
+    // — handles multiple applied trims correctly (each
+    // subtracts independently). For books that haven't had
+    // duration_ms set yet, leave it alone (next pass sets it
+    // from book_files cumulative).
+    sqlx::query!(
+        "UPDATE books \
+         SET duration_ms = duration_ms - ?, \
+             audiologo_status = 'applied' \
+         WHERE book_id = ? AND duration_ms IS NOT NULL",
+        cut_ms,
+        book_id,
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| ab_core::Error::Database(format!("audiologo recompute duration: {e}")))?;
+
+    // Books with NULL duration_ms still get the status update.
+    sqlx::query!(
+        "UPDATE books SET audiologo_status = 'applied' \
+         WHERE book_id = ? AND audiologo_status != 'applied'",
+        book_id,
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| ab_core::Error::Database(format!("audiologo status update: {e}")))?;
+
+    sqlx::query_scalar!("SELECT duration_ms FROM books WHERE book_id = ?", book_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| ab_core::Error::Database(format!("audiologo read duration: {e}")).into())
 }

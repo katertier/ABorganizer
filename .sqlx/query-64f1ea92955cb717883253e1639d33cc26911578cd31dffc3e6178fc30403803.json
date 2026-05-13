@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO book_file_audiologos\n           (file_id, kind, jingle_start_ms, jingle_end_ms,\n            padding_ms, method, audiologo_id, confidence,\n            status, applied_at)\n           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'applied',\n                   strftime('%s','now'))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "64f1ea92955cb717883253e1639d33cc26911578cd31dffc3e6178fc30403803"
+}
