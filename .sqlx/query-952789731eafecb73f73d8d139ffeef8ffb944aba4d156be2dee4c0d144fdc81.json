@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE chapters\n           SET start_ms = start_ms - ?,\n               end_ms   = end_ms - ?\n           WHERE book_id = ?\n             AND start_ms >= ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "952789731eafecb73f73d8d139ffeef8ffb944aba4d156be2dee4c0d144fdc81"
+}

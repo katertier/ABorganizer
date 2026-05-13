@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE books SET duration_ms = duration_ms - ?, audiologo_status = 'applied' WHERE book_id = ? AND duration_ms IS NOT NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "ba7bc99701ba9379e19a42c4e67731ec5ac1ad372778213417c147feb8f8bd05"
+}

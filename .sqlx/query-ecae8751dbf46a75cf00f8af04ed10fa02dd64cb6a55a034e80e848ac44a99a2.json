@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT duration_ms FROM books WHERE book_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "duration_ms",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "ecae8751dbf46a75cf00f8af04ed10fa02dd64cb6a55a034e80e848ac44a99a2"
+}

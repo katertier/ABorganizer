@@ -20,6 +20,7 @@ ab-db           = { workspace = true }
 # `ab-transcript` + the daemon's stage registration.
 ab-tag-read     = { workspace = true }
 ab-catalog      = { workspace = true }
+ab-audiologo    = { workspace = true }
 ab-fingerprint  = { workspace = true }
 ab-pipeline     = { workspace = true }
 ab-scan         = { workspace = true }
