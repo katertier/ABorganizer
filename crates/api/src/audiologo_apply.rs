@@ -17,7 +17,13 @@
 //!   subtracts previously-applied cuts. Public so tests can
 //!   pin the bug-class.
 //! - [`recompute_book_duration`] — subtracts a cut from
-//!   `books.duration_ms` and flips `books.audiologo_status='applied'`.
+//!   `books.duration_ms`; calls
+//!   [`recompute_audiologo_status`] to follow with the
+//!   book-level state update.
+//! - [`recompute_audiologo_status`] — derives
+//!   `books.audiologo_status` from the per-file rows.
+//!   Shared between apply, reset (H.1.5), and the future 4B
+//!   detection stage.
 //! - [`insert_audiologo_row`] — INSERTs into `book_file_audiologos`
 //!   at `status='applied'`.
 //!
@@ -307,9 +313,7 @@ pub async fn recompute_book_duration(
     // duration_ms set yet, leave it alone (next pass sets it
     // from book_files cumulative).
     sqlx::query!(
-        "UPDATE books \
-         SET duration_ms = duration_ms - ?, \
-             audiologo_status = 'applied' \
+        "UPDATE books SET duration_ms = duration_ms - ? \
          WHERE book_id = ? AND duration_ms IS NOT NULL",
         cut_ms,
         book_id,
@@ -318,18 +322,100 @@ pub async fn recompute_book_duration(
     .await
     .map_err(|e| ab_core::Error::Database(format!("audiologo recompute duration: {e}")))?;
 
-    // Books with NULL duration_ms still get the status update.
-    sqlx::query!(
-        "UPDATE books SET audiologo_status = 'applied' \
-         WHERE book_id = ? AND audiologo_status != 'applied'",
-        book_id,
-    )
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| ab_core::Error::Database(format!("audiologo status update: {e}")))?;
+    // Book-level status follows from the per-file rows.
+    recompute_audiologo_status(tx, book_id).await?;
 
     sqlx::query_scalar!("SELECT duration_ms FROM books WHERE book_id = ?", book_id)
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| ab_core::Error::Database(format!("audiologo read duration: {e}")).into())
+}
+
+/// Derive `books.audiologo_status` from the per-file
+/// `book_file_audiologos` rows for one book.
+///
+/// Priority (first match wins):
+///
+/// 1. ANY `applied` row    → `'applied'`
+/// 2. ANY `candidate`      → `'detected'`
+/// 3. ANY `re_detected`    → `'detected'`
+///    (the detection survived; user just unapplied it)
+/// 4. ANY `rejected`       → `'rejected'`
+/// 5. No rows AND current status is one of
+///    `'stripped'` / `'none'` → leave it (externally derived,
+///    can't be recomputed from rows).
+/// 6. Otherwise            → `'unknown'`.
+///
+/// Used by:
+///
+/// - [`recompute_book_duration`] after applying a cut.
+/// - The future `audiologo-detect` `Stage::reset()` (H.1.5),
+///   which flips `applied` rows to `re_detected` and then
+///   wants the book-level status to follow.
+/// - The future 4B detection stage, after a detection pass
+///   inserts new candidate rows.
+///
+/// # Errors
+///
+/// Surfaces underlying DB errors as
+/// [`ApiError::Internal`].
+pub async fn recompute_audiologo_status(
+    tx: &mut SqliteConnection,
+    book_id: i64,
+) -> Result<(), ApiError> {
+    // One SELECT that buckets the row counts; saves four
+    // round-trips. `COUNT(*) FILTER` is portable in modern
+    // SQLite (3.30+, well below our minimum).
+    let counts = sqlx::query!(
+        r#"SELECT
+             COUNT(*) FILTER (WHERE status = 'applied')      AS "applied!: i64",
+             COUNT(*) FILTER (WHERE status = 'candidate')    AS "candidate!: i64",
+             COUNT(*) FILTER (WHERE status = 're_detected')  AS "re_detected!: i64",
+             COUNT(*) FILTER (WHERE status = 'rejected')     AS "rejected!: i64",
+             COUNT(*) AS "total!: i64"
+           FROM book_file_audiologos
+           WHERE file_id IN (SELECT file_id FROM book_files WHERE book_id = ?)"#,
+        book_id,
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| ab_core::Error::Database(format!("audiologo count rows: {e}")))?;
+
+    let new_status: &'static str = if counts.applied > 0 {
+        "applied"
+    } else if counts.candidate > 0 || counts.re_detected > 0 {
+        "detected"
+    } else if counts.rejected > 0 {
+        "rejected"
+    } else if counts.total == 0 {
+        // Defer to existing externally-derived status when no
+        // rows exist; 'stripped'/'none' carry catalog context
+        // that's not recoverable from book_file_audiologos.
+        let cur: Option<String> = sqlx::query_scalar!(
+            "SELECT audiologo_status FROM books WHERE book_id = ?",
+            book_id,
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| ab_core::Error::Database(format!("audiologo read status: {e}")))?;
+        match cur.as_deref() {
+            Some("stripped" | "none") => return Ok(()),
+            _ => "unknown",
+        }
+    } else {
+        "unknown"
+    };
+
+    sqlx::query!(
+        "UPDATE books SET audiologo_status = ? \
+         WHERE book_id = ? AND audiologo_status != ?",
+        new_status,
+        book_id,
+        new_status,
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| ab_core::Error::Database(format!("audiologo status update: {e}")))?;
+
+    Ok(())
 }
