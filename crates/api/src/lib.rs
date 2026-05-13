@@ -20,6 +20,7 @@
 
 pub mod audiologo_apply;
 pub mod audiologo_review;
+pub mod auth;
 pub mod cleanup_targets;
 pub mod error;
 pub mod names;

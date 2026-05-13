@@ -13,6 +13,12 @@ workspace = true
 
 [dependencies]
 chrono     = { workspace = true }
+# Layered TOML + env config loader for `Tunables::load`. Pulled
+# in here (not in the daemon) so every binary that uses
+# `Tunables` reaches the same merged value — `aborg` (CLI),
+# `aborg-daemon`, and future `aborg-tools` invocations all read
+# `config.toml` + AB_* env identically.
+figment    = { workspace = true }
 once_cell  = { workspace = true }
 serde      = { workspace = true }
 thiserror  = { workspace = true }

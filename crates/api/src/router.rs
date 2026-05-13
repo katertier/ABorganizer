@@ -1,6 +1,6 @@
 //! Top-level axum Router builder.
 
-use std::path::PathBuf;
+use std::path::{Path as FsPath, PathBuf};
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -56,6 +56,15 @@ pub fn build_router(state: ApiState) -> Router {
         )
         .route("/report/gaps", get(crate::reports::report_gaps))
         .route("/upcoming", get(crate::reports::report_upcoming))
+        // Auth middleware applied to ALL routes. The middleware
+        // itself checks `crate::auth::PUBLIC_PATHS` to bypass
+        // `/health` and `/version`; everything else needs a
+        // bearer token matching `tunables.security.admin_token`.
+        // Default-deny when no token is configured.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::auth::require_admin_token,
+        ))
         .with_state(state)
 }
 
@@ -268,11 +277,65 @@ struct ScanResponse {
     total_walked: u64,
 }
 
+/// Canonicalise + verify the requested scan path is at-or-under
+/// one of the configured `security.library_roots`. Returns the
+/// canonical path on success, [`ApiError::BadRequest`] on any
+/// rejection (empty root list, nonexistent path, path outside
+/// the allow-list).
+///
+/// Surfaced as a free function (not a method) so the
+/// `library_scan` handler stays under the
+/// `clippy::too_many_lines` cap. The cross-model code review
+/// (REVIEW.md § 1.2 / § 3.1, MYREVIEW.md § 3.1) called this
+/// gate out as missing — before this slice the handler walked
+/// whatever path the caller sent.
+///
+/// Each root is canonicalised at check time (not at boot) so
+/// operators can fix typos in config without a restart, and so
+/// symlinks that change resolution at runtime are caught.
+fn validate_scan_path(state: &ApiState, requested: &FsPath) -> Result<PathBuf, ApiError> {
+    let allowed = &state.inner.security.library_roots;
+    if allowed.is_empty() {
+        tracing::warn!(
+            requested = %requested.display(),
+            "api.library_scan.reject_no_roots_configured"
+        );
+        return Err(ApiError::BadRequest(
+            "scan disabled: no `security.library_roots` configured".to_owned(),
+        ));
+    }
+    let canonical = std::fs::canonicalize(requested).map_err(|e| {
+        tracing::info!(
+            requested = %requested.display(),
+            error = %e,
+            "api.library_scan.reject_canonicalize_failed"
+        );
+        ApiError::BadRequest(format!("path does not exist or is not readable: {e}"))
+    })?;
+    let allowed_match = allowed.iter().any(|root| {
+        std::fs::canonicalize(root)
+            .ok()
+            .is_some_and(|r| canonical.starts_with(&r))
+    });
+    if !allowed_match {
+        tracing::warn!(
+            requested = %canonical.display(),
+            "api.library_scan.reject_outside_roots"
+        );
+        return Err(ApiError::BadRequest(format!(
+            "path {} is not under any configured library root",
+            canonical.display(),
+        )));
+    }
+    Ok(canonical)
+}
+
 async fn library_scan(
     State(state): State<ApiState>,
     Json(req): Json<ScanRequest>,
 ) -> Result<Json<ScanResponse>, ApiError> {
-    let report = ab_scan::scan(&req.path, &state.inner.library).await?;
+    let requested = validate_scan_path(&state, &req.path)?;
+    let report = ab_scan::scan(&requested, &state.inner.library).await?;
 
     // Submit each newly-discovered book to the scheduler for
     // downstream pipeline work (tag-read in slice 1B; more stages
