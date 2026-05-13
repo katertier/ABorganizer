@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT b.title FROM books b JOIN book_series bs ON bs.book_id = b.book_id WHERE bs.series_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "title",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "4a1c1975cbdea00561f0fa09f617dae912dac2825be7c513c0139684380ab1aa"
+}

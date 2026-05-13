@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT bs.series_id AS \"series_id!: i64\", s.franchise_prefix FROM book_series bs JOIN series s ON s.series_id = bs.series_id WHERE bs.book_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "series_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "franchise_prefix",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "21912179e479772562a182dccdafe592ecae664063b700b9e67b9fc2494bfc9f"
+}
