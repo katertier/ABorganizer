@@ -46,8 +46,10 @@ use serde::{Deserialize, Serialize};
 
 use ab_core::Result;
 
+pub mod apply;
 pub mod stage;
 
+pub use apply::{apply_auto_applicable_candidates, apply_libation_stripped};
 pub use stage::{DetectAudiologoStage, STAGE_ID as DETECT_AUDIOLOGO_STAGE_ID};
 
 /// Which side of the audio we're detecting.
@@ -69,6 +71,18 @@ impl Kind {
         match self {
             Self::Intro => "intro",
             Self::Outro => "outro",
+        }
+    }
+
+    /// Parse the `kind` column back into the typed enum. Used
+    /// when reading `book_file_audiologos` rows back from
+    /// storage in the apply path (slice 4B.5).
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "intro" => Some(Self::Intro),
+            "outro" => Some(Self::Outro),
+            _ => None,
         }
     }
 }

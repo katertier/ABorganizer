@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT a.audiologo_row_id AS \"row_id!: i64\",\n                  a.file_id,\n                  a.kind,\n                  a.jingle_start_ms,\n                  a.jingle_end_ms,\n                  a.padding_ms,\n                  a.method,\n                  a.confidence\n             FROM book_file_audiologos a\n             JOIN book_files f ON f.file_id = a.file_id\n            WHERE f.book_id = ? AND a.status = ?\n            ORDER BY a.audiologo_row_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "row_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "file_id",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "kind",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "jingle_start_ms",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "jingle_end_ms",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "padding_ms",
+        "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "method",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "confidence",
+        "ordinal": 7,
+        "type_info": "Float"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "1c63b8bf77c13a30d98cc7cf033dd2177858c0cf02cac426dd2f460d9eebc41a"
+}

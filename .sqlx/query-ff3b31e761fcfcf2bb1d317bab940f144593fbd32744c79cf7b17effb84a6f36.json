@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE books\n              SET duration_ms = MAX(0, duration_ms - ?)\n            WHERE book_id = ? AND duration_ms IS NOT NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "ff3b31e761fcfcf2bb1d317bab940f144593fbd32744c79cf7b17effb84a6f36"
+}

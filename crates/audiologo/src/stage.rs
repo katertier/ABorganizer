@@ -62,6 +62,11 @@ pub const STAGE_NAME: &str = STAGE_ID.as_str();
 pub struct DetectAudiologoStage {
     intro_window_ms: u64,
     outro_window_ms: u64,
+    /// Whole tunables ref kept for the auto-apply phase (4B.5).
+    /// Auto-apply reads per-method confidence floors + padding
+    /// defaults, so the stage hangs onto the full struct rather
+    /// than copying every field individually.
+    tunables: AudiologoTunables,
 }
 
 impl Default for DetectAudiologoStage {
@@ -86,6 +91,7 @@ impl DetectAudiologoStage {
         Self {
             intro_window_ms,
             outro_window_ms,
+            tunables: tunables.clone(),
         }
     }
 }
@@ -589,14 +595,40 @@ impl Stage for DetectAudiologoStage {
             }
         }
 
-        // book.audiologo_status flips to `detected` when any
-        // candidate landed; the Libation-stripped path (no hit +
-        // brand_intro_ms present → status='stripped' + chapter
-        // shift) is 4B.5. For 4B.4b we leave `unknown` alone in
-        // that case so 4B.5 has a clear "not yet decided" signal.
-        if any_candidate {
+        // Auto-apply path (4B.5): promote high-confidence
+        // candidates to `applied` + shift chapter offsets.
+        let promoted = if any_candidate {
             update_book_audiologo_status(&ctx.library, book_id, crate::BookStatus::Detected)
                 .await?;
+            crate::apply::apply_auto_applicable_candidates(&ctx.library, book_id, &self.tunables)
+                .await?
+        } else {
+            0
+        };
+
+        // Libation-stripped path (4B.5): brand_intro_duration_ms
+        // is non-NULL but no fingerprint hit landed → audio has
+        // been pre-stripped elsewhere. Shift chapters by
+        // -brand_intro_ms and set status='stripped'. Idempotent.
+        let libation_applied = if !any_candidate && promoted == 0 {
+            match brand_intro_ms {
+                Some(brand_ms) => {
+                    crate::apply::apply_libation_stripped(&ctx.library, book_id, brand_ms).await?
+                }
+                None => false,
+            }
+        } else {
+            false
+        };
+
+        if any_candidate || libation_applied {
+            tracing::info!(
+                book = %book_id,
+                any_candidate,
+                promoted,
+                libation_applied,
+                "audiologo.detect.done"
+            );
             Ok(StageOutcome::Done)
         } else {
             tracing::info!(
