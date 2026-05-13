@@ -377,6 +377,21 @@ struct BookRow {
     book_id: i64,
     title: String,
     file_path: Option<String>,
+    /// Display author — `is_prime=1` alias from `author_aliases` if
+    /// any, else `authors.name`. `None` when the book has no
+    /// resolved author (consensus hasn't run yet or no candidates).
+    /// Per ADR-0026.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author: Option<String>,
+    /// Display narrator(s) — same prime-alias rule, comma-separated
+    /// when more than one. `None` when no narrators linked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    narrators: Option<String>,
+    /// Display series — same prime-alias rule. Picks the
+    /// `book_series.is_primary = 1` row (C5.6); secondary series
+    /// don't surface in the list view.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    series: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -555,11 +570,38 @@ async fn library_retry_failed_speech_installs(
 async fn books_list(State(state): State<ApiState>) -> Result<Json<BooksResponse>, ApiError> {
     // `book_id!` forces non-null inference past sqlite's
     // `INTEGER PRIMARY KEY AUTOINCREMENT` nullability quirk
-    // (see slice 1D.2 note).
+    // (see slice 1D.2 note). `author` and `series` use the
+    // COALESCE(prime_alias, parent.name) rule from ADR-0026 so
+    // operator exaltation of an alias displays correctly. The
+    // joined `narrator_aliases` table aggregates narrator names
+    // similarly, comma-separated.
     let rows = sqlx::query!(
-        r#"SELECT b.book_id AS "book_id!", b.title,
-                  (SELECT file_path FROM book_files
-                   WHERE book_id = b.book_id LIMIT 1) AS file_path
+        r#"SELECT
+              b.book_id AS "book_id!",
+              b.title,
+              (SELECT file_path FROM book_files
+               WHERE book_id = b.book_id LIMIT 1) AS file_path,
+              COALESCE(
+                  (SELECT alias FROM author_aliases
+                     WHERE author_id = b.author_id AND is_prime = 1 LIMIT 1),
+                  (SELECT name FROM authors WHERE author_id = b.author_id LIMIT 1)
+              ) AS author,
+              (SELECT GROUP_CONCAT(
+                          COALESCE(
+                              (SELECT alias FROM narrator_aliases na
+                                 WHERE na.narrator_id = n.narrator_id AND is_prime = 1 LIMIT 1),
+                              n.name
+                          ), ', ')
+                 FROM book_narrator bn
+                 JOIN narrators n ON n.narrator_id = bn.narrator_id
+                 WHERE bn.book_id = b.book_id) AS narrators,
+              (SELECT COALESCE(
+                          (SELECT alias FROM series_aliases sa
+                             WHERE sa.series_id = s.series_id AND is_prime = 1 LIMIT 1),
+                          s.name)
+                 FROM book_series bs
+                 JOIN series s ON s.series_id = bs.series_id
+                 WHERE bs.book_id = b.book_id AND bs.is_primary = 1 LIMIT 1) AS series
            FROM books b
            ORDER BY b.book_id"#,
     )
@@ -573,6 +615,9 @@ async fn books_list(State(state): State<ApiState>) -> Result<Json<BooksResponse>
             book_id: r.book_id,
             title: r.title,
             file_path: r.file_path,
+            author: r.author,
+            narrators: r.narrators,
+            series: r.series,
         })
         .collect();
     Ok(Json(BooksResponse { books }))
