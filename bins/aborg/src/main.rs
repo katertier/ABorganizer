@@ -93,6 +93,12 @@ enum Command {
         #[command(subcommand)]
         action: NamesAction,
     },
+    /// Cross-library reports (BACKLOG § B). Subcommands `gaps` and
+    /// `upcoming`.
+    Report {
+        #[command(subcommand)]
+        action: ReportAction,
+    },
     /// Cleanup subsystem (ADR-0025). Categories: disk, db, queue.
     ///
     /// Without `--apply` the daemon dry-runs every registered
@@ -176,6 +182,35 @@ enum NamesAction {
         /// Optional `audible_id` for the new identity row.
         #[arg(long, requires = "create_new")]
         audible_id: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ReportAction {
+    /// Books Audible thinks <author> wrote but we don't have.
+    /// BACKLOG § Cluster 5 / slice 10E.
+    Gaps {
+        /// `author_id` from `aborg book list` or `aborg names
+        /// pending`.
+        #[arg(long)]
+        author: i64,
+        /// Cap on Audible result pages (50/page). Default 5.
+        #[arg(long)]
+        max_pages: Option<u32>,
+    },
+    /// Upcoming releases across library authors. Use `--days N`
+    /// to set the lookahead window. BACKLOG § Cluster 5 / slice
+    /// 10F.
+    Upcoming {
+        /// Days into the future to look. Default 180; capped at 730.
+        #[arg(long)]
+        days: Option<u32>,
+        /// Restrict to one author by id.
+        #[arg(long)]
+        author: Option<i64>,
+        /// Cap on Audible result pages per author. Default 3.
+        #[arg(long)]
+        max_pages: Option<u32>,
     },
 }
 
@@ -307,6 +342,12 @@ enum DaemonAction {
 }
 
 #[tokio::main]
+// `main` is the top-level subcommand dispatch. Fragmenting the
+// match obscures the verb table more than it helps; the
+// per-handler bodies already live in separate functions. CLI
+// surface grows roughly one variant per slice; cap exemption is
+// justified by structure.
+#[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     init_tracing(cli.quiet, cli.verbose);
@@ -393,6 +434,18 @@ async fn main() -> Result<()> {
                     cli.output,
                 )
                 .await?;
+            }
+        },
+        Command::Report { action } => match action {
+            ReportAction::Gaps { author, max_pages } => {
+                report_gaps(&cli.daemon, author, max_pages, cli.output).await?;
+            }
+            ReportAction::Upcoming {
+                days,
+                author,
+                max_pages,
+            } => {
+                report_upcoming(&cli.daemon, days, author, max_pages, cli.output).await?;
             }
         },
         Command::Clean {
@@ -1080,6 +1133,143 @@ fn print_names_action(body: &NamesActionResponse, output: OutputFormat) {
             }
         }
     }
+}
+
+// ── Reports (slices 10E + 10F, Cluster 5) ────────────────────────────
+
+#[derive(Deserialize, Debug, Serialize)]
+struct BookCandidate {
+    asin: String,
+    title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    subtitle: Option<String>,
+    status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    release_date: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    runtime_min: Option<u32>,
+    #[serde(default)]
+    authors: Vec<String>,
+    #[serde(default)]
+    narrators: Vec<String>,
+}
+
+#[derive(Deserialize, Debug, Serialize)]
+struct GapsResponseBody {
+    author_id: i64,
+    author_name: String,
+    owned_count: u64,
+    gap_count: u64,
+    books: Vec<BookCandidate>,
+}
+
+async fn report_gaps(
+    daemon: &str,
+    author: i64,
+    max_pages: Option<u32>,
+    output: OutputFormat,
+) -> Result<()> {
+    let url = max_pages.map_or_else(
+        || format!("{daemon}/api/v1/report/gaps?author={author}"),
+        |mp| format!("{daemon}/api/v1/report/gaps?author={author}&max_pages={mp}"),
+    );
+    let resp = client()
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("gaps failed: HTTP {status}: {body}");
+    }
+    let body: GapsResponseBody = resp.json().await.context("parse gaps response")?;
+    match output {
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&body).unwrap_or_default()
+            );
+        }
+        OutputFormat::Human => {
+            println!(
+                "author #{} — {} — {} owned / {} gap",
+                body.author_id, body.author_name, body.owned_count, body.gap_count
+            );
+            for b in &body.books {
+                let date = b.release_date.as_deref().unwrap_or("");
+                println!("  [{:>8}] {} — {} ({})", b.status, b.asin, b.title, date);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Deserialize, Debug, Serialize)]
+struct UpcomingResponseBody {
+    days_window: u32,
+    authors_checked: u64,
+    books: Vec<BookCandidate>,
+}
+
+async fn report_upcoming(
+    daemon: &str,
+    days: Option<u32>,
+    author: Option<i64>,
+    max_pages: Option<u32>,
+    output: OutputFormat,
+) -> Result<()> {
+    let mut params: Vec<String> = Vec::new();
+    if let Some(d) = days {
+        params.push(format!("days={d}"));
+    }
+    if let Some(a) = author {
+        params.push(format!("author={a}"));
+    }
+    if let Some(m) = max_pages {
+        params.push(format!("max_pages={m}"));
+    }
+    let url = if params.is_empty() {
+        format!("{daemon}/api/v1/upcoming")
+    } else {
+        format!("{daemon}/api/v1/upcoming?{}", params.join("&"))
+    };
+    let resp = client()
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("upcoming failed: HTTP {status}: {body}");
+    }
+    let body: UpcomingResponseBody = resp.json().await.context("parse upcoming response")?;
+    match output {
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&body).unwrap_or_default()
+            );
+        }
+        OutputFormat::Human => {
+            println!(
+                "{} day window — {} authors checked — {} upcoming",
+                body.days_window,
+                body.authors_checked,
+                body.books.len()
+            );
+            for b in &body.books {
+                let date = b.release_date.as_deref().unwrap_or("?");
+                let authors = b.authors.join(", ");
+                println!(
+                    "  {} [{}]  {} — {}  ({})",
+                    date, b.status, b.title, authors, b.asin
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 // ── Tracing setup ────────────────────────────────────────────────────
