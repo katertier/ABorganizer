@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT b.book_id AS \"book_id!: i64\" FROM books b\n           WHERE EXISTS (SELECT 1 FROM book_files f WHERE f.book_id = b.book_id)",
+  "describe": {
+    "columns": [
+      {
+        "name": "book_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "28a445d95b710d659aa9eca7918da485d3207e971d400940f8243d025403e51e"
+}

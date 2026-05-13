@@ -263,6 +263,25 @@ async fn main() -> Result<()> {
         cancel.clone(),
     ));
 
+    // Periodic pipeline dispatcher (slice 1F.A3). Wakes every
+    // `tunables.scheduler.dispatcher_check_secs` to
+    //   (1) reap pipeline_progress rows whose book or files
+    //       no longer exist on disk, and
+    //   (2) sweep books for stages that have become eligible
+    //       (deps now satisfied) and submit one Background
+    //       job each.
+    // This is the safety-net path for the synchronous
+    // auto-dispatch in `Scheduler::execute` (A.2) — it
+    // catches freshly-scanned books with no progress rows,
+    // dropped submissions on a full channel, and retries
+    // after restart.
+    tokio::spawn(scheduler.dispatcher_loop(
+        library.clone(),
+        ephemeral.clone(),
+        tunables.scheduler.clone(),
+        cancel.clone(),
+    ));
+
     // Shared state for the API router. Carries the scheduler handle
     // so the scan endpoint can submit new BookIds.
     let api_state = ab_api::ApiState::new(library.clone(), ephemeral.clone(), scheduler, dag);

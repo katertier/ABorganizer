@@ -22,6 +22,12 @@
 //!   transactions.
 
 pub mod dag;
+// `dispatcher` is reachable only via `Scheduler::dispatcher_loop`
+// (which constructs and feeds it `DispatcherCtx`). The items here
+// stay `pub(crate)` so the daemon never imports them directly —
+// they show up in our crate's surface only through the typed
+// scheduler entry point.
+pub mod dispatcher;
 pub mod scheduler;
 pub mod stage;
 

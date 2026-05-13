@@ -11,6 +11,7 @@
 //!   iteration can pick up a freshly-arrived interactive job
 //!   before the next chunk runs.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -164,13 +165,35 @@ impl Scheduler {
     /// dispatcher uses `try_send` instead, so it can stay
     /// synchronous and just drop the over-buffer attempt for
     /// the next tick to retry).
-    ///
-    /// Unused at the A.1/A.2 boundary; consumed by the
-    /// dispatcher loop landing in A.3 of the same slice.
     #[must_use]
-    #[allow(dead_code)]
     pub(crate) fn background_sender(&self) -> mpsc::Sender<Job> {
         self.background_tx.clone()
+    }
+
+    /// Return a future that runs the periodic dispatcher loop
+    /// for this scheduler. The daemon spawns it once at
+    /// startup; cancellation flows through the shared token.
+    ///
+    /// Wrapped here rather than exported as a free function
+    /// because the dispatcher needs the scheduler's
+    /// background-queue sender, which is a `pub(crate)`
+    /// implementation detail. Callers get a clean handle
+    /// without learning about [`Job`].
+    pub fn dispatcher_loop(
+        &self,
+        library: ab_db::LibraryDb,
+        ephemeral: EphemeralDb,
+        tunables: SchedulerTunables,
+        cancel: CancellationToken,
+    ) -> impl Future<Output = ()> + Send + 'static {
+        let ctx = crate::dispatcher::DispatcherCtx {
+            library,
+            ephemeral,
+            dag: Arc::clone(&self.dag),
+            background_tx: self.background_sender(),
+            tunables,
+        };
+        crate::dispatcher::run_dispatcher_loop(ctx, cancel)
     }
 
     /// Submit a book + stage for processing.
