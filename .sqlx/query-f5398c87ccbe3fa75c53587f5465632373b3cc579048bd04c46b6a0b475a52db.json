@@ -11,7 +11,7 @@
       {
         "name": "best_confidence!: f64",
         "ordinal": 1,
-        "type_info": "Float"
+        "type_info": "Null"
       },
       {
         "name": "winner_id!",
@@ -24,7 +24,7 @@
     },
     "nullable": [
       true,
-      false,
+      null,
       true
     ]
   },

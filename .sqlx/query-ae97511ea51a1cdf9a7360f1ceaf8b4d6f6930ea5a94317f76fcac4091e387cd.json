@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO book_field_provenance (book_id, field, value, source, stage, confidence, is_winner) VALUES (?, ?, ?, ?, ?, ?, 0)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "ae97511ea51a1cdf9a7360f1ceaf8b4d6f6930ea5a94317f76fcac4091e387cd"
+}

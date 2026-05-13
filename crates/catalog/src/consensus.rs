@@ -482,9 +482,9 @@ mod tests {
             .expect("seed book");
         sqlx::query(
             "INSERT INTO book_field_provenance \
-             (book_id, field, value, source, confidence) \
-             VALUES (1, 'title', 'tag-value', 'tag_file', 0.7), \
-                    (1, 'title', 'audnexus-value', 'audnexus_asin_us', 0.95)",
+             (book_id, field, value, source, stage, confidence) \
+             VALUES (1, 'title', 'tag-value',      'tag_file',         'tag-read',        0.7), \
+                    (1, 'title', 'audnexus-value', 'audnexus_asin_us', 'audnexus-enrich', 0.95)",
         )
         .execute(ctx.library.pool())
         .await
@@ -524,8 +524,8 @@ mod tests {
             .expect("seed book");
         sqlx::query(
             "INSERT INTO book_field_provenance \
-             (book_id, field, value, source, confidence) \
-             VALUES (1, 'duration_seconds', '36000', 'audnexus_asin_us', 0.95)",
+             (book_id, field, value, source, stage, confidence) \
+             VALUES (1, 'duration_seconds', '36000', 'audnexus_asin_us', 'audnexus-enrich', 0.95)",
         )
         .execute(ctx.library.pool())
         .await
