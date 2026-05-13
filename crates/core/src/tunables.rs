@@ -118,6 +118,12 @@ pub struct NetworkTunables {
     pub audible_allowed: bool,
     /// Region order tried by Audnexus when ASIN-based lookup misses.
     pub audnexus_region_order: Vec<String>,
+    /// Region order tried by `audible-search` when the home
+    /// region returns no products. Same 2-letter codes as
+    /// `audnexus_region_order` — each code maps to an
+    /// `api.audible.<tld>` host inside `crates/catalog`.
+    /// Stops on the first non-empty search response.
+    pub audible_region_order: Vec<String>,
     /// Cover image fetch (Audnexus / Audible CDN).
     pub cover_fetch_allowed: bool,
 }
@@ -128,6 +134,17 @@ impl Default for NetworkTunables {
             audnexus_allowed: true,
             audible_allowed: true,
             audnexus_region_order: vec![
+                "us".into(),
+                "uk".into(),
+                "de".into(),
+                "fr".into(),
+                "ca".into(),
+                "au".into(),
+                "jp".into(),
+                "in".into(),
+                "it".into(),
+            ],
+            audible_region_order: vec![
                 "us".into(),
                 "uk".into(),
                 "de".into(),
