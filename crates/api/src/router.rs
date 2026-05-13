@@ -651,20 +651,79 @@ async fn library_retry_failed_speech_installs(
     }))
 }
 
-async fn books_list(State(state): State<ApiState>) -> Result<Json<BooksResponse>, ApiError> {
-    // `book_id!` forces non-null inference past sqlite's
-    // `INTEGER PRIMARY KEY AUTOINCREMENT` nullability quirk
-    // (see slice 1D.2 note). `author` and `series` use the
-    // COALESCE(prime_alias, parent.name) rule from ADR-0026 so
-    // operator exaltation of an alias displays correctly. The
-    // joined `narrator_aliases` table aggregates narrator names
-    // similarly, comma-separated.
-    let rows = sqlx::query!(
-        r#"SELECT
-              b.book_id AS "book_id!",
+/// Query parameters for `GET /books` — matches the
+/// `API.md` contract (REVIEW.md § 1.5 flagged the previous
+/// handler ignoring every one of these).
+///
+/// All fields optional; combined with AND. The `q` parameter
+/// is a case-insensitive substring against `books.title`;
+/// `author` / `series` resolve against the prime-alias view
+/// (consistent with the row's display values, not the raw
+/// `authors.name` / `series.name`).
+///
+/// `limit` defaults to 100 and is hard-capped at
+/// [`BOOKS_LIST_MAX_LIMIT`] so a missing / pathological
+/// caller can't ask for 10 million rows at once. `offset`
+/// defaults to 0.
+#[derive(Deserialize, Debug, Default)]
+struct BooksQuery {
+    /// Substring filter against `books.title` (case-insensitive).
+    q: Option<String>,
+    /// Substring filter against the displayed author name.
+    author: Option<String>,
+    /// Substring filter against the displayed primary-series
+    /// name.
+    series: Option<String>,
+    /// Page size (capped at [`BOOKS_LIST_MAX_LIMIT`]).
+    limit: Option<u32>,
+    /// Page offset.
+    offset: Option<u32>,
+}
+
+/// Raw row shape pulled from the dynamic `books_list` SQL.
+/// Lives at module scope (not inside `books_list`) so clippy's
+/// `items_after_statements` lint doesn't fire.
+#[derive(sqlx::FromRow)]
+struct BooksListRow {
+    book_id: i64,
+    title: String,
+    file_path: Option<String>,
+    author: Option<String>,
+    narrators: Option<String>,
+    series: Option<String>,
+}
+
+/// Hard cap on `?limit=`. 500 rows × the narrator `GROUP_CONCAT`
+/// subquery is the largest one-page workload we expect; rejecting
+/// caller-supplied values larger than this defends the daemon's
+/// memory + the JSON encoder.
+const BOOKS_LIST_MAX_LIMIT: u32 = 500;
+/// Default `?limit=` when callers don't pass one.
+const BOOKS_LIST_DEFAULT_LIMIT: u32 = 100;
+
+async fn books_list(
+    State(state): State<ApiState>,
+    axum::extract::Query(q): axum::extract::Query<BooksQuery>,
+) -> Result<Json<BooksResponse>, ApiError> {
+    use sqlx::QueryBuilder;
+    // Implementation note. The previous handler used
+    // `sqlx::query!` macro on a hardcoded SQL string — but that
+    // forecloses dynamic filtering since the macro requires a
+    // literal. Per `.claude/CLAUDE.md` § "SQL stack",
+    // dynamic-SQL paths drop to runtime `sqlx::query`/
+    // `QueryBuilder`. We lose compile-time check on the column
+    // list but gain the documented query-param contract.
+    //
+    // `author` / `series` filter against the SAME COALESCE
+    // expression used for display (prime alias else parent
+    // name) so the operator's filter intent matches what they
+    // see in the response.
+    let mut qb: QueryBuilder<sqlx::Sqlite> = QueryBuilder::new(
+        "SELECT
+              b.book_id,
               b.title,
               (SELECT file_path FROM book_files
-               WHERE book_id = b.book_id LIMIT 1) AS file_path,
+                WHERE book_id = b.book_id LIMIT 1) AS file_path,
               COALESCE(
                   (SELECT alias FROM author_aliases
                      WHERE author_id = b.author_id AND is_prime = 1 LIMIT 1),
@@ -687,11 +746,51 @@ async fn books_list(State(state): State<ApiState>) -> Result<Json<BooksResponse>
                  JOIN series s ON s.series_id = bs.series_id
                  WHERE bs.book_id = b.book_id AND bs.is_primary = 1 LIMIT 1) AS series
            FROM books b
-           ORDER BY b.book_id"#,
-    )
-    .fetch_all(state.inner.library.pool())
-    .await
-    .map_err(|e| ab_core::Error::Database(format!("books list: {e}")))?;
+           WHERE 1 = 1 ",
+    );
+    if let Some(needle) = q.q.as_deref().filter(|s| !s.is_empty()) {
+        qb.push(" AND b.title LIKE ")
+            .push_bind(format!("%{needle}%"));
+    }
+    if let Some(needle) = q.author.as_deref().filter(|s| !s.is_empty()) {
+        qb.push(
+            " AND COALESCE(\
+                (SELECT alias FROM author_aliases \
+                   WHERE author_id = b.author_id AND is_prime = 1 LIMIT 1),\
+                (SELECT name FROM authors WHERE author_id = b.author_id LIMIT 1)\
+              ) LIKE ",
+        )
+        .push_bind(format!("%{needle}%"));
+    }
+    if let Some(needle) = q.series.as_deref().filter(|s| !s.is_empty()) {
+        qb.push(
+            " AND EXISTS (\
+                SELECT 1 FROM book_series bs \
+                JOIN series s ON s.series_id = bs.series_id \
+                WHERE bs.book_id = b.book_id AND bs.is_primary = 1 \
+                  AND COALESCE(\
+                      (SELECT alias FROM series_aliases sa \
+                         WHERE sa.series_id = s.series_id AND is_prime = 1 LIMIT 1),\
+                      s.name) LIKE ",
+        )
+        .push_bind(format!("%{needle}%"))
+        .push(") ");
+    }
+    let limit = q
+        .limit
+        .unwrap_or(BOOKS_LIST_DEFAULT_LIMIT)
+        .min(BOOKS_LIST_MAX_LIMIT);
+    let offset = q.offset.unwrap_or(0);
+    qb.push(" ORDER BY b.book_id LIMIT ")
+        .push_bind(i64::from(limit))
+        .push(" OFFSET ")
+        .push_bind(i64::from(offset));
+
+    let rows: Vec<BooksListRow> = qb
+        .build_query_as::<BooksListRow>()
+        .fetch_all(state.inner.library.pool())
+        .await
+        .map_err(|e| ab_core::Error::Database(format!("books list: {e}")))?;
 
     let books = rows
         .into_iter()
@@ -1250,10 +1349,39 @@ async fn pre_reset_signal(api_state: &ApiState, book_id: i64, stage_name: &str) 
 /// sampling code itself lives in slice 4B; for 4A the field is
 /// accepted but the fingerprint insert is deferred (logged +
 /// returns `audiologo_id: null`).
+/// Intro vs. outro discriminator on the audiologo-cut request
+/// body. Serde-validated at deserialise time — invalid strings
+/// surface as a structured 400 from axum before the handler
+/// runs, dropping the manual `if req.kind != "intro" && ...`
+/// check. (Cross-model code review REVIEW.md § 3.6.)
+#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AudiologoKind {
+    /// Cut at the start of the file.
+    Intro,
+    /// Cut at the end of the file.
+    Outro,
+}
+
+impl AudiologoKind {
+    /// String form used in DB writes + downstream APIs that
+    /// still take `&str` (slated for typed migration of their
+    /// own in a follow-up slice).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Intro => "intro",
+            Self::Outro => "outro",
+        }
+    }
+}
+
 #[derive(Deserialize, Debug)]
 struct AudiologoCutRequest {
-    /// `"intro"` or `"outro"`.
-    kind: String,
+    /// Whether the cut applies at the start (`intro`) or end
+    /// (`outro`) of the file. Lowercase only; serde rejects
+    /// `Intro` / `OUTRO` with a structured 400.
+    kind: AudiologoKind,
     /// Where the jingle begins, ms from file start.
     jingle_start_ms: i64,
     /// Where the jingle ends, ms from file start.
@@ -1276,7 +1404,7 @@ struct AudiologoCutRequest {
 struct AudiologoCutResponse {
     book_id: i64,
     file_id: i64,
-    kind: String,
+    kind: AudiologoKind,
     row_id: i64,
     /// `null` when `add_fingerprint=false` or when the
     /// fingerprint insert is deferred (4A).
@@ -1352,13 +1480,11 @@ async fn books_audiologo_cut(
     Path(book_id): Path<i64>,
     Json(req): Json<AudiologoCutRequest>,
 ) -> Result<Json<AudiologoCutResponse>, ApiError> {
-    // Validate kind.
-    if req.kind != "intro" && req.kind != "outro" {
-        return Err(ApiError::BadRequest(format!(
-            "kind must be 'intro' or 'outro', got {:?}",
-            req.kind,
-        )));
-    }
+    // `kind` is now a typed `AudiologoKind` enum — serde
+    // rejects invalid strings at deserialise time, so the
+    // previous manual `if req.kind != "intro" ...` runtime
+    // check is gone.
+    let kind_str = req.kind.as_str();
     if req.jingle_start_ms < 0 || req.jingle_end_ms <= req.jingle_start_ms {
         return Err(ApiError::BadRequest(format!(
             "jingle_start_ms ({}) must be >= 0 and < jingle_end_ms ({})",
@@ -1377,7 +1503,7 @@ async fn books_audiologo_cut(
     }
 
     // Resolve the target file.
-    let Some(file_id) = resolve_target_file(&state, book_id, &req.kind, req.file_id).await? else {
+    let Some(file_id) = resolve_target_file(&state, book_id, kind_str, req.file_id).await? else {
         return Err(ApiError::BadRequest(format!(
             "book {book_id} has no files matching the request",
         )));
@@ -1393,16 +1519,15 @@ async fn books_audiologo_cut(
            FROM book_file_audiologos
            WHERE file_id = ? AND kind = ? AND status = 'applied'"#,
         file_id,
-        req.kind,
+        kind_str,
     )
     .fetch_optional(state.inner.library.pool())
     .await
     .map_err(|e| ab_core::Error::Database(format!("audiologo applied lookup: {e}")))?;
     if let Some(existing_id) = existing_applied {
         return Err(ApiError::Conflict(format!(
-            "file_id {file_id} kind={} already has an applied cut (row_id={existing_id}); \
+            "file_id {file_id} kind={kind_str} already has an applied cut (row_id={existing_id}); \
              reject or re-detect the existing cut before applying a new one",
-            req.kind,
         )));
     }
 
@@ -1416,7 +1541,7 @@ async fn books_audiologo_cut(
         ApplyCutParams {
             book_id,
             file_id,
-            kind: &req.kind,
+            kind: kind_str,
             jingle_start_ms: req.jingle_start_ms,
             jingle_end_ms: req.jingle_end_ms,
             padding_ms: req.padding_ms,
@@ -1436,7 +1561,7 @@ async fn books_audiologo_cut(
         tracing::info!(
             book_id,
             file_id,
-            kind = %req.kind,
+            kind = kind_str,
             jingle_start_ms = req.jingle_start_ms,
             jingle_end_ms = req.jingle_end_ms,
             "audiologo.manual.add_fingerprint_deferred_to_4b",

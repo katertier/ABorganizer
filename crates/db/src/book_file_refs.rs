@@ -26,7 +26,7 @@
 //! A future `tokio::task::JoinSet`-driven scope will move this
 //! to RAII without losing async-ness.
 
-use ab_core::{Error, Result};
+use ab_core::{BookId, Error, FileId, Result};
 use sqlx::SqlitePool;
 
 /// Returned by [`acquire`]. Carries the row id so [`release`]
@@ -79,8 +79,26 @@ impl RefHandle {
 ///
 /// Inserts a new row at `released_at = NULL`. Multiple acquires
 /// from the same `(file_id, holder_stage, holder_book_id)` triple
-/// are permitted (each `acquired_at` differs); each yields its
-/// own [`RefHandle`].
+/// are permitted; each yields its own [`RefHandle`].
+///
+/// ## Typed primitives
+///
+/// `file_id` and `holder_book_id` are typed via
+/// [`ab_core::FileId`] / [`ab_core::BookId`] so call sites can't
+/// cross-wire them (they're both `i64` underneath but reversing
+/// the order would compile and produce subtle bugs). The
+/// `holder_stage` parameter is `&str` rather than the typed
+/// `ab_pipeline::StageId` because `ab-db` sits upstream of
+/// `ab-pipeline` in the workspace graph — taking `StageId`
+/// directly would create a cycle. Callers should pass
+/// `STAGE_ID.as_str()` and the `StageId`'s lifetime makes
+/// borrow-checking trivial.
+///
+/// ADR-0027 wrote `Transaction<'_, Sqlite>` for `tx`; the
+/// current shape uses `&SqlitePool` so callers can use the
+/// helper without owning a transaction. A future slice that
+/// needs to compose acquire-plus-other-writes atomically can
+/// add an `acquire_in_tx` variant alongside.
 ///
 /// # Errors
 ///
@@ -88,17 +106,19 @@ impl RefHandle {
 /// doesn't exist → FK violation).
 pub async fn acquire(
     pool: &SqlitePool,
-    file_id: i64,
+    file_id: FileId,
     holder_stage: &str,
-    holder_book_id: i64,
+    holder_book_id: BookId,
 ) -> Result<RefHandle> {
+    let file_id_raw = file_id.0;
+    let holder_book_id_raw = holder_book_id.0;
     let row = sqlx::query!(
         r#"INSERT INTO book_file_refs (file_id, holder_stage, holder_book_id)
                  VALUES (?, ?, ?)
            RETURNING ref_id AS "ref_id!: i64""#,
-        file_id,
+        file_id_raw,
         holder_stage,
-        holder_book_id,
+        holder_book_id_raw,
     )
     .fetch_one(pool)
     .await
@@ -112,11 +132,12 @@ pub async fn acquire(
 /// # Errors
 ///
 /// Returns [`Error::Database`] on SQLite failure.
-pub async fn live_ref_count(pool: &SqlitePool, file_id: i64) -> Result<i64> {
+pub async fn live_ref_count(pool: &SqlitePool, file_id: FileId) -> Result<i64> {
+    let file_id_raw = file_id.0;
     let row = sqlx::query!(
         r#"SELECT COUNT(*) AS "n!: i64" FROM book_file_refs
             WHERE file_id = ? AND released_at IS NULL"#,
-        file_id,
+        file_id_raw,
     )
     .fetch_one(pool)
     .await
@@ -158,11 +179,26 @@ mod tests {
         let library = fresh(tmp.path()).await;
         seed_book_and_file(&library).await;
 
-        assert_eq!(live_ref_count(library.pool(), 10).await.expect("count0"), 0);
-        let _h = acquire(library.pool(), 10, "transcribe-head-tail", 1)
-            .await
-            .expect("acquire");
-        assert_eq!(live_ref_count(library.pool(), 10).await.expect("count1"), 1);
+        assert_eq!(
+            live_ref_count(library.pool(), FileId(10))
+                .await
+                .expect("count0"),
+            0
+        );
+        let _h = acquire(
+            library.pool(),
+            FileId(10),
+            "transcribe-head-tail",
+            BookId(1),
+        )
+        .await
+        .expect("acquire");
+        assert_eq!(
+            live_ref_count(library.pool(), FileId(10))
+                .await
+                .expect("count1"),
+            1
+        );
     }
 
     #[tokio::test]
@@ -171,12 +207,20 @@ mod tests {
         let library = fresh(tmp.path()).await;
         seed_book_and_file(&library).await;
 
-        let h = acquire(library.pool(), 10, "fingerprint", 1)
+        let h = acquire(library.pool(), FileId(10), "fingerprint", BookId(1))
             .await
             .expect("acquire");
-        assert_eq!(live_ref_count(library.pool(), 10).await.expect("c"), 1);
+        assert_eq!(
+            live_ref_count(library.pool(), FileId(10)).await.expect("c"),
+            1
+        );
         h.release(library.pool()).await.expect("release");
-        assert_eq!(live_ref_count(library.pool(), 10).await.expect("c2"), 0);
+        assert_eq!(
+            live_ref_count(library.pool(), FileId(10))
+                .await
+                .expect("c2"),
+            0
+        );
     }
 
     #[tokio::test]
@@ -185,23 +229,41 @@ mod tests {
         let library = fresh(tmp.path()).await;
         seed_book_and_file(&library).await;
 
-        let h1 = acquire(library.pool(), 10, "transcribe-head-tail", 1)
-            .await
-            .expect("a1");
-        let h2 = acquire(library.pool(), 10, "fingerprint", 1)
+        let h1 = acquire(
+            library.pool(),
+            FileId(10),
+            "transcribe-head-tail",
+            BookId(1),
+        )
+        .await
+        .expect("a1");
+        let h2 = acquire(library.pool(), FileId(10), "fingerprint", BookId(1))
             .await
             .expect("a2");
-        let h3 = acquire(library.pool(), 10, "detect-audiologo", 1)
+        let h3 = acquire(library.pool(), FileId(10), "detect-audiologo", BookId(1))
             .await
             .expect("a3");
-        assert_eq!(live_ref_count(library.pool(), 10).await.expect("c"), 3);
+        assert_eq!(
+            live_ref_count(library.pool(), FileId(10)).await.expect("c"),
+            3
+        );
 
         h2.release(library.pool()).await.expect("r2");
-        assert_eq!(live_ref_count(library.pool(), 10).await.expect("c2"), 2);
+        assert_eq!(
+            live_ref_count(library.pool(), FileId(10))
+                .await
+                .expect("c2"),
+            2
+        );
 
         h1.release(library.pool()).await.expect("r1");
         h3.release(library.pool()).await.expect("r3");
-        assert_eq!(live_ref_count(library.pool(), 10).await.expect("c0"), 0);
+        assert_eq!(
+            live_ref_count(library.pool(), FileId(10))
+                .await
+                .expect("c0"),
+            0
+        );
     }
 
     #[tokio::test]
@@ -210,12 +272,15 @@ mod tests {
         let library = fresh(tmp.path()).await;
         seed_book_and_file(&library).await;
 
-        let h = acquire(library.pool(), 10, "fingerprint", 1)
+        let h = acquire(library.pool(), FileId(10), "fingerprint", BookId(1))
             .await
             .expect("acquire");
         h.release(library.pool()).await.expect("release");
         // Second release should not error.
         h.release(library.pool()).await.expect("idempotent");
-        assert_eq!(live_ref_count(library.pool(), 10).await.expect("c"), 0);
+        assert_eq!(
+            live_ref_count(library.pool(), FileId(10)).await.expect("c"),
+            0
+        );
     }
 }

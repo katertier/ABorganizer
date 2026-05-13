@@ -309,9 +309,14 @@ mod tests {
         seed_file(&ctx, 200, 1, "/tmp/a.m4b", "m4b", 7_000).await;
 
         // Acquire a live ref on the source — should block reaping.
-        let _h = book_file_refs::acquire(ctx.library.pool(), 100, "transcribe-head-tail", 1)
-            .await
-            .expect("acquire");
+        let _h = book_file_refs::acquire(
+            ctx.library.pool(),
+            ab_core::FileId(100),
+            "transcribe-head-tail",
+            ab_core::BookId(1),
+        )
+        .await
+        .expect("acquire");
 
         let target = PostTranscodeSourcesTarget::new();
         let report = target
