@@ -53,6 +53,7 @@ dependencies = [
  "ab-pipeline",
  "ab-transcript",
  "async-trait",
+ "rusty-chromaprint",
  "serde",
  "sqlx",
  "tempfile",

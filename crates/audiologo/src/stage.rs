@@ -210,6 +210,257 @@ pub(crate) async fn load_audiologos_by_kind(
     Ok(out)
 }
 
+/// Best-match carrier for the slide-match loop in
+/// [`detect_window`]. Module-scope so clippy's
+/// `items_after_statements` doesn't trip on a struct inside the
+/// function body.
+struct BestHit {
+    audiologo: AudiologoCandidate,
+    pos: ab_fingerprint::MatchPos,
+    confidence: f32,
+}
+
+/// Chromaprint hash-position to milliseconds factor for the
+/// preset used by [`ab_fingerprint::fingerprint_samples`].
+///
+/// Each hash word covers `item_duration_in_seconds()` of audio;
+/// at `preset_test1` defaults this is ~0.124 s. The conversion
+/// is cached as a `u64` (rounded down) so the slide-match offset
+/// translates with one multiplication.
+fn chromaprint_item_duration_ms() -> u64 {
+    // Local instantiation: `Configuration::preset_test1()` is
+    // const-cheap; the call here is one-per-`run()`.
+    let cfg = rusty_chromaprint::Configuration::preset_test1();
+    let item_secs = cfg.item_duration_in_seconds();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let ms = (item_secs.max(0.0) * 1000.0) as u64;
+    ms.max(1) // avoid 0 → division-by-zero in any downstream maths
+}
+
+/// Sample-fingerprint-slide-match one window of one file.
+///
+/// Returns the matched `audiologo_id` when a candidate row was
+/// inserted, or None when the FFI sampler failed, fingerprinting
+/// failed, or no audiologo cleared its match threshold.
+///
+/// Errors propagate only on database failure; sample / decode
+/// failures log + return `Ok(None)` so a single bad file doesn't
+/// fail the stage for the whole book.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Bundling these into a config struct adds indirection that obscures the per-window dispatch; each arg is structural to the slide-match contract."
+)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "Five linear steps (sample → check → fingerprint → slide-match → persist), each with its own structured error logging. Splitting into helpers fragments the read flow."
+)]
+async fn detect_window(
+    ctx: &StageContext,
+    book_id: BookId,
+    file: &ActiveBookFile,
+    kind: Kind,
+    start_ms: u64,
+    end_ms: u64,
+    audiologos: &[AudiologoCandidate],
+    item_dur_ms: u64,
+) -> Result<Option<i64>> {
+    // 1. Decode the window via AVAssetReader.
+    let samples = match ab_audio::read_samples_window_typed(
+        std::path::Path::new(&file.file_path),
+        start_ms,
+        end_ms,
+        ab_fingerprint::AUDIOLOGO_SAMPLE_RATE,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(
+                book = %book_id,
+                file_id = file.file_id,
+                kind = %kind,
+                start_ms,
+                end_ms,
+                error = %e,
+                "audiologo.detect.sample_failed"
+            );
+            return Ok(None);
+        }
+    };
+    if samples.is_empty() {
+        tracing::warn!(
+            book = %book_id,
+            file_id = file.file_id,
+            kind = %kind,
+            "audiologo.detect.empty_window"
+        );
+        return Ok(None);
+    }
+
+    // 2. Float32 → i16 → chromaprint hash sequence.
+    let samples_i16 = ab_fingerprint::samples_f32_to_i16(&samples);
+    let window_fp = match ab_fingerprint::fingerprint_samples(
+        &samples_i16,
+        ab_fingerprint::AUDIOLOGO_SAMPLE_RATE,
+    ) {
+        Ok(fp) => fp,
+        Err(e) => {
+            tracing::warn!(
+                book = %book_id,
+                file_id = file.file_id,
+                kind = %kind,
+                error = %e,
+                "audiologo.detect.fingerprint_failed"
+            );
+            return Ok(None);
+        }
+    };
+    if window_fp.is_empty() {
+        return Ok(None);
+    }
+
+    // 3. Slide-match each audiologo; track the best hit above
+    //    its row-specific threshold.
+    let mut best: Option<BestHit> = None;
+    for audiologo in audiologos {
+        let Some(pos) = ab_fingerprint::slide_match(&window_fp, &audiologo.fingerprint) else {
+            continue;
+        };
+        let conf =
+            ab_fingerprint::confidence_from_hamming(pos.hamming, audiologo.fingerprint.len());
+        if conf >= audiologo.match_threshold && best.as_ref().is_none_or(|b| conf > b.confidence) {
+            best = Some(BestHit {
+                audiologo: audiologo.clone(),
+                pos,
+                confidence: conf,
+            });
+        }
+    }
+
+    let Some(hit) = best else {
+        tracing::debug!(
+            book = %book_id,
+            file_id = file.file_id,
+            kind = %kind,
+            audiologos_tried = audiologos.len(),
+            "audiologo.detect.no_match"
+        );
+        return Ok(None);
+    };
+
+    // 4. Convert hash-position offset → ms-since-file-start.
+    let jingle_offset_ms = (hit.pos.hash_offset as u64).saturating_mul(item_dur_ms);
+    let jingle_start_ms = start_ms.saturating_add(jingle_offset_ms);
+    let jingle_end_ms = jingle_start_ms.saturating_add(hit.audiologo.duration_ms);
+
+    // 5. Persist as `candidate`. 4B.5 promotes high-confidence
+    //    auto-applying-Method rows to `applied` + does the
+    //    chapter shift. Here we always insert at `candidate`,
+    //    even for confidence above the auto-apply floor, so the
+    //    slice boundary is clean.
+    insert_candidate_row(
+        &ctx.library,
+        file.file_id,
+        kind,
+        jingle_start_ms,
+        jingle_end_ms,
+        hit.audiologo.audiologo_id,
+        hit.confidence,
+    )
+    .await?;
+    bump_audiologo_match_count(&ctx.library, hit.audiologo.audiologo_id).await?;
+
+    tracing::info!(
+        book = %book_id,
+        file_id = file.file_id,
+        kind = %kind,
+        audiologo_id = hit.audiologo.audiologo_id,
+        confidence = hit.confidence,
+        hash_offset = hit.pos.hash_offset,
+        hamming = hit.pos.hamming,
+        jingle_start_ms,
+        jingle_end_ms,
+        "audiologo.detect.candidate_inserted"
+    );
+
+    Ok(Some(hit.audiologo.audiologo_id))
+}
+
+/// Insert a fresh `book_file_audiologos` candidate row.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Each column is a structural input to the INSERT; a struct here would just add a definition for no clarity gain."
+)]
+async fn insert_candidate_row(
+    library: &LibraryDb,
+    file_id: i64,
+    kind: Kind,
+    jingle_start_ms: u64,
+    jingle_end_ms: u64,
+    audiologo_id: i64,
+    confidence: f32,
+) -> Result<()> {
+    let kind_str = kind.as_str();
+    let method_str = crate::Method::FingerprintFull.as_str();
+    let status_str = Status::Candidate.as_str();
+    let start_i64 = i64::try_from(jingle_start_ms).unwrap_or(i64::MAX);
+    let end_i64 = i64::try_from(jingle_end_ms).unwrap_or(i64::MAX);
+    let conf_f64 = f64::from(confidence);
+    sqlx::query!(
+        r#"INSERT INTO book_file_audiologos
+             (file_id, kind, jingle_start_ms, jingle_end_ms,
+              padding_ms, method, audiologo_id, confidence, status)
+           VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?)"#,
+        file_id,
+        kind_str,
+        start_i64,
+        end_i64,
+        method_str,
+        audiologo_id,
+        conf_f64,
+        status_str,
+    )
+    .execute(library.pool())
+    .await
+    .map_err(|e| Error::Database(format!("detect-audiologo insert candidate: {e}")))?;
+    Ok(())
+}
+
+/// Bump the matched `audiologos` row's `match_count` + `last_matched_at`.
+async fn bump_audiologo_match_count(library: &LibraryDb, audiologo_id: i64) -> Result<()> {
+    sqlx::query!(
+        "UPDATE audiologos \
+            SET match_count = match_count + 1, \
+                last_matched_at = strftime('%s','now'), \
+                updated_at = strftime('%s','now') \
+          WHERE audiologo_id = ?",
+        audiologo_id,
+    )
+    .execute(library.pool())
+    .await
+    .map_err(|e| Error::Database(format!("detect-audiologo bump match_count: {e}")))?;
+    Ok(())
+}
+
+/// Update `books.audiologo_status` to the given value.
+async fn update_book_audiologo_status(
+    library: &LibraryDb,
+    book_id: BookId,
+    status: crate::BookStatus,
+) -> Result<()> {
+    let id = book_id.0;
+    let status_str = status.as_str();
+    sqlx::query!(
+        "UPDATE books SET audiologo_status = ? WHERE book_id = ?",
+        status_str,
+        id,
+    )
+    .execute(library.pool())
+    .await
+    .map_err(|e| Error::Database(format!("detect-audiologo update book status: {e}")))?;
+    Ok(())
+}
+
 /// Fetch Audnexus's reported brand-intro duration for the book, if
 /// any. Slice 4B.0 promotes this from the audnexus-chapters stage's
 /// response into `books.brand_intro_duration_ms`. Used by 4B for
@@ -252,13 +503,11 @@ impl Stage for DetectAudiologoStage {
         REQS
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Top-level orchestration: load → intro-detect → outro-detect → book-status update. Extracting helpers fragments the read flow without simplifying the control flow."
+    )]
     async fn run(&self, ctx: &StageContext, book_id: BookId) -> Result<StageOutcome> {
-        // 4B.4a: data plumbing in place; detection loop body still
-        // pending (lands in 4B.4b). The early-out path below mirrors
-        // the eventual shape — load active files + intro / outro
-        // audiologos + brand-duration, then if any are populated we
-        // proceed (currently to a Skipped no-op). The next sub-slice
-        // replaces the no-op with sample + fingerprint + slide-match.
         let files = load_active_files(&ctx.library, book_id).await?;
         if files.is_empty() {
             return Ok(StageOutcome::Skipped);
@@ -266,6 +515,9 @@ impl Stage for DetectAudiologoStage {
         let intros = load_audiologos_by_kind(&ctx.library, Kind::Intro).await?;
         let outros = load_audiologos_by_kind(&ctx.library, Kind::Outro).await?;
         let brand_intro_ms = fetch_brand_intro_duration_ms(&ctx.library, book_id).await?;
+
+        let item_dur_ms = chromaprint_item_duration_ms();
+
         tracing::debug!(
             book = %book_id,
             stage = STAGE_NAME,
@@ -275,10 +527,85 @@ impl Stage for DetectAudiologoStage {
             brand_intro_ms = ?brand_intro_ms,
             intro_window_ms = self.intro_window_ms,
             outro_window_ms = self.outro_window_ms,
-            "audiologo.detect.plumbing_ready"
+            "audiologo.detect.start"
         );
-        // No detection body yet (4B.4b).
-        Ok(StageOutcome::Skipped)
+
+        let mut any_candidate = false;
+
+        // Intro detection on the first file. Single-file books
+        // hit only this branch (intro AND outro can both target
+        // the same file — the outro branch below kicks in too).
+        if let Some(first) = files.first() {
+            if !intros.is_empty() && self.intro_window_ms > 0 {
+                let hit = detect_window(
+                    ctx,
+                    book_id,
+                    first,
+                    Kind::Intro,
+                    0,
+                    self.intro_window_ms,
+                    &intros,
+                    item_dur_ms,
+                )
+                .await?;
+                if hit.is_some() {
+                    any_candidate = true;
+                }
+            }
+        }
+
+        // Outro detection on the last file.
+        if let Some(last) = files.last() {
+            if !outros.is_empty() && self.outro_window_ms > 0 {
+                match last.duration_ms {
+                    Some(file_dur) if file_dur > 0 => {
+                        let outro_start = file_dur.saturating_sub(self.outro_window_ms);
+                        let outro_end = file_dur;
+                        if outro_end > outro_start {
+                            let hit = detect_window(
+                                ctx,
+                                book_id,
+                                last,
+                                Kind::Outro,
+                                outro_start,
+                                outro_end,
+                                &outros,
+                                item_dur_ms,
+                            )
+                            .await?;
+                            if hit.is_some() {
+                                any_candidate = true;
+                            }
+                        }
+                    }
+                    _ => {
+                        tracing::warn!(
+                            book = %book_id,
+                            file_id = last.file_id,
+                            "audiologo.detect.outro_skipped_no_duration"
+                        );
+                    }
+                }
+            }
+        }
+
+        // book.audiologo_status flips to `detected` when any
+        // candidate landed; the Libation-stripped path (no hit +
+        // brand_intro_ms present → status='stripped' + chapter
+        // shift) is 4B.5. For 4B.4b we leave `unknown` alone in
+        // that case so 4B.5 has a clear "not yet decided" signal.
+        if any_candidate {
+            update_book_audiologo_status(&ctx.library, book_id, crate::BookStatus::Detected)
+                .await?;
+            Ok(StageOutcome::Done)
+        } else {
+            tracing::info!(
+                book = %book_id,
+                brand_intro_ms = ?brand_intro_ms,
+                "audiologo.detect.no_candidates"
+            );
+            Ok(StageOutcome::Skipped)
+        }
     }
 
     /// Per ADR-0024 § state-machine diagram. Flips `applied` rows
@@ -520,6 +847,189 @@ mod tests {
             .await
             .expect("fetch");
         assert_eq!(v, None);
+    }
+
+    #[tokio::test]
+    async fn chromaprint_item_duration_is_positive_few_hundred_ms() {
+        // preset_test1 sits near 124 ms/item; the helper rounds
+        // down and floors at 1 to avoid div-by-zero downstream.
+        // The exact value isn't a contract — what matters is that
+        // it's small enough to give sub-second resolution at a
+        // 60-120 s window scale.
+        let ms = chromaprint_item_duration_ms();
+        assert!(ms >= 1, "must be >=1 ms to avoid div-by-zero math");
+        assert!(
+            ms < 1000,
+            "preset_test1 should give <1 s per item (got {ms} ms)"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_no_match_skipped_when_no_fingerprints_align() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let ctx = fresh_ctx(tmp.path()).await;
+        // Seed: one book + one active file that does NOT exist on
+        // disk. The FFI sampler will fail to load it; detect_window
+        // swallows the error + returns None; the stage returns
+        // Skipped. We're not checking that the FFI succeeded —
+        // only that a sample failure doesn't propagate as a stage
+        // error.
+        sqlx::query("INSERT INTO books (book_id, title) VALUES (1, 'fixture')")
+            .execute(ctx.library.pool())
+            .await
+            .expect("seed book");
+        sqlx::query(
+            "INSERT INTO book_files (file_id, book_id, file_path, is_active, duration_ms) \
+             VALUES (10, 1, '/tmp/does-not-exist.m4b', 1, 600000)",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed file");
+
+        // Add an audiologo so the load is non-empty and the
+        // detect_window path runs.
+        let dummy_fp = ab_fingerprint::fingerprint_to_bytes(&[1_u32, 2, 3, 4]);
+        sqlx::query(
+            "INSERT INTO audiologos \
+             (audiologo_id, name, kind, fingerprint, duration_ms, match_threshold, verified_via) \
+             VALUES (1, 'intro-A', 'intro', ?, 5000, 0.85, 'seed')",
+        )
+        .bind(&dummy_fp)
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed audiologo");
+
+        let outcome = fresh_stage()
+            .run(&ctx, BookId(1))
+            .await
+            .expect("run does not propagate FFI errors");
+        match outcome {
+            StageOutcome::Skipped => {}
+            other => panic!("expected Skipped on FFI-sample-failure path, got {other:?}"),
+        }
+
+        // No candidate row inserted.
+        let candidates: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM book_file_audiologos WHERE file_id = 10")
+                .fetch_one(ctx.library.pool())
+                .await
+                .expect("count");
+        assert_eq!(candidates, 0);
+
+        // Book status untouched (still 'unknown' default).
+        let status: String =
+            sqlx::query_scalar("SELECT audiologo_status FROM books WHERE book_id = 1")
+                .fetch_one(ctx.library.pool())
+                .await
+                .expect("status");
+        assert_eq!(status, "unknown");
+    }
+
+    #[tokio::test]
+    async fn update_book_audiologo_status_writes_the_value() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let ctx = fresh_ctx(tmp.path()).await;
+        sqlx::query("INSERT INTO books (book_id, title) VALUES (1, 'fixture')")
+            .execute(ctx.library.pool())
+            .await
+            .expect("seed");
+
+        update_book_audiologo_status(&ctx.library, BookId(1), crate::BookStatus::Detected)
+            .await
+            .expect("update");
+
+        let status: String =
+            sqlx::query_scalar("SELECT audiologo_status FROM books WHERE book_id = 1")
+                .fetch_one(ctx.library.pool())
+                .await
+                .expect("status");
+        assert_eq!(status, "detected");
+    }
+
+    #[tokio::test]
+    async fn insert_candidate_row_persists_with_correct_fields() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let ctx = fresh_ctx(tmp.path()).await;
+        sqlx::query("INSERT INTO books (book_id, title) VALUES (1, 'fixture')")
+            .execute(ctx.library.pool())
+            .await
+            .expect("seed book");
+        sqlx::query(
+            "INSERT INTO book_files (file_id, book_id, file_path, is_active, duration_ms) \
+             VALUES (10, 1, '/tmp/x.m4b', 1, 600000)",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed file");
+        let fp = ab_fingerprint::fingerprint_to_bytes(&[1_u32, 2, 3]);
+        sqlx::query(
+            "INSERT INTO audiologos \
+             (audiologo_id, name, kind, fingerprint, duration_ms, match_threshold, verified_via) \
+             VALUES (42, 'intro-A', 'intro', ?, 4500, 0.85, 'seed')",
+        )
+        .bind(&fp)
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed audiologo");
+
+        insert_candidate_row(&ctx.library, 10, Kind::Intro, 250, 4_750, 42, 0.92)
+            .await
+            .expect("insert");
+
+        let (file_id, kind, start, end, audiologo_id, conf, status, method): (
+            i64,
+            String,
+            i64,
+            i64,
+            Option<i64>,
+            f64,
+            String,
+            String,
+        ) = sqlx::query_as(
+            "SELECT file_id, kind, jingle_start_ms, jingle_end_ms, audiologo_id, \
+                    confidence, status, method \
+               FROM book_file_audiologos WHERE file_id = 10",
+        )
+        .fetch_one(ctx.library.pool())
+        .await
+        .expect("fetch");
+        assert_eq!(file_id, 10);
+        assert_eq!(kind, "intro");
+        assert_eq!(start, 250);
+        assert_eq!(end, 4_750);
+        assert_eq!(audiologo_id, Some(42));
+        assert!((conf - 0.92).abs() < 1e-3);
+        assert_eq!(status, "candidate");
+        assert_eq!(method, "fingerprint_full");
+    }
+
+    #[tokio::test]
+    async fn bump_audiologo_match_count_increments_counter() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let ctx = fresh_ctx(tmp.path()).await;
+        let fp = ab_fingerprint::fingerprint_to_bytes(&[1_u32]);
+        sqlx::query(
+            "INSERT INTO audiologos \
+             (audiologo_id, name, kind, fingerprint, duration_ms, match_threshold, verified_via, match_count) \
+             VALUES (7, 'intro-A', 'intro', ?, 1000, 0.85, 'seed', 5)",
+        )
+        .bind(&fp)
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed");
+
+        bump_audiologo_match_count(&ctx.library, 7)
+            .await
+            .expect("bump");
+
+        let (count, last_matched_at): (i64, Option<i64>) = sqlx::query_as(
+            "SELECT match_count, last_matched_at FROM audiologos WHERE audiologo_id = 7",
+        )
+        .fetch_one(ctx.library.pool())
+        .await
+        .expect("fetch");
+        assert_eq!(count, 6, "5 → 6");
+        assert!(last_matched_at.is_some(), "last_matched_at populated");
     }
 
     #[tokio::test]
