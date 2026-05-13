@@ -479,3 +479,126 @@ async fn padding_clamps_cut_amount() {
     assert_eq!(status, "applied");
     assert!(outcome.row_id > 0);
 }
+
+#[tokio::test]
+async fn status_recompute_demotes_applied_to_detected_when_row_resets() {
+    // Slice H.1.4: `recompute_audiologo_status` derives
+    // `books.audiologo_status` from the per-file rows.
+    //
+    // Apply a cut (book → 'applied'), then manually flip the row
+    // to `re_detected` (mirroring what slice H.1.5's
+    // `Stage::reset()` will do), then call recompute. The
+    // book-level status must demote from 'applied' to
+    // 'detected'.
+    use ab_api::audiologo_apply::recompute_audiologo_status;
+    use sqlx::Acquire;
+
+    let (lib, _tmp) = fresh_db().await;
+    let (book_id, files) = fixture_book(&lib, "reset-status", 1, 60_000).await;
+    fixture_chapters(
+        &lib,
+        book_id,
+        &[(0, 30_000, "ch0"), (30_000, 60_000, "ch1")],
+    )
+    .await;
+
+    apply_audiologo_cut(
+        lib.pool(),
+        ApplyCutParams {
+            book_id,
+            file_id: files[0],
+            kind: "intro",
+            jingle_start_ms: 0,
+            jingle_end_ms: 5_000,
+            padding_ms: Some(0),
+            method: "manual",
+            audiologo_id: None,
+            confidence: 1.0,
+        },
+    )
+    .await
+    .expect("apply");
+
+    let (_dur, status) = read_book_state(&lib, book_id).await;
+    assert_eq!(status, "applied");
+
+    // Flip the applied row to re_detected (the reset semantics
+    // H.1.5 will codify).
+    sqlx::query(
+        "UPDATE book_file_audiologos SET status = 're_detected', \
+         re_detected_at = strftime('%s','now') WHERE file_id = ?",
+    )
+    .bind(files[0])
+    .execute(lib.pool())
+    .await
+    .expect("flip to re_detected");
+
+    // Recompute. Open a transaction so we can pass &mut
+    // SqliteConnection (the helper's signature).
+    let mut tx = lib.pool().begin().await.expect("begin");
+    let conn = tx.acquire().await.expect("acquire");
+    recompute_audiologo_status(conn, book_id)
+        .await
+        .expect("recompute");
+    tx.commit().await.expect("commit");
+
+    let (_dur, status) = read_book_state(&lib, book_id).await;
+    assert_eq!(
+        status, "detected",
+        "applied row that flipped to re_detected demotes book to 'detected' \
+         (data still here, just not applied)"
+    );
+}
+
+#[tokio::test]
+async fn status_recompute_returns_to_unknown_when_no_rows() {
+    // The "all rows cleared" path: book has zero
+    // `book_file_audiologos` rows, the externally-set status
+    // values ('stripped' / 'none') are preserved; everything
+    // else collapses to 'unknown'.
+    use ab_api::audiologo_apply::recompute_audiologo_status;
+    use sqlx::Acquire;
+
+    let (lib, _tmp) = fresh_db().await;
+    let (book_id, _files) = fixture_book(&lib, "no-rows", 1, 60_000).await;
+
+    // Force the status to 'stripped' (the post-Libation case).
+    sqlx::query("UPDATE books SET audiologo_status = 'stripped' WHERE book_id = ?")
+        .bind(book_id)
+        .execute(lib.pool())
+        .await
+        .expect("seed stripped");
+
+    let mut tx = lib.pool().begin().await.expect("begin");
+    let conn = tx.acquire().await.expect("acquire");
+    recompute_audiologo_status(conn, book_id)
+        .await
+        .expect("recompute");
+    tx.commit().await.expect("commit");
+
+    let (_dur, status) = read_book_state(&lib, book_id).await;
+    assert_eq!(
+        status, "stripped",
+        "'stripped' is externally derived; no-rows recompute leaves it alone"
+    );
+
+    // Now flip to a recomputable starting state.
+    sqlx::query("UPDATE books SET audiologo_status = 'applied' WHERE book_id = ?")
+        .bind(book_id)
+        .execute(lib.pool())
+        .await
+        .expect("seed applied (false)");
+
+    let mut tx = lib.pool().begin().await.expect("begin");
+    let conn = tx.acquire().await.expect("acquire");
+    recompute_audiologo_status(conn, book_id)
+        .await
+        .expect("recompute");
+    tx.commit().await.expect("commit");
+
+    let (_dur, status) = read_book_state(&lib, book_id).await;
+    assert_eq!(
+        status, "unknown",
+        "'applied' without rows is inconsistent — recompute collapses to 'unknown'"
+    );
+}
