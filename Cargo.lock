@@ -258,6 +258,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ab-tag-write"
+version = "0.1.0"
+dependencies = [
+ "ab-core",
+ "ab-db",
+ "ab-pipeline",
+ "async-trait",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "ab-transcode"
 version = "0.1.0"
 dependencies = [

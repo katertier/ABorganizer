@@ -20,6 +20,7 @@ members = [
     "crates/seed",
     "crates/scan",
     "crates/tag-read",
+    "crates/tag-write",
     "bins/aborg",
     "bins/aborg-daemon",
     "bins/aborg-tools",
@@ -142,6 +143,7 @@ ab-webui-player = { path = "crates/webui-player" }
 ab-seed        = { path = "crates/seed" }
 ab-scan        = { path = "crates/scan" }
 ab-tag-read    = { path = "crates/tag-read" }
+ab-tag-write   = { path = "crates/tag-write" }
 
 # Test-only
 proptest       = "1.5"

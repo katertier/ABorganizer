@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT  field   AS \"field!: String\",\n                value   AS \"value: String\",\n                source  AS \"source!: String\"\n          FROM book_field_provenance\n         WHERE book_id = ? AND is_winner = 1\n         ORDER BY field\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "field!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "value: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "source!: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "cbc1cc538ce99874a436b5bc9e20c0927fa4c6ba1bc0e8bafd765c8619a16677"
+}
