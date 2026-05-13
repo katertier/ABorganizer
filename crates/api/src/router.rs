@@ -35,6 +35,8 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/books/{book_id}/audiologo", post(books_audiologo_cut))
         .route("/clean/usage", get(clean_usage))
         .route("/clean/run", post(clean_run))
+        .route("/names/{kind}/{id}/alias", post(crate::names::names_alias))
+        .route("/names/{kind}/{id}/exalt", post(crate::names::names_exalt))
         .with_state(state)
 }
 

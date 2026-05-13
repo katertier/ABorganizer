@@ -86,6 +86,13 @@ enum Command {
         #[command(subcommand)]
         action: AudiologoAction,
     },
+    /// Identity-alias management (ADR-0026). Subcommands `alias`
+    /// (record a new spelling) and `exalt` (set the displayed form).
+    /// Kinds: author, narrator, series.
+    Names {
+        #[command(subcommand)]
+        action: NamesAction,
+    },
     /// Cleanup subsystem (ADR-0025). Categories: disk, db, queue.
     ///
     /// Without `--apply` the daemon dry-runs every registered
@@ -106,6 +113,44 @@ enum Command {
     },
     /// Show daemon health.
     Health,
+}
+
+#[derive(Debug, Subcommand)]
+enum NamesAction {
+    /// Record a new spelling on an existing identity row.
+    ///
+    /// Insert is idempotent — repeat with the same alias is a
+    /// no-op. The alias is recorded with `source='manual'` and
+    /// `is_prime=0`; use `aborg names exalt` to make it the
+    /// displayed form. ADR-0026.
+    Alias {
+        /// Parent row's primary-key id (`author_id` / `narrator_id` /
+        /// `series_id`). Find these via `aborg book list`'s
+        /// author/narrator/series columns or future `aborg names
+        /// list` (H.3.6 follow-up).
+        id: i64,
+        /// `author`, `narrator`, or `series`.
+        #[arg(long)]
+        kind: String,
+        /// The new spelling.
+        #[arg(long)]
+        add: String,
+    },
+    /// Move the prime-alias flag to a given spelling.
+    ///
+    /// The target spelling must already exist on the row
+    /// (`aborg names alias` it first if not). Demotes the
+    /// current prime; promotes the target. Atomic.
+    Exalt {
+        /// Parent row's primary-key id.
+        id: i64,
+        /// `author`, `narrator`, or `series`.
+        #[arg(long)]
+        kind: String,
+        /// The alias spelling to exalt.
+        #[arg(long)]
+        alias: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -293,6 +338,14 @@ async fn main() -> Result<()> {
             }
             AudiologoAction::Import { path } => {
                 audiologo_import(&path, cli.output).await?;
+            }
+        },
+        Command::Names { action } => match action {
+            NamesAction::Alias { id, kind, add } => {
+                names_alias(&cli.daemon, id, &kind, &add, cli.output).await?;
+            }
+            NamesAction::Exalt { id, kind, alias } => {
+                names_exalt(&cli.daemon, id, &kind, &alias, cli.output).await?;
             }
         },
         Command::Clean {
@@ -760,6 +813,95 @@ async fn clean(
         }
     }
     Ok(())
+}
+
+// ── Names (slice H.3.4, ADR-0026) ────────────────────────────────────
+
+#[derive(Serialize, Debug)]
+struct NamesAliasRequest<'a> {
+    alias: &'a str,
+}
+
+#[derive(Deserialize, Debug, Serialize)]
+struct NamesActionResponse {
+    kind: String,
+    id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    inserted: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    exalted: Option<bool>,
+}
+
+async fn names_alias(
+    daemon: &str,
+    id: i64,
+    kind: &str,
+    alias: &str,
+    output: OutputFormat,
+) -> Result<()> {
+    let url = format!("{daemon}/api/v1/names/{kind}/{id}/alias");
+    let resp = client()
+        .post(&url)
+        .json(&NamesAliasRequest { alias })
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("alias failed: HTTP {status}: {body}");
+    }
+    let body: NamesActionResponse = resp.json().await.context("parse alias response")?;
+    print_names_action(&body, output);
+    Ok(())
+}
+
+async fn names_exalt(
+    daemon: &str,
+    id: i64,
+    kind: &str,
+    alias: &str,
+    output: OutputFormat,
+) -> Result<()> {
+    let url = format!("{daemon}/api/v1/names/{kind}/{id}/exalt");
+    let resp = client()
+        .post(&url)
+        .json(&NamesAliasRequest { alias })
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("exalt failed: HTTP {status}: {body}");
+    }
+    let body: NamesActionResponse = resp.json().await.context("parse exalt response")?;
+    print_names_action(&body, output);
+    Ok(())
+}
+
+fn print_names_action(body: &NamesActionResponse, output: OutputFormat) {
+    match output {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(body).unwrap_or_default());
+        }
+        OutputFormat::Human => {
+            match body.inserted {
+                Some(true) => println!("{} {}: alias added", body.kind, body.id),
+                Some(false) => {
+                    println!("{} {}: alias already present (no-op)", body.kind, body.id);
+                }
+                None => {}
+            }
+            match body.exalted {
+                Some(true) => println!("{} {}: exalted", body.kind, body.id),
+                Some(false) => {
+                    println!("{} {}: alias was already prime (no-op)", body.kind, body.id);
+                }
+                None => {}
+            }
+        }
+    }
 }
 
 // ── Tracing setup ────────────────────────────────────────────────────
