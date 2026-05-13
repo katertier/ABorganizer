@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO mass_edit_history\n                   (target_kind, target_id, field,\n                    before_value, after_value, batch_id, actor)\n                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "fa8703f03cc43a6b3f67ec8ead0cec88f8b97a00843490c5303f73a059e1b8b5"
+}

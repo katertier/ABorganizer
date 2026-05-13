@@ -48,20 +48,49 @@ use std::path::Path;
 
 use crate::winners::FieldWinner;
 
+/// One field's before/after pair recorded for the audit log.
+///
+/// Surfaced from [`write_winners`] so the stage can mirror each
+/// per-field tag mutation into `mass_edit_history`. `before` is
+/// `None` when the file had no value for that field prior to
+/// the write — the audit row records a creation, not an update.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldChange {
+    /// Which `book_field_provenance` field changed.
+    pub field: Field,
+    /// Pre-write on-disk value (`None` = absent).
+    pub before: Option<String>,
+    /// Post-write on-disk value (the winner's value, never
+    /// empty — empty / `None` winners short-circuit at the
+    /// `Unmapped` branch).
+    pub after: String,
+}
+
 /// Outcome of a single-file [`write_winners`] call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct WriteReport {
-    /// How many winner values were actually persisted (i.e.
-    /// differed from on-disk).
-    pub fields_changed: usize,
+    /// Per-field before/after pairs for every winner that
+    /// actually moved. `changes.len()` is the persisted-write
+    /// count; the file gets `save_to_path`-d iff this vector is
+    /// non-empty.
+    pub changes: Vec<FieldChange>,
     /// How many winners matched what's already on disk (the
     /// dedup guard hit).
     pub fields_already_matched: usize,
     /// How many winners had a `Field` that the slice's mapping
-    /// doesn't cover yet (Subtitle, Description, …). Logged so
-    /// operators can track "how much of the data is reaching
-    /// the file" coverage.
+    /// doesn't cover yet (`CoverUrl`, `DurationSeconds`,
+    /// `Abridged`, `Explicit`). Logged so operators can track
+    /// "how much of the data is reaching the file" coverage.
     pub fields_unmapped: usize,
+}
+
+impl WriteReport {
+    /// Convenience accessor matching the prior shape — number
+    /// of fields actually written.
+    #[must_use]
+    pub fn fields_changed(&self) -> usize {
+        self.changes.len()
+    }
 }
 
 /// Open `path` with lofty, set every supported winner that
@@ -100,13 +129,23 @@ pub fn write_winners(path: &Path, winners: &[FieldWinner]) -> Result<WriteReport
     let mut report = WriteReport::default();
     for winner in winners {
         match apply_winner(tag, winner) {
-            FieldWriteOutcome::Changed => report.fields_changed += 1,
+            FieldWriteOutcome::Changed { before } => {
+                // `after` is guaranteed non-empty by the
+                // `apply_winner` short-circuit on None / empty
+                // values — those branches return Unmapped.
+                let after = winner.value.clone().unwrap_or_default();
+                report.changes.push(FieldChange {
+                    field: winner.field,
+                    before,
+                    after,
+                });
+            }
             FieldWriteOutcome::Matched => report.fields_already_matched += 1,
             FieldWriteOutcome::Unmapped => report.fields_unmapped += 1,
         }
     }
 
-    if report.fields_changed == 0 {
+    if report.changes.is_empty() {
         return Ok(report);
     }
 
@@ -125,11 +164,16 @@ pub fn write_winners(path: &Path, winners: &[FieldWinner]) -> Result<WriteReport
 /// Per-field outcome — used by [`write_winners`] to bucket
 /// each winner. Private; the public surface is the aggregate
 /// [`WriteReport`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Changed` carries the pre-write value so the per-file
+/// audit-log writer can record `(before, after)` without a
+/// second pass over the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum FieldWriteOutcome {
     /// On-disk value was missing or differed; we wrote the
-    /// winner.
-    Changed,
+    /// winner. `before` is the pre-mutation value (or `None`
+    /// if the tag was previously absent).
+    Changed { before: Option<String> },
     /// On-disk value already equals the winner (skip-write).
     Matched,
     /// No mapping yet for this `Field` variant.
@@ -163,27 +207,30 @@ fn apply_winner(tag: &mut Tag, winner: &FieldWinner) -> FieldWriteOutcome {
     //    PUBLISHER) under the hood.
     match winner.field {
         Field::Title => {
-            if tag.title().as_deref() == Some(new_value) {
+            let before = tag.title().as_deref().map(str::to_owned);
+            if before.as_deref() == Some(new_value) {
                 FieldWriteOutcome::Matched
             } else {
                 tag.set_title(new_value.to_owned());
-                FieldWriteOutcome::Changed
+                FieldWriteOutcome::Changed { before }
             }
         }
         Field::Author => {
-            if tag.artist().as_deref() == Some(new_value) {
+            let before = tag.artist().as_deref().map(str::to_owned);
+            if before.as_deref() == Some(new_value) {
                 FieldWriteOutcome::Matched
             } else {
                 tag.set_artist(new_value.to_owned());
-                FieldWriteOutcome::Changed
+                FieldWriteOutcome::Changed { before }
             }
         }
         Field::Series => {
-            if tag.album().as_deref() == Some(new_value) {
+            let before = tag.album().as_deref().map(str::to_owned);
+            if before.as_deref() == Some(new_value) {
                 FieldWriteOutcome::Matched
             } else {
                 tag.set_album(new_value.to_owned());
-                FieldWriteOutcome::Changed
+                FieldWriteOutcome::Changed { before }
             }
         }
         Field::Language => set_item_if_changed(tag, ItemKey::Language, new_value),
@@ -233,13 +280,15 @@ fn apply_winner(tag: &mut Tag, winner: &FieldWinner) -> FieldWriteOutcome {
     }
 }
 
-/// `ItemKey`-based set with a dedup guard.
+/// `ItemKey`-based set with a dedup guard. Captures the
+/// pre-write value (None if absent) for the audit log.
 fn set_item_if_changed(tag: &mut Tag, key: ItemKey, new_value: &str) -> FieldWriteOutcome {
-    if tag.get_string(key).map(str::trim) == Some(new_value) {
+    let before = tag.get_string(key).map(str::to_owned);
+    if before.as_deref().map(str::trim) == Some(new_value) {
         return FieldWriteOutcome::Matched;
     }
     tag.insert_text(key, new_value.to_owned());
-    FieldWriteOutcome::Changed
+    FieldWriteOutcome::Changed { before }
 }
 
 #[cfg(test)]
@@ -317,10 +366,14 @@ mod tests {
                 value: Some((*value).to_owned()),
                 source: "audnexus-enrich".to_owned(),
             };
-            assert_eq!(
-                apply_winner(&mut tag, &w),
-                FieldWriteOutcome::Changed,
-                "{field:?} should write"
+            // Newly-mapped fields: before is None (Tag::new starts empty)
+            // so we expect `Changed { before: None }`.
+            assert!(
+                matches!(
+                    apply_winner(&mut tag, &w),
+                    FieldWriteOutcome::Changed { before: None }
+                ),
+                "{field:?} should write with before=None"
             );
             assert_eq!(
                 tag.get_string(*expected_key),
@@ -351,9 +404,15 @@ mod tests {
             value: Some("Penguin Audio".to_owned()),
             source: "audnexus".to_owned(),
         };
-        assert_eq!(
-            apply_winner(&mut tag, &different),
-            FieldWriteOutcome::Changed
+        // Different from current "Audible" → before captures
+        // the prior value for the audit log.
+        let outcome = apply_winner(&mut tag, &different);
+        assert!(
+            matches!(
+                outcome,
+                FieldWriteOutcome::Changed { before: Some(ref b) } if b == "Audible"
+            ),
+            "expected Changed {{ before = Some(\"Audible\") }}, got {outcome:?}",
         );
         assert_eq!(tag.get_string(ItemKey::Publisher), Some("Penguin Audio"));
     }
