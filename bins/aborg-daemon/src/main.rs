@@ -235,7 +235,15 @@ async fn main() -> Result<()> {
         cancel: cancel.clone(),
         stage_name: "",
     };
-    let scheduler = Arc::new(Scheduler::spawn(dag, stage_ctx, &tunables.scheduler));
+    // Scheduler keeps its own Arc<Dag> to drive execution; we
+    // also hand a clone to ApiState so handlers (notably the
+    // retry endpoint, ADR-0023) can resolve user-supplied
+    // stage strings into the typed StageId.
+    let scheduler = Arc::new(Scheduler::spawn(
+        Arc::clone(&dag),
+        stage_ctx,
+        &tunables.scheduler,
+    ));
 
     // Idle-priority Speech-model installer. Spawned once at
     // startup; wakes every `tunables.transcribe.idle_install_check_secs`
@@ -251,7 +259,7 @@ async fn main() -> Result<()> {
 
     // Shared state for the API router. Carries the scheduler handle
     // so the scan endpoint can submit new BookIds.
-    let api_state = ab_api::ApiState::new(library.clone(), ephemeral.clone(), scheduler);
+    let api_state = ab_api::ApiState::new(library.clone(), ephemeral.clone(), scheduler, dag);
 
     // Build the unified Router for the API port (api + webuis).
     let mut router = Router::new()

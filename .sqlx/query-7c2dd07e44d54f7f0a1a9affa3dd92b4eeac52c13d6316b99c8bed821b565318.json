@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM ai_cache WHERE book_id = ? AND cache_type = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "7c2dd07e44d54f7f0a1a9affa3dd92b4eeac52c13d6316b99c8bed821b565318"
+}

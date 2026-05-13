@@ -2,7 +2,9 @@
 
 use std::path::PathBuf;
 
-use axum::extract::State;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -28,6 +30,7 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/doctor/speech", get(doctor_speech))
         .route("/doctor/speech/install", post(doctor_speech_install))
         .route("/books", get(books_list))
+        .route("/books/{book_id}/retry", post(books_retry_stage))
         .with_state(state)
 }
 
@@ -635,4 +638,168 @@ async fn doctor_speech_install(
         already_installed,
         failed,
     }))
+}
+
+// ── /books/{book_id}/retry ────────────────────────────────────
+
+/// Body for `POST /api/v1/books/{book_id}/retry`.
+///
+/// See ADR-0023 for the full design. Generic over any
+/// registered pipeline stage (`tag-read`, `fingerprint`,
+/// `extract-summary-spoiler-free`, …); not limited to LLM
+/// extractors.
+#[derive(Deserialize)]
+struct RetryRequest {
+    /// Stage name to retry. Matched against the registered DAG;
+    /// 400 with `known_stages` listed on mismatch.
+    stage: String,
+}
+
+/// Successful response body for `POST /books/{book_id}/retry`.
+#[derive(Serialize)]
+struct RetryResponse {
+    book_id: i64,
+    stage: String,
+    submitted_at: String,
+    /// `true` when the stage produced one or more `ai_cache`
+    /// rows that we deleted. `false` for stages without cache
+    /// output (scan / fingerprint / audnexus-* / …).
+    cache_cleared: bool,
+    /// `true` when we deleted at least one `pipeline_progress`
+    /// row for `(book_id, stage)`. `false` when no row was
+    /// present (first run, or a previous retry already
+    /// cleared it).
+    pipeline_progress_cleared: bool,
+}
+
+/// `POST /api/v1/books/{book_id}/retry` — clear cache +
+/// progress for `(book_id, stage)`, then submit a new
+/// background-priority job. See ADR-0023 for the design,
+/// failure modes, and consumer model (CLI + future UI).
+///
+/// Returns a 200 on success, 404 on unknown `book_id`, and a
+/// 400 with a `known_stages: [..]` list on unknown `stage`.
+async fn books_retry_stage(
+    State(state): State<ApiState>,
+    Path(book_id): Path<i64>,
+    Json(req): Json<RetryRequest>,
+) -> Response {
+    // 1. Validate book_id (exists in books).
+    let book_known =
+        match sqlx::query_scalar!(r#"SELECT 1 AS "ok!" FROM books WHERE book_id = ?"#, book_id,)
+            .fetch_optional(state.inner.library.pool())
+            .await
+        {
+            Ok(opt) => opt.is_some(),
+            Err(e) => {
+                let api_err: ApiError =
+                    ab_core::Error::Database(format!("retry book lookup: {e}")).into();
+                return api_err.into_response();
+            }
+        };
+    if !book_known {
+        return ApiError::NotFound(format!("book_id {book_id} unknown")).into_response();
+    }
+
+    // 2. Resolve stage name against the registered DAG. Use a
+    //    structured 400 with the known stages list so a typo
+    //    is recoverable without grepping source.
+    let Some(stage_id) = state.inner.dag.stage_id_by_name(&req.stage) else {
+        let mut known = state.inner.dag.known_stage_names();
+        known.sort_unstable();
+        let body = serde_json::json!({
+            "type": "about:blank#unknown-stage",
+            "title": "Bad Request",
+            "status": 400,
+            "detail": format!("unknown stage: {:?}", req.stage),
+            "known_stages": known,
+        });
+        return (StatusCode::BAD_REQUEST, Json(body)).into_response();
+    };
+
+    // 3. Clear ai_cache rows for this stage's outputs (if any).
+    //    `cache_keys_for_stage` returns None only when the
+    //    stage exists in the DAG but isn't listed in the
+    //    lookup — programmer error (forgot to extend the
+    //    match when registering a new stage). Treat as
+    //    "no caches" to keep the endpoint operational and
+    //    surface it as a daemon-side warning.
+    let cache_keys = ab_core::cache_keys_for_stage(stage_id.as_str()).unwrap_or_else(|| {
+        tracing::warn!(
+            stage = stage_id.as_str(),
+            "api.retry.cache_keys_lookup_missing",
+        );
+        &[]
+    });
+    for key in cache_keys {
+        let key_str = key.as_str();
+        if let Err(e) = sqlx::query!(
+            "DELETE FROM ai_cache WHERE book_id = ? AND cache_type = ?",
+            book_id,
+            key_str,
+        )
+        .execute(state.inner.library.pool())
+        .await
+        {
+            let api_err: ApiError =
+                ab_core::Error::Database(format!("retry cache clear: {e}")).into();
+            return api_err.into_response();
+        }
+    }
+    let cache_cleared = !cache_keys.is_empty();
+
+    // 4. Clear pipeline_progress row(s) for (book_id, stage).
+    let stage_name = stage_id.as_str();
+    let progress_delete = sqlx::query!(
+        "DELETE FROM pipeline_progress WHERE book_id = ? AND stage = ?",
+        book_id,
+        stage_name,
+    )
+    .execute(state.inner.ephemeral.pool())
+    .await;
+    let pipeline_progress_cleared = match progress_delete {
+        Ok(r) => r.rows_affected() > 0,
+        Err(e) => {
+            let api_err: ApiError =
+                ab_core::Error::Database(format!("retry progress clear: {e}")).into();
+            return api_err.into_response();
+        }
+    };
+
+    // 5. Submit at Background priority. The daemon respects
+    //    the stage's `requires()` — if dependencies aren't
+    //    satisfied yet, the scheduler defers; we still
+    //    return 200 (per ADR-0023's "the daemon may queue
+    //    with delay" note).
+    if let Err(e) = state
+        .inner
+        .scheduler
+        .submit(
+            ab_core::BookId(book_id),
+            stage_id,
+            ab_pipeline::Priority::Background,
+        )
+        .await
+    {
+        let api_err: ApiError = e.into();
+        return api_err.into_response();
+    }
+
+    let submitted_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    tracing::info!(
+        book_id,
+        stage = stage_id.as_str(),
+        cache_cleared,
+        pipeline_progress_cleared,
+        "api.retry.submitted",
+    );
+
+    Json(RetryResponse {
+        book_id,
+        stage: stage_id.as_str().to_owned(),
+        submitted_at,
+        cache_cleared,
+        pipeline_progress_cleared,
+    })
+    .into_response()
 }

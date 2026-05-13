@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM pipeline_progress WHERE book_id = ? AND stage = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "36e923b2889ad161312d4fe5c478b6dcaeb806ca4f408c9f33f84f0687625c3a"
+}
