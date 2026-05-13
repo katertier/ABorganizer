@@ -16,15 +16,20 @@
 //! method, audiologo_id, confidence, status, …)`). The
 //! semantic cut is `[jingle_start_ms, jingle_end_ms]` — a
 //! mid-text splice that preserves "Title by Author" voiceovers
-//! that follow publisher jingles. The old
-//! `books.audiologo_intro_ms` / `_outro_ms` columns are
-//! deprecated; readers derive book-level intro/outro from the
-//! first / last file's rows.
+//! that follow publisher jingles.
+//!
+//! The `books.brand_intro_duration_ms` / `_outro_ms` columns
+//! (renamed from `audiologo_intro_ms` / `_outro_ms` by slice
+//! 4B.0 / migration 017) hold Audnexus's reported brand-jingle
+//! duration. They feed chapter-mark recomputation at apply
+//! time + the Libation-stripped path (per ADR-0024 Revision 2);
+//! they are **not** an input to detection — fingerprint
+//! matching against the `audiologos` table is the only
+//! detection path.
 //!
 //! Fingerprints persist in `audiologos` (extended in 4A with
-//! two new `verified_via` values: `'catalog_bootstrap'` for
-//! Phase-1 bootstrapping in 4B, and `'ab_tagger_import'` for
-//! 4A's one-shot import).
+//! the `'ab_tagger_import'` `verified_via` value for 4A's
+//! one-shot import).
 //!
 //! # Empirical re-evaluation
 //!

@@ -7,17 +7,29 @@
 //!
 //! ## Brand-duration handling
 //!
-//! Pre-4A this stage also wrote `chapters.brand_intro_duration_ms`
-//! / `brand_outro_duration_ms` into the head-cut columns
-//! `books.audiologo_intro_ms` / `audiologo_outro_ms`. Migration
-//! 010 deprecated those columns: audiologo trims are now per-file
-//! splice rows in `book_file_audiologos` (not head-cut book-level
-//! durations), and the Audnexus brand-duration value is a
-//! bootstrap **hint** consumed by the future audiologo-detect
-//! stage (per ADR-0024 `Method::CatalogBrandDuration`), not
-//! promoted to a column. The full Audnexus chapters payload is
-//! cached in `ai_cache` already, so the detect stage reads the
-//! hint from there — no extra persistence here.
+//! Migration 010 (slice 4A) briefly deprecated the
+//! `books.audiologo_intro_ms` / `_outro_ms` columns, after which
+//! this stage stopped writing them. ADR-0024 Revision 2
+//! (2026-05-13) reverses that decision under a rename: slice 4B.0
+//! renames the columns to `brand_intro_duration_ms` /
+//! `brand_outro_duration_ms` (migration 017) and un-deprecates
+//! them. The new columns hold Audnexus's reported brand-jingle
+//! duration — distinct from the actual cut location (which lives
+//! in `book_file_audiologos.jingle_start_ms` / `_end_ms`).
+//!
+//! The values feed two downstream needs:
+//!
+//! 1. Chapter-mark recomputation when slice 4B applies an
+//!    audiologo cut — the "original jingle length" baseline.
+//! 2. Libation-stripped detection: when brand duration is
+//!    non-NULL but no fingerprint matches the head-of-file
+//!    window, the audio has already been cut elsewhere. Slice
+//!    4B sets `audiologo_status='stripped'` and shifts chapter
+//!    offsets by `-brand_intro_duration_ms`.
+//!
+//! The writeback below is part of the same idempotent
+//! transaction as the chapter inserts; `reset()` NULLs the
+//! columns so re-runs converge cleanly.
 //!
 //! # Source-of-truth ordering
 //!
@@ -154,14 +166,37 @@ impl Stage for AudnexusChaptersStage {
     /// keeps the contract honest.
     async fn reset(&self, ctx: &StageContext, book_id: BookId) -> Result<()> {
         let id = book_id.0;
+        // Clear our chapter rows + the brand-duration writeback
+        // (slice 4B.0). NULLing the brand-duration columns lets a
+        // re-run converge to whatever Audnexus currently reports
+        // — including the absence of a brand-duration field.
+        let mut tx = ctx
+            .library
+            .pool()
+            .begin()
+            .await
+            .map_err(|e| Error::Database(format!("audnexus-chapters reset tx: {e}")))?;
         sqlx::query!(
             "DELETE FROM chapters WHERE book_id = ? AND source = ?",
             id,
             CHAPTER_SOURCE,
         )
-        .execute(ctx.library.pool())
+        .execute(&mut *tx)
         .await
-        .map_err(|e| Error::Database(format!("audnexus-chapters reset: {e}")))?;
+        .map_err(|e| Error::Database(format!("audnexus-chapters reset chapters: {e}")))?;
+        sqlx::query!(
+            "UPDATE books \
+                SET brand_intro_duration_ms = NULL, \
+                    brand_outro_duration_ms = NULL \
+              WHERE book_id = ?",
+            id,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| Error::Database(format!("audnexus-chapters reset brand-durations: {e}")))?;
+        tx.commit()
+            .await
+            .map_err(|e| Error::Database(format!("audnexus-chapters reset commit: {e}")))?;
         ab_pipeline::default_reset(STAGE_ID.as_str(), ctx, book_id).await
     }
 }
@@ -228,13 +263,27 @@ async fn write_chapters(
         .map_err(|e| Error::Database(format!("chapters insert idx={idx}: {e}")))?;
     }
 
-    // brand_intro_duration_ms / brand_outro_duration_ms from
-    // the Audnexus payload are NOT promoted to a column. Migration
-    // 010 deprecated `books.audiologo_intro_ms` / `_outro_ms`;
-    // the future audiologo-detect stage reads the brand-duration
-    // hint from the cached Audnexus response (ai_cache) when it
-    // needs to bootstrap a `Method::CatalogBrandDuration`
-    // detection. See module docstring + ADR-0024.
+    // Promote the brand-duration values from the Audnexus payload
+    // to the renamed `books.brand_intro_duration_ms` /
+    // `brand_outro_duration_ms` columns (slice 4B.0 / migration
+    // 017). Slice 4B reads these at apply-audiologo time for the
+    // chapter-mark recomputation + the Libation-stripped path. The
+    // saturating cast pins u64 → i64 — durations of full audiobooks
+    // never exceed 2^31 ms (~24 days), so the cast is symbolic.
+    let intro_ms = i64::try_from(chapters.brand_intro_duration_ms).unwrap_or(i64::MAX);
+    let outro_ms = i64::try_from(chapters.brand_outro_duration_ms).unwrap_or(i64::MAX);
+    sqlx::query!(
+        "UPDATE books \
+            SET brand_intro_duration_ms = ?, \
+                brand_outro_duration_ms = ? \
+          WHERE book_id = ?",
+        intro_ms,
+        outro_ms,
+        id,
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| Error::Database(format!("chapters brand-duration writeback: {e}")))?;
 
     tx.commit()
         .await
@@ -324,22 +373,23 @@ mod tests {
             (1, 60_000, 180_000, "Chapter 2".into(), "audnexus".into())
         );
 
-        // Pin the 4A+ contract: the brand-duration hint is NOT
-        // promoted to the deprecated `books.audiologo_intro_ms`
-        // / `_outro_ms` columns. The detect stage reads it from
-        // the cached Audnexus payload when needed.
+        // Pin the 4B.0+ contract: brand-duration values from the
+        // Audnexus payload are promoted to the renamed
+        // `books.brand_intro_duration_ms` / `_outro_ms` columns.
+        // Slice 4B reads these at apply-audiologo time for the
+        // chapter-mark recomputation + Libation-stripped path.
         let intro: Option<i64> =
-            sqlx::query_scalar("SELECT audiologo_intro_ms FROM books WHERE book_id = 1")
+            sqlx::query_scalar("SELECT brand_intro_duration_ms FROM books WHERE book_id = 1")
                 .fetch_one(ctx.library.pool())
                 .await
                 .expect("intro");
-        assert_eq!(intro, None);
+        assert_eq!(intro, Some(4500));
         let outro: Option<i64> =
-            sqlx::query_scalar("SELECT audiologo_outro_ms FROM books WHERE book_id = 1")
+            sqlx::query_scalar("SELECT brand_outro_duration_ms FROM books WHERE book_id = 1")
                 .fetch_one(ctx.library.pool())
                 .await
                 .expect("outro");
-        assert_eq!(outro, None);
+        assert_eq!(outro, Some(3000));
     }
 
     #[tokio::test]

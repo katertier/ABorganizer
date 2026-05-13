@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE books SET brand_intro_duration_ms = NULL, brand_outro_duration_ms = NULL WHERE book_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "49b5fe6c9f339898fbb6f16ada5a5f30cb56b8b00863b85c044af38a463d365b"
+}
