@@ -40,10 +40,12 @@
 
 use async_trait::async_trait;
 
+use ab_core::tunables::AudiologoTunables;
 use ab_core::{BookId, Error, Result};
+use ab_db::LibraryDb;
 use ab_pipeline::{Stage, StageContext, StageId, StageOutcome};
 
-use crate::Status;
+use crate::{Kind, Status};
 
 /// Typed stage identifier for this stage.
 pub const STAGE_ID: StageId = StageId::new("detect-audiologo");
@@ -56,15 +58,178 @@ pub const STAGE_NAME: &str = STAGE_ID.as_str();
 /// the head + tail of each active book file.
 ///
 /// 4B.3 ships the skeleton; detection logic lands in 4B.4.
-#[derive(Debug, Default)]
-pub struct DetectAudiologoStage;
+#[derive(Debug)]
+pub struct DetectAudiologoStage {
+    intro_window_ms: u64,
+    outro_window_ms: u64,
+}
+
+impl Default for DetectAudiologoStage {
+    fn default() -> Self {
+        Self::new(&AudiologoTunables::default())
+    }
+}
 
 impl DetectAudiologoStage {
-    /// Construct.
+    /// Construct from runtime tunables. Captures the intro / outro
+    /// scan window lengths up front so the stage doesn't need to
+    /// re-read the live tunables on every book.
     #[must_use]
-    pub const fn new() -> Self {
-        Self
+    pub fn new(tunables: &AudiologoTunables) -> Self {
+        // intro/outro_window_secs are f64 seconds in tunables. The
+        // cast saturates negative values (which a tunable should
+        // never be) to 0 and large values to u64::MAX, both safe.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let intro_window_ms = (tunables.intro_window_secs.max(0.0) * 1000.0) as u64;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let outro_window_ms = (tunables.outro_window_secs.max(0.0) * 1000.0) as u64;
+        Self {
+            intro_window_ms,
+            outro_window_ms,
+        }
     }
+}
+
+/// Row from the `audiologos` table, decoded for matching.
+//
+// Fields beyond `audiologo_id` + `fingerprint` are reads-pending
+// until the slide-match loop lands in 4B.4b. The `dead_code` allow
+// captures the slice-ladder commitment: these fields are part of
+// the data-plumbing contract finalized in 4B.4a even though only
+// some are observed in tests today.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(crate) struct AudiologoCandidate {
+    pub audiologo_id: i64,
+    pub kind: Kind,
+    pub fingerprint: Vec<u32>,
+    pub duration_ms: u64,
+    pub match_threshold: f32,
+}
+
+/// Active book-file row, decoded for windowed sampling.
+//
+// Same dead-code situation as `AudiologoCandidate` above — the
+// fields ship in 4B.4a and the slide-match consumers in 4B.4b
+// will exercise them.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(crate) struct ActiveBookFile {
+    pub file_id: i64,
+    pub file_path: String,
+    /// File duration in ms. `None` when `book_files.duration_ms`
+    /// is NULL (early-stage scan that hasn't probed durations
+    /// yet); the outro window then can't be computed and the
+    /// stage logs + skips outro detection for that file.
+    pub duration_ms: Option<u64>,
+}
+
+/// Load every active file for `book_id`, ordered by `file_id` so
+/// "first file" (intro target) and "last file" (outro target)
+/// are stable.
+pub(crate) async fn load_active_files(
+    library: &LibraryDb,
+    book_id: BookId,
+) -> Result<Vec<ActiveBookFile>> {
+    let id = book_id.0;
+    let rows = sqlx::query!(
+        r#"SELECT file_id AS "file_id!: i64", file_path, duration_ms
+             FROM book_files
+            WHERE book_id = ? AND is_active = 1
+            ORDER BY file_id"#,
+        id,
+    )
+    .fetch_all(library.pool())
+    .await
+    .map_err(|e| Error::Database(format!("detect-audiologo load files: {e}")))?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        let duration_ms = r.duration_ms.and_then(|ms| u64::try_from(ms).ok());
+        out.push(ActiveBookFile {
+            file_id: r.file_id,
+            file_path: r.file_path,
+            duration_ms,
+        });
+    }
+    Ok(out)
+}
+
+/// Load every audiologo row matching `kind`, decoded for slide-
+/// matching.
+///
+/// The fingerprint blob is little-endian-packed `Vec<u32>` (per
+/// `ab_fingerprint::fingerprint_to_bytes`).
+pub(crate) async fn load_audiologos_by_kind(
+    library: &LibraryDb,
+    kind: Kind,
+) -> Result<Vec<AudiologoCandidate>> {
+    let kind_str = kind.as_str();
+    let rows = sqlx::query!(
+        r#"SELECT audiologo_id AS "audiologo_id!: i64",
+                  fingerprint,
+                  duration_ms,
+                  match_threshold
+             FROM audiologos
+            WHERE kind = ?
+            ORDER BY audiologo_id"#,
+        kind_str,
+    )
+    .fetch_all(library.pool())
+    .await
+    .map_err(|e| Error::Database(format!("detect-audiologo load audiologos: {e}")))?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        let fingerprint = ab_fingerprint::fingerprint_from_bytes(&r.fingerprint);
+        if fingerprint.is_empty() {
+            tracing::warn!(
+                audiologo_id = r.audiologo_id,
+                "audiologo.detect.empty_fingerprint_skipped"
+            );
+            continue;
+        }
+        let Ok(duration_ms) = u64::try_from(r.duration_ms) else {
+            tracing::warn!(
+                audiologo_id = r.audiologo_id,
+                duration_ms = r.duration_ms,
+                "audiologo.detect.negative_duration_skipped"
+            );
+            continue;
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        let match_threshold = r.match_threshold as f32;
+        out.push(AudiologoCandidate {
+            audiologo_id: r.audiologo_id,
+            kind,
+            fingerprint,
+            duration_ms,
+            match_threshold,
+        });
+    }
+    Ok(out)
+}
+
+/// Fetch Audnexus's reported brand-intro duration for the book, if
+/// any. Slice 4B.0 promotes this from the audnexus-chapters stage's
+/// response into `books.brand_intro_duration_ms`. Used by 4B for
+/// the Libation-stripped path (non-NULL brand duration + no
+/// fingerprint hit → `audiologo_status='stripped'`).
+pub(crate) async fn fetch_brand_intro_duration_ms(
+    library: &LibraryDb,
+    book_id: BookId,
+) -> Result<Option<u64>> {
+    let id = book_id.0;
+    let row = sqlx::query!(
+        "SELECT brand_intro_duration_ms FROM books WHERE book_id = ?",
+        id,
+    )
+    .fetch_optional(library.pool())
+    .await
+    .map_err(|e| Error::Database(format!("detect-audiologo fetch brand: {e}")))?;
+    Ok(row
+        .and_then(|r| r.brand_intro_duration_ms)
+        .and_then(|ms| u64::try_from(ms).ok()))
 }
 
 #[async_trait]
@@ -87,18 +252,32 @@ impl Stage for DetectAudiologoStage {
         REQS
     }
 
-    async fn run(&self, _ctx: &StageContext, book_id: BookId) -> Result<StageOutcome> {
-        // 4B.3 skeleton: no detection logic. The full body lands
-        // in 4B.4 + 4B.5. Until then the stage runs to completion
-        // (Skipped, not Done) so the dispatcher doesn't block the
-        // downstream graph; once 4B.4 wires real detection in, the
-        // outcome flips to Done on actual work and Skipped when a
-        // book has no fingerprint candidates.
+    async fn run(&self, ctx: &StageContext, book_id: BookId) -> Result<StageOutcome> {
+        // 4B.4a: data plumbing in place; detection loop body still
+        // pending (lands in 4B.4b). The early-out path below mirrors
+        // the eventual shape — load active files + intro / outro
+        // audiologos + brand-duration, then if any are populated we
+        // proceed (currently to a Skipped no-op). The next sub-slice
+        // replaces the no-op with sample + fingerprint + slide-match.
+        let files = load_active_files(&ctx.library, book_id).await?;
+        if files.is_empty() {
+            return Ok(StageOutcome::Skipped);
+        }
+        let intros = load_audiologos_by_kind(&ctx.library, Kind::Intro).await?;
+        let outros = load_audiologos_by_kind(&ctx.library, Kind::Outro).await?;
+        let brand_intro_ms = fetch_brand_intro_duration_ms(&ctx.library, book_id).await?;
         tracing::debug!(
             book = %book_id,
             stage = STAGE_NAME,
-            "audiologo.detect.skeleton_skip"
+            files = files.len(),
+            intro_audiologos = intros.len(),
+            outro_audiologos = outros.len(),
+            brand_intro_ms = ?brand_intro_ms,
+            intro_window_ms = self.intro_window_ms,
+            outro_window_ms = self.outro_window_ms,
+            "audiologo.detect.plumbing_ready"
         );
+        // No detection body yet (4B.4b).
         Ok(StageOutcome::Skipped)
     }
 
@@ -162,13 +341,15 @@ impl Stage for DetectAudiologoStage {
 mod tests {
     use super::*;
     use ab_core::tunables::DbTunables;
+    use ab_db::{EphemeralDb, LibraryDb};
+    use std::path::Path;
     use tempfile::TempDir;
 
-    async fn fresh_ctx(dir: &std::path::Path) -> StageContext {
-        let lib = ab_db::LibraryDb::open(&dir.join("library.db"), &DbTunables::default())
+    async fn fresh_ctx(dir: &Path) -> StageContext {
+        let lib = LibraryDb::open(&dir.join("library.db"), &DbTunables::default())
             .await
             .expect("open library");
-        let eph = ab_db::EphemeralDb::open(&dir.join("ephemeral.db"), &DbTunables::default())
+        let eph = EphemeralDb::open(&dir.join("ephemeral.db"), &DbTunables::default())
             .await
             .expect("open ephemeral");
         StageContext {
@@ -179,9 +360,13 @@ mod tests {
         }
     }
 
+    fn fresh_stage() -> DetectAudiologoStage {
+        DetectAudiologoStage::new(&AudiologoTunables::default())
+    }
+
     #[tokio::test]
     async fn stage_metadata_matches_pipeline_expectations() {
-        let stage = DetectAudiologoStage::new();
+        let stage = fresh_stage();
         assert_eq!(stage.name(), "detect-audiologo");
         assert_eq!(
             stage.requires(),
@@ -193,18 +378,164 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_returns_skipped_in_skeleton() {
+    async fn tunables_window_ms_derives_from_secs() {
+        let t = AudiologoTunables {
+            intro_window_secs: 120.0,
+            outro_window_secs: 60.0,
+            ..AudiologoTunables::default()
+        };
+        let stage = DetectAudiologoStage::new(&t);
+        assert_eq!(stage.intro_window_ms, 120_000);
+        assert_eq!(stage.outro_window_ms, 60_000);
+    }
+
+    #[tokio::test]
+    async fn tunables_window_ms_clamps_negative_to_zero() {
+        let t = AudiologoTunables {
+            intro_window_secs: -5.0,
+            outro_window_secs: -1.0,
+            ..AudiologoTunables::default()
+        };
+        let stage = DetectAudiologoStage::new(&t);
+        assert_eq!(stage.intro_window_ms, 0);
+        assert_eq!(stage.outro_window_ms, 0);
+    }
+
+    #[tokio::test]
+    async fn run_returns_skipped_with_no_files() {
         let tmp = TempDir::new().expect("tmpdir");
         let ctx = fresh_ctx(tmp.path()).await;
-        let stage = DetectAudiologoStage::new();
-        let outcome = stage
+        // No book seeded → no files → Skipped.
+        let outcome = fresh_stage()
             .run(&ctx, BookId(1))
             .await
-            .expect("skeleton run does not error");
+            .expect("run does not error");
         match outcome {
             StageOutcome::Skipped => {}
             other => panic!("expected Skipped, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn run_skipped_with_no_audiologos_in_table() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let ctx = fresh_ctx(tmp.path()).await;
+        // Seed: one book + one active file. No audiologos table
+        // rows → detection has nothing to match against → 4B.4a
+        // still returns Skipped (4B.4b will still Skipped here
+        // since there's nothing to fingerprint against).
+        sqlx::query("INSERT INTO books (book_id, title) VALUES (1, 'fixture')")
+            .execute(ctx.library.pool())
+            .await
+            .expect("seed book");
+        sqlx::query(
+            "INSERT INTO book_files (file_id, book_id, file_path, is_active, duration_ms) \
+             VALUES (10, 1, '/tmp/a.m4b', 1, 600000)",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed file");
+        let outcome = fresh_stage()
+            .run(&ctx, BookId(1))
+            .await
+            .expect("run does not error");
+        match outcome {
+            StageOutcome::Skipped => {}
+            other => panic!("expected Skipped, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn load_active_files_returns_only_active_ordered_by_id() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let ctx = fresh_ctx(tmp.path()).await;
+        sqlx::query("INSERT INTO books (book_id, title) VALUES (1, 'fixture')")
+            .execute(ctx.library.pool())
+            .await
+            .expect("seed book");
+        sqlx::query(
+            "INSERT INTO book_files (file_id, book_id, file_path, is_active, duration_ms) \
+             VALUES \
+             (10, 1, '/tmp/a.m4b', 1, 100000), \
+             (11, 1, '/tmp/b.m4b', 0, 200000), \
+             (12, 1, '/tmp/c.m4b', 1, NULL)",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed files");
+        let files = load_active_files(&ctx.library, BookId(1))
+            .await
+            .expect("load");
+        assert_eq!(files.len(), 2, "only the two is_active=1 rows");
+        assert_eq!(files[0].file_id, 10);
+        assert_eq!(files[0].duration_ms, Some(100_000));
+        assert_eq!(files[1].file_id, 12);
+        assert_eq!(files[1].duration_ms, None, "NULL duration → None");
+    }
+
+    #[tokio::test]
+    async fn load_audiologos_by_kind_filters_and_decodes_fingerprint() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let ctx = fresh_ctx(tmp.path()).await;
+        let intro_fp = ab_fingerprint::fingerprint_to_bytes(&[1_u32, 2, 3]);
+        let outro_fp = ab_fingerprint::fingerprint_to_bytes(&[7_u32, 8]);
+        sqlx::query(
+            "INSERT INTO audiologos \
+             (audiologo_id, name, kind, fingerprint, duration_ms, match_threshold, verified_via) \
+             VALUES \
+             (1, 'intro-A', 'intro', ?, 5000, 0.85, 'seed'), \
+             (2, 'outro-A', 'outro', ?, 4000, 0.80, 'seed')",
+        )
+        .bind(&intro_fp)
+        .bind(&outro_fp)
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed audiologos");
+
+        let intros = load_audiologos_by_kind(&ctx.library, Kind::Intro)
+            .await
+            .expect("load intros");
+        assert_eq!(intros.len(), 1);
+        assert_eq!(intros[0].audiologo_id, 1);
+        assert_eq!(intros[0].fingerprint, vec![1_u32, 2, 3]);
+        assert_eq!(intros[0].duration_ms, 5000);
+        assert!((intros[0].match_threshold - 0.85).abs() < 1e-3);
+
+        let outros = load_audiologos_by_kind(&ctx.library, Kind::Outro)
+            .await
+            .expect("load outros");
+        assert_eq!(outros.len(), 1);
+        assert_eq!(outros[0].fingerprint, vec![7_u32, 8]);
+    }
+
+    #[tokio::test]
+    async fn fetch_brand_intro_duration_returns_none_when_null() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let ctx = fresh_ctx(tmp.path()).await;
+        sqlx::query("INSERT INTO books (book_id, title) VALUES (1, 'fixture')")
+            .execute(ctx.library.pool())
+            .await
+            .expect("seed");
+        let v = fetch_brand_intro_duration_ms(&ctx.library, BookId(1))
+            .await
+            .expect("fetch");
+        assert_eq!(v, None);
+    }
+
+    #[tokio::test]
+    async fn fetch_brand_intro_duration_returns_value_when_set() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let ctx = fresh_ctx(tmp.path()).await;
+        sqlx::query(
+            "INSERT INTO books (book_id, title, brand_intro_duration_ms) VALUES (1, 'fixture', 4321)",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed");
+        let v = fetch_brand_intro_duration_ms(&ctx.library, BookId(1))
+            .await
+            .expect("fetch");
+        assert_eq!(v, Some(4321));
     }
 
     #[tokio::test]
@@ -243,10 +574,7 @@ mod tests {
         .await
         .expect("seed progress");
 
-        DetectAudiologoStage::new()
-            .reset(&ctx, BookId(1))
-            .await
-            .expect("reset");
+        fresh_stage().reset(&ctx, BookId(1)).await.expect("reset");
 
         let row_100_status: String = sqlx::query_scalar(
             "SELECT status FROM book_file_audiologos WHERE audiologo_row_id = 100",

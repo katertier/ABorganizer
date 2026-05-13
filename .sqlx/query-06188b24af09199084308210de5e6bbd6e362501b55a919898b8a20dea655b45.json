@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT brand_intro_duration_ms FROM books WHERE book_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "brand_intro_duration_ms",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "06188b24af09199084308210de5e6bbd6e362501b55a919898b8a20dea655b45"
+}
