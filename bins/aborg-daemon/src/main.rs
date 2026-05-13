@@ -35,7 +35,9 @@ use std::sync::Arc;
 
 use ab_core::{Tunables, paths};
 use ab_db::{EphemeralDb, LibraryDb};
-use ab_pipeline::cleanup::{CleanupCtx, CleanupLoopCtx, CleanupRegistry, run_cleanup_loop};
+use ab_pipeline::cleanup::{
+    CleanupCtx, CleanupLoopCtx, CleanupRegistry, CleanupTarget, run_cleanup_loop,
+};
 use ab_pipeline::{Dag, Scheduler, Stage, StageContext};
 
 #[derive(Debug, Parser)]
@@ -198,6 +200,11 @@ fn build_pipeline_stages(tunables: &Tunables) -> Vec<Arc<dyn Stage>> {
 }
 
 #[tokio::main]
+// `main` glues together every long-running task (signals, DAG,
+// scheduler, three periodic loops, API + ABS servers). Each
+// section is already extracted; further fragmentation hides flow
+// more than it helps. Threshold cap is 100; we sit at ~102.
+#[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
     let args = Args::parse();
     logging::init();
@@ -251,11 +258,8 @@ async fn main() -> Result<()> {
         &tunables.scheduler,
     ));
 
-    // Idle-priority Speech-model installer. Spawned once at
-    // startup; wakes every `tunables.transcribe.idle_install_check_secs`
-    // to drain `pending_speech_installs` and re-queue any books
-    // that were blocked on the install. Cancellation flows
-    // through the shared `cancel` token alongside SIGTERM.
+    // Idle-priority Speech-model installer (slice 3A.4.1) — drains
+    // `pending_speech_installs` and re-queues blocked books.
     tokio::spawn(ab_transcript::run_idle_install_loop(
         ephemeral.clone(),
         Arc::clone(&scheduler),
@@ -263,18 +267,10 @@ async fn main() -> Result<()> {
         cancel.clone(),
     ));
 
-    // Periodic pipeline dispatcher (slice 1F.A3). Wakes every
-    // `tunables.scheduler.dispatcher_check_secs` to
-    //   (1) reap pipeline_progress rows whose book or files
-    //       no longer exist on disk, and
-    //   (2) sweep books for stages that have become eligible
-    //       (deps now satisfied) and submit one Background
-    //       job each.
-    // This is the safety-net path for the synchronous
-    // auto-dispatch in `Scheduler::execute` (A.2) — it
-    // catches freshly-scanned books with no progress rows,
-    // dropped submissions on a full channel, and retries
-    // after restart.
+    // Periodic pipeline dispatcher (1F.A3). Sweeps newly-ready
+    // (book, stage) pairs and reaps orphaned `running` rows.
+    // Safety net for the synchronous auto-dispatch in
+    // `Scheduler::execute`; idempotent on restart.
     tokio::spawn(scheduler.dispatcher_loop(
         library.clone(),
         ephemeral.clone(),
@@ -282,19 +278,20 @@ async fn main() -> Result<()> {
         cancel.clone(),
     ));
 
-    // Periodic cleanup loop (slice H.2.2, ADR-0025). Empty registry
-    // until H.2.3 — empty tick is a logging no-op.
+    // Periodic cleanup loop (H.2.2/H.2.3, ADR-0025). Registry is
+    // shared with the API surface so `aborg clean` and the
+    // autonomous tick agree on scope.
+    let cleanup = build_cleanup_registry();
     spawn_cleanup_loop(
         &library,
         &ephemeral,
         &storage_root,
         &tunables,
-        cancel.clone(),
+        cleanup.clone(),
+        &cancel,
     );
-
-    // Shared state for the API router. Carries the scheduler handle
-    // so the scan endpoint can submit new BookIds.
-    let api_state = ab_api::ApiState::new(library.clone(), ephemeral.clone(), scheduler, dag);
+    let api_state =
+        ab_api::ApiState::new(library.clone(), ephemeral.clone(), scheduler, dag, cleanup);
 
     // Build the unified Router for the API port (api + webuis).
     let mut router = Router::new()
@@ -362,28 +359,40 @@ async fn main() -> Result<()> {
 /// registered `CleanupTarget` to report what's eligible. v1 is
 /// observability-only — `auto_apply = false` inside the loop;
 /// operator applies via `aborg clean … --apply` (lands in H.2.3).
+/// Build + spawn the periodic cleanup loop. Caller owns the
+/// [`CleanupRegistry`] and a `&CancellationToken`; we clone what
+/// we need.
+#[allow(clippy::too_many_arguments)] // five strongly-typed inputs + cancel
 fn spawn_cleanup_loop(
     library: &LibraryDb,
     ephemeral: &EphemeralDb,
     storage_root: &std::path::Path,
     tunables: &Tunables,
-    cancel: CancellationToken,
+    registry: CleanupRegistry,
+    cancel: &CancellationToken,
 ) {
-    let registry = CleanupRegistry::new(vec![]);
-    let cleanup_ctx = CleanupCtx {
-        library: library.clone(),
-        ephemeral: ephemeral.clone(),
-    };
-    let disk_free = disk_usage::disk_free_for(storage_root);
-    tokio::spawn(run_cleanup_loop(
-        CleanupLoopCtx {
-            cleanup_ctx,
-            registry,
-            tunables: tunables.cleanup.clone(),
-            disk_free,
+    let ctx = CleanupLoopCtx {
+        cleanup_ctx: CleanupCtx {
+            library: library.clone(),
+            ephemeral: ephemeral.clone(),
         },
-        cancel,
-    ));
+        registry,
+        tunables: tunables.cleanup.clone(),
+        disk_free: disk_usage::disk_free_for(storage_root),
+    };
+    tokio::spawn(run_cleanup_loop(ctx, cancel.clone()));
+}
+
+/// Build the cleanup target registry. Each new target gets a line
+/// here — `Arc::new(NewTarget)` is the entire wire job.
+fn build_cleanup_registry() -> CleanupRegistry {
+    let targets: Vec<Arc<dyn CleanupTarget>> = vec![
+        // Queue: pairing codes past `expires_at` with no
+        // `consumed_token_id`. Consumed rows survive as an audit
+        // trail; only the dead-on-arrival pending codes go.
+        Arc::new(ab_api::ExpiredPairingCodesTarget),
+    ];
+    CleanupRegistry::new(targets)
 }
 
 fn spawn_signal_handlers(cancel: &CancellationToken) {

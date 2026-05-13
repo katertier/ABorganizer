@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM pairing_codes WHERE consumed_token_id IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "f921a91ac4a30ba7faf88cdaa3e49379c3213ee36ba095b941fedf2a20d03d0a"
+}
