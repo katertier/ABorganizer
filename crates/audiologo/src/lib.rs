@@ -232,8 +232,10 @@ impl Status {
     pub const fn can_transition_to(self, next: Self) -> bool {
         matches!(
             (self, next),
-            (Self::Candidate, Self::Applied | Self::Rejected | Self::ReDetected)
-                | (Self::Applied, Self::Rejected | Self::ReDetected)
+            (
+                Self::Candidate,
+                Self::Applied | Self::Rejected | Self::ReDetected
+            ) | (Self::Applied, Self::Rejected | Self::ReDetected)
         )
     }
 }
