@@ -266,6 +266,7 @@ dependencies = [
  "ab-db",
  "ab-pipeline",
  "async-trait",
+ "lofty",
  "sqlx",
  "tempfile",
  "tokio",

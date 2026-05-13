@@ -50,6 +50,7 @@
 
 pub mod stage;
 pub mod winners;
+pub mod write;
 
 /// Provenance-source convention for tags written via the web UI's
 /// metadata-edit endpoint (`PATCH /api/v1/books/{id}`).
