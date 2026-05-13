@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use ab_db::{EphemeralDb, LibraryDb};
+use ab_pipeline::cleanup::CleanupRegistry;
 use ab_pipeline::{Dag, Scheduler};
 
 /// Application state injected into every handler via axum's `State<>`.
@@ -25,6 +26,10 @@ pub struct ApiStateInner {
     /// stage names (e.g. the retry endpoint, ADR-0023) into the typed
     /// [`ab_pipeline::StageId`] the scheduler requires.
     pub dag: Arc<Dag>,
+    /// Registered cleanup targets (slice H.2.3, ADR-0025). The
+    /// periodic loop owns its own clone of this; the API surface
+    /// here drives the on-demand `aborg clean ...` flow.
+    pub cleanup: CleanupRegistry,
     /// Daemon start time (for `/health` uptime).
     pub started_at: std::time::Instant,
 }
@@ -36,6 +41,7 @@ impl ApiState {
         ephemeral: EphemeralDb,
         scheduler: Arc<Scheduler>,
         dag: Arc<Dag>,
+        cleanup: CleanupRegistry,
     ) -> Self {
         Self {
             inner: Arc::new(ApiStateInner {
@@ -43,6 +49,7 @@ impl ApiState {
                 ephemeral,
                 scheduler,
                 dag,
+                cleanup,
                 started_at: std::time::Instant::now(),
             }),
         }

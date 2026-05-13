@@ -26,6 +26,7 @@ ab-pipeline     = { workspace = true }
 ab-scan         = { workspace = true }
 ab-transcript   = { workspace = true }
 ab-speech       = { workspace = true }
+async-trait = { workspace = true }
 axum        = { workspace = true }
 chrono      = { workspace = true }
 serde       = { workspace = true }
