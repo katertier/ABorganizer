@@ -118,6 +118,14 @@ impl Stage for ConsensusStage {
         if promote_genres(&mut tx, book_id).await? {
             updates += 1;
         }
+        // Slice 10A: clean ": Subtitle" suffix out of books.title
+        // when books.subtitle is populated and matches. Conservative
+        // rule keeps legitimate colon-containing titles
+        // ("The 4-Hour Workweek: Escape 9-5") intact when no
+        // subtitle field is set.
+        if clean_title_subtitle(&mut tx, book_id).await? {
+            updates += 1;
+        }
 
         tx.commit()
             .await
@@ -434,6 +442,72 @@ async fn promote_genres(
     Ok(true)
 }
 
+/// Clean a `": Subtitle"` suffix out of `books.title` when
+/// `books.subtitle` already holds the same suffix (slice 10A).
+///
+/// Conservative rule: strip only when both fields are populated
+/// AND the colon-suffix in title matches the subtitle column. This
+/// avoids touching titles like "The 4-Hour Workweek: Escape 9-5"
+/// where the subtitle column is empty — the colon there is part
+/// of the title proper.
+///
+/// Returns `true` if any change was made; `false` is the
+/// idempotent re-run case (title was already clean).
+async fn clean_title_subtitle(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    book_id: BookId,
+) -> Result<bool> {
+    let id = book_id.0;
+    let row = sqlx::query!("SELECT title, subtitle FROM books WHERE book_id = ?", id,)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| Error::Database(format!("consensus title-subtitle read: {e}")))?;
+    let Some(row) = row else {
+        return Ok(false);
+    };
+    let Some(subtitle) = row.subtitle.as_deref() else {
+        return Ok(false);
+    };
+    let subtitle_trim = subtitle.trim();
+    if subtitle_trim.is_empty() {
+        return Ok(false);
+    }
+    let Some(cleaned) = strip_subtitle_suffix(&row.title, subtitle_trim) else {
+        return Ok(false);
+    };
+    sqlx::query!("UPDATE books SET title = ? WHERE book_id = ?", cleaned, id,)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| Error::Database(format!("consensus title-subtitle write: {e}")))?;
+    tracing::info!(
+        book = %book_id,
+        old_title = %row.title,
+        new_title = %cleaned,
+        "consensus.title.subtitle_stripped"
+    );
+    Ok(true)
+}
+
+/// Pure-text helper: when `title` ends with `": <subtitle>"` (or
+/// `" - <subtitle>"`), return the prefix; else `None`.
+/// Case-insensitive match on the suffix. Whitespace around the
+/// separator is permissive (`":  Subtitle"`, `" - Subtitle"`).
+fn strip_subtitle_suffix(title: &str, subtitle: &str) -> Option<String> {
+    for delim in [":", " - "] {
+        if let Some(idx) = title.rfind(delim) {
+            let after_idx = idx + delim.len();
+            let after = title[after_idx..].trim_start();
+            if after.eq_ignore_ascii_case(subtitle) {
+                let prefix = title[..idx].trim_end();
+                if !prefix.is_empty() {
+                    return Some(prefix.to_owned());
+                }
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
@@ -553,5 +627,94 @@ mod tests {
         let stage = ConsensusStage::new();
         let outcome = stage.run(&ctx, BookId(1)).await.expect("run");
         assert_eq!(outcome, StageOutcome::Skipped);
+    }
+
+    #[test]
+    fn strip_subtitle_suffix_colon_separator() {
+        assert_eq!(
+            strip_subtitle_suffix("Foundation: Empire", "Empire"),
+            Some("Foundation".to_owned())
+        );
+    }
+
+    #[test]
+    fn strip_subtitle_suffix_dash_separator() {
+        assert_eq!(
+            strip_subtitle_suffix(
+                "The Way of Kings - Stormlight Archive Book 1",
+                "Stormlight Archive Book 1"
+            ),
+            Some("The Way of Kings".to_owned())
+        );
+    }
+
+    #[test]
+    fn strip_subtitle_suffix_case_insensitive() {
+        assert_eq!(
+            strip_subtitle_suffix("Mistborn: the Final empire", "The Final Empire"),
+            Some("Mistborn".to_owned())
+        );
+    }
+
+    #[test]
+    fn strip_subtitle_suffix_extra_whitespace_after_separator() {
+        assert_eq!(
+            strip_subtitle_suffix("Title:    Sub", "Sub"),
+            Some("Title".to_owned())
+        );
+    }
+
+    #[test]
+    fn strip_subtitle_suffix_no_match_returns_none() {
+        // Colon present but suffix doesn't match — leave as is.
+        assert_eq!(
+            strip_subtitle_suffix("The 4-Hour Workweek: Escape 9-5", "Some Other Subtitle"),
+            None
+        );
+        // No separator at all.
+        assert_eq!(
+            strip_subtitle_suffix("The Final Empire", "The Final Empire"),
+            None
+        );
+    }
+
+    #[test]
+    fn strip_subtitle_suffix_empty_prefix_rejected() {
+        // ": Subtitle" alone — would leave empty title; refuse.
+        assert_eq!(strip_subtitle_suffix(": Subtitle", "Subtitle"), None);
+    }
+
+    #[tokio::test]
+    async fn consensus_strips_redundant_subtitle_from_title() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let ctx = fresh_ctx(tmp.path()).await;
+        // Seed a book whose title already includes the subtitle.
+        sqlx::query(
+            "INSERT INTO books (book_id, title, subtitle) VALUES \
+                 (1, 'Foundation: Empire', 'Empire')",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed book");
+        // Need at least one provenance row so the consensus stage
+        // reports `Done` (any column will do).
+        sqlx::query(
+            "INSERT INTO book_field_provenance \
+             (book_id, field, value, source, stage, confidence) \
+             VALUES (1, 'description', 'desc', 'audnexus_asin_us', 'audnexus-enrich', 0.95)",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed provenance");
+
+        let stage = ConsensusStage::new();
+        let outcome = stage.run(&ctx, BookId(1)).await.expect("run");
+        assert_eq!(outcome, StageOutcome::Done);
+
+        let title: String = sqlx::query_scalar("SELECT title FROM books WHERE book_id = 1")
+            .fetch_one(ctx.library.pool())
+            .await
+            .expect("read title");
+        assert_eq!(title, "Foundation", "subtitle suffix stripped");
     }
 }
