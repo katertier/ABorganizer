@@ -675,6 +675,22 @@ pub struct LlmTunables {
     /// `{name, aliases, role, description}` rows — 1500 tokens
     /// covers up to ~15 characters with brief descriptions.
     pub characters_max_tokens: usize,
+    /// Soft cap for the number of characters the prompt asks
+    /// for. 12 is the modal upper end for an audiobook cast:
+    /// 3-5 principals + a handful of recurring secondaries.
+    /// Schema-constrained generation can't enforce the array
+    /// length; the prompt restates the cap and the runtime
+    /// truncates defensively.
+    pub characters_max: usize,
+    /// Soft floor for the per-character `description` word
+    /// count. 20 words is two sentences max; below that the
+    /// descriptions lose tone signal.
+    pub character_desc_target_words_low: usize,
+    /// Soft cap for the per-character `description` word
+    /// count. 40 words is the point above which descriptions
+    /// start incorporating plot beats that belong in the arc
+    /// or summary stages.
+    pub character_desc_target_words_high: usize,
 }
 
 impl Default for LlmTunables {
@@ -693,6 +709,9 @@ impl Default for LlmTunables {
             arc_step_target_words_low: 30,
             arc_step_target_words_high: 50,
             characters_max_tokens: 1_500,
+            characters_max: 12,
+            character_desc_target_words_low: 20,
+            character_desc_target_words_high: 40,
         }
     }
 }

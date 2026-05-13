@@ -166,6 +166,14 @@ fn build_pipeline_stages(tunables: &Tunables) -> Vec<Arc<dyn Stage>> {
         // Spoiler-gating happens at the read surface, not the
         // model.
         Arc::new(ab_llm_extractors::ExtractStoryArcStage::new(&tunables.llm)),
+        // `extract-characters` (slice 3K.6) — Apple-Intelligence
+        // pass producing up to 12 characters per book into the
+        // `characters` table, with `is_pov` + 6 trait columns
+        // (migration 008). Depends on transcribe-full + summary
+        // per ADR-0022's per-book content extractor template.
+        Arc::new(ab_llm_extractors::ExtractCharactersStage::new(
+            &tunables.llm,
+        )),
         // `extract-summary-spoiler-free-series` (slice 3K.4.1) —
         // per-series spoiler-free synopsis, regenerated when a
         // book completes its own summary AND identity-resolve

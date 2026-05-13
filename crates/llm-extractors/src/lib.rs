@@ -20,10 +20,12 @@
 //! - [`ExtractStoryArcStage`] — 5-7 narrative beats into
 //!   `books.story_arc_json` (per ADR-0022 per-book content
 //!   extractor template).
-//!
-//! Planned (slice 3K.6):
-//!
-//! - Characters into the `characters` table.
+//! - [`ExtractCharactersStage`] — up to 12 characters per book
+//!   into the `characters` table, with `is_pov` + 6 optional
+//!   trait fields (species / condition / occupation / age /
+//!   gender / affiliation). Migration 008 adds the trait
+//!   columns; ADR-0022 § "Character trait taxonomy" is the
+//!   source of truth for what each field carries.
 //!
 //! All extractors follow the same pattern: idempotent re-runs
 //! keyed by `LlmTunables.extractor_version` stamped on the
@@ -38,6 +40,7 @@
 //! same pattern in slice C5.7.d.
 
 pub mod arc_stage;
+pub mod characters_stage;
 pub mod dna_stage;
 pub mod series_summary_stage;
 pub mod summary_stage;
@@ -45,6 +48,10 @@ pub mod summary_stage;
 pub use arc_stage::{
     ARC_SCHEMA_JSON, ArcBeat, ExtractStoryArcStage, STAGE_NAME as EXTRACT_STORY_ARC_STAGE,
     build_prompt as build_arc_prompt,
+};
+pub use characters_stage::{
+    CHARACTERS_SCHEMA_JSON, Character, ExtractCharactersStage,
+    STAGE_NAME as EXTRACT_CHARACTERS_STAGE, build_prompt as build_characters_prompt,
 };
 pub use dna_stage::{
     DNA_SCHEMA_JSON, ExtractDnaTagsStage, STAGE_NAME as EXTRACT_DNA_TAGS_STAGE, TAG_SOURCE_DNA_LLM,
