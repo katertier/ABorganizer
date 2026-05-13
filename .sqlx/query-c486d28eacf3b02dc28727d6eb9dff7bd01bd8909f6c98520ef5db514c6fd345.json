@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO book_narrator (book_id, narrator_id) VALUES (?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "c486d28eacf3b02dc28727d6eb9dff7bd01bd8909f6c98520ef5db514c6fd345"
+}

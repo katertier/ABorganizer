@@ -151,6 +151,32 @@ enum NamesAction {
         #[arg(long)]
         alias: String,
     },
+    /// List unresolved disambiguation rows. ADR-0026 H.3.6.
+    Pending,
+    /// Resolve a pending disambiguation. Either pick one of the
+    /// candidates by id, or create a new identity row.
+    ///
+    /// Examples:
+    ///
+    ///   aborg names resolve 7 --kind author --pick 12
+    ///   aborg names resolve 7 --kind author --create-new "Real Name" --audible-id B0X
+    Resolve {
+        /// Pending row id from `aborg names pending`.
+        pending_id: i64,
+        /// `author`, `narrator`, or `series`.
+        #[arg(long)]
+        kind: String,
+        /// Existing identity row to pick. Mutually exclusive with
+        /// `--create-new`.
+        #[arg(long, conflicts_with = "create_new")]
+        pick: Option<i64>,
+        /// Canonical name for a brand-new identity row.
+        #[arg(long, conflicts_with = "pick", requires = "kind")]
+        create_new: Option<String>,
+        /// Optional `audible_id` for the new identity row.
+        #[arg(long, requires = "create_new")]
+        audible_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -346,6 +372,27 @@ async fn main() -> Result<()> {
             }
             NamesAction::Exalt { id, kind, alias } => {
                 names_exalt(&cli.daemon, id, &kind, &alias, cli.output).await?;
+            }
+            NamesAction::Pending => {
+                names_pending(&cli.daemon, cli.output).await?;
+            }
+            NamesAction::Resolve {
+                pending_id,
+                kind,
+                pick,
+                create_new,
+                audible_id,
+            } => {
+                names_resolve(
+                    &cli.daemon,
+                    pending_id,
+                    &kind,
+                    pick,
+                    create_new.as_deref(),
+                    audible_id.as_deref(),
+                    cli.output,
+                )
+                .await?;
             }
         },
         Command::Clean {
@@ -877,6 +924,137 @@ async fn names_exalt(
     }
     let body: NamesActionResponse = resp.json().await.context("parse exalt response")?;
     print_names_action(&body, output);
+    Ok(())
+}
+
+#[derive(Deserialize, Debug, Serialize)]
+struct PendingCandidate {
+    id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    display: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    audible_id: Option<String>,
+    score: f64,
+}
+
+#[derive(Deserialize, Debug, Serialize)]
+struct PendingRow {
+    pending_id: i64,
+    kind: String,
+    book_id: i64,
+    observed_alias: String,
+    created_at: i64,
+    candidates: Vec<PendingCandidate>,
+}
+
+async fn names_pending(daemon: &str, output: OutputFormat) -> Result<()> {
+    let url = format!("{daemon}/api/v1/names/pending");
+    let resp = client()
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("pending list failed: HTTP {status}: {body}");
+    }
+    let rows: Vec<PendingRow> = resp.json().await.context("parse pending list")?;
+    match output {
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&rows).unwrap_or_default()
+            );
+        }
+        OutputFormat::Human => {
+            if rows.is_empty() {
+                println!("no pending disambiguations");
+            } else {
+                for r in &rows {
+                    println!(
+                        "pending #{} — {} book {} — observed `{}`",
+                        r.pending_id, r.kind, r.book_id, r.observed_alias
+                    );
+                    for c in &r.candidates {
+                        let display = c.display.as_deref().unwrap_or("?");
+                        let asin = c.audible_id.as_deref().unwrap_or("");
+                        println!(
+                            "  id {:>4}  score {:>4.2}  {}  {}",
+                            c.id, c.score, display, asin
+                        );
+                    }
+                }
+                println!("{} pending row(s)", rows.len());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct ResolveRequest<'a> {
+    kind: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pick: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    create_new: Option<ResolveCreateNew<'a>>,
+}
+
+#[derive(Serialize)]
+struct ResolveCreateNew<'a> {
+    name: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audible_id: Option<&'a str>,
+}
+
+#[derive(Deserialize, Debug, Serialize)]
+struct ResolveResponse {
+    pending_id: i64,
+    kind: String,
+    book_id: i64,
+    resolved_id: i64,
+}
+
+#[allow(clippy::too_many_arguments)] // CLI dispatch glue; bundling adds boilerplate without semantic gain
+async fn names_resolve(
+    daemon: &str,
+    pending_id: i64,
+    kind: &str,
+    pick: Option<i64>,
+    create_new: Option<&str>,
+    audible_id: Option<&str>,
+    output: OutputFormat,
+) -> Result<()> {
+    let url = format!("{daemon}/api/v1/names/pending/{pending_id}/resolve");
+    let body = ResolveRequest {
+        kind,
+        pick,
+        create_new: create_new.map(|name| ResolveCreateNew { name, audible_id }),
+    };
+    let resp = client()
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let txt = resp.text().await.unwrap_or_default();
+        anyhow::bail!("resolve failed: HTTP {status}: {txt}");
+    }
+    let r: ResolveResponse = resp.json().await.context("parse resolve response")?;
+    match output {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&r).unwrap_or_default());
+        }
+        OutputFormat::Human => {
+            println!(
+                "resolved #{} — {} book {} → {} id {}",
+                r.pending_id, r.kind, r.book_id, r.kind, r.resolved_id
+            );
+        }
+    }
     Ok(())
 }
 
