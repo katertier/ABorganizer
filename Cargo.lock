@@ -48,9 +48,17 @@ version = "0.1.0"
 dependencies = [
  "ab-audio",
  "ab-core",
+ "ab-db",
+ "ab-fingerprint",
+ "ab-pipeline",
  "ab-transcript",
+ "async-trait",
  "serde",
+ "sqlx",
+ "tempfile",
  "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
  "tracing",
 ]
 

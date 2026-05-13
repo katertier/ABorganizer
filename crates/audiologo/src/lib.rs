@@ -46,6 +46,10 @@ use serde::{Deserialize, Serialize};
 
 use ab_core::Result;
 
+pub mod stage;
+
+pub use stage::{DetectAudiologoStage, STAGE_ID as DETECT_AUDIOLOGO_STAGE_ID};
+
 /// Which side of the audio we're detecting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -77,37 +81,36 @@ impl std::fmt::Display for Kind {
 
 /// How a candidate detection was produced.
 ///
-/// The six tiers, ordered roughly by descending reliability:
+/// The five tiers, ordered roughly by descending reliability:
 ///
-/// 1. [`Method::CatalogBrandDuration`] — Phase-1 bootstrap from
-///    Audnexus's brand-intro/-outro durations (Audible-only).
-///    Confirmed by fingerprint match within the bootstrap
-///    window; un-confirmed catalog hints become
-///    `Status::Stripped` book-level state (Libation case).
-/// 2. [`Method::FingerprintFull`] — Whole jingle waveform
+/// 1. [`Method::FingerprintFull`] — Whole jingle waveform
 ///    matches a known `audiologos` row.
-/// 3. [`Method::FingerprintBookend`] — Start + end
+/// 2. [`Method::FingerprintBookend`] — Start + end
 ///    fingerprints match; middle may vary (publishers that
 ///    vary their voice line per book but keep stable bookends).
-/// 4. [`Method::FingerprintAndTranscript`] — Start fingerprint
+/// 3. [`Method::FingerprintAndTranscript`] — Start fingerprint
 ///    matches AND the transcript contains a publisher mention
 ///    that localises the cut's end.
-/// 5. [`Method::TranscriptOnly`] — Transcript contains a
+/// 4. [`Method::TranscriptOnly`] — Transcript contains a
 ///    publisher mention; silence (used as an internal
 ///    localiser only, never as a standalone signal) marks the
 ///    cut boundary.
-/// 6. [`Method::Manual`] — Operator-set cut via the CLI / API.
+/// 5. [`Method::Manual`] — Operator-set cut via the CLI / API.
 ///
 /// `SilenceOnly` from the pre-4A scaffold is dropped (silence
 /// is not a reliable jingle indicator per the user's empirical
-/// experience; it stays internal to tiers 4 + 5 only).
+/// experience; it stays internal to tiers 3 + 4 only).
+///
+/// `CatalogBrandDuration` from the original ADR-0024 is dropped
+/// in Revision 2 (2026-05-13): Audnexus brand-duration is only
+/// available for Audible books, and for those we already have
+/// the matching fingerprints. The brand-duration value is still
+/// persisted (`books.brand_intro_duration_ms` / `_outro_ms`),
+/// but only as input to chapter-mark recomputation + the
+/// Libation-stripped path — not as a detection tier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Method {
-    /// Phase-1 bootstrap (slice 4B): Audnexus `brand_duration`
-    /// tells us *where* to sample-and-fingerprint; the
-    /// resulting match confirms the trim should apply.
-    CatalogBrandDuration,
     /// Full jingle waveform matches an existing audiologos row.
     FingerprintFull,
     /// Start + end fingerprints match (mid-jingle may vary).
@@ -127,7 +130,6 @@ impl Method {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::CatalogBrandDuration => "catalog_brand_duration",
             Self::FingerprintFull => "fingerprint_full",
             Self::FingerprintBookend => "fingerprint_bookend",
             Self::FingerprintAndTranscript => "fingerprint_and_transcript",
@@ -138,11 +140,11 @@ impl Method {
 
     /// Parse the `method` column back into the typed enum.
     /// Returns `None` for unknown strings — callers treat
-    /// these as legacy / pre-4A rows.
+    /// these as legacy / pre-4A rows (or pre-Revision-2 rows
+    /// for the dropped `catalog_brand_duration` value).
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "catalog_brand_duration" => Some(Self::CatalogBrandDuration),
             "fingerprint_full" => Some(Self::FingerprintFull),
             "fingerprint_bookend" => Some(Self::FingerprintBookend),
             "fingerprint_and_transcript" => Some(Self::FingerprintAndTranscript),
@@ -156,16 +158,13 @@ impl Method {
     /// state) when its confidence clears the per-Method floor?
     ///
     /// The two transcript-bearing tiers always stay as
-    /// candidates; the user reviews them. The first three
+    /// candidates; the user reviews them. The two
     /// fingerprint-bearing methods + Manual auto-apply.
     #[must_use]
     pub const fn auto_applies(self) -> bool {
         matches!(
             self,
-            Self::CatalogBrandDuration
-                | Self::FingerprintFull
-                | Self::FingerprintBookend
-                | Self::Manual,
+            Self::FingerprintFull | Self::FingerprintBookend | Self::Manual,
         )
     }
 }
@@ -407,7 +406,6 @@ mod tests {
     #[test]
     fn method_round_trips_every_variant() {
         for m in [
-            Method::CatalogBrandDuration,
             Method::FingerprintFull,
             Method::FingerprintBookend,
             Method::FingerprintAndTranscript,
@@ -420,19 +418,20 @@ mod tests {
 
     #[test]
     fn method_parse_unknown_returns_none() {
-        // 4A drops `silence_only` from the enum; legacy
-        // strings parse as None so callers can flag them.
+        // 4A drops `silence_only` from the enum; Revision 2
+        // (slice 4B prep) drops `catalog_brand_duration`. Both
+        // legacy strings parse as None so callers can flag them.
         assert!(Method::parse("silence_only").is_none());
+        assert!(Method::parse("catalog_brand_duration").is_none());
         assert!(Method::parse("").is_none());
         assert!(Method::parse("FINGERPRINT_FULL").is_none());
     }
 
     #[test]
     fn auto_applies_covers_only_the_right_methods() {
-        // Per ADR-0024: catalog + fp_full + fp_bookend + manual
+        // Per ADR-0024 Revision 2: fp_full + fp_bookend + manual
         // auto-apply; the two transcript-bearing tiers stay as
         // candidates for user review.
-        assert!(Method::CatalogBrandDuration.auto_applies());
         assert!(Method::FingerprintFull.auto_applies());
         assert!(Method::FingerprintBookend.auto_applies());
         assert!(Method::Manual.auto_applies());
