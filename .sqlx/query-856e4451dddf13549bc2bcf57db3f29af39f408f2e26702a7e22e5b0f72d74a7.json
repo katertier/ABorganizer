@@ -1,0 +1,86 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n              bfa.audiologo_row_id AS \"row_id!: i64\",\n              b.book_id            AS \"book_id!: i64\",\n              b.title              AS book_title,\n              bfa.file_id,\n              bf.file_path,\n              bfa.kind,\n              bfa.jingle_start_ms,\n              bfa.jingle_end_ms,\n              bfa.method,\n              bfa.confidence,\n              bfa.audiologo_id,\n              al.name              AS audiologo_name\n            FROM book_file_audiologos bfa\n            JOIN book_files bf ON bf.file_id = bfa.file_id\n            JOIN books b ON b.book_id = bf.book_id\n            LEFT JOIN audiologos al ON al.audiologo_id = bfa.audiologo_id\n           WHERE bfa.status = 'candidate'\n           ORDER BY b.book_id, bfa.file_id, bfa.audiologo_row_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "row_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "book_id!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "book_title",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "file_id",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "file_path",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "kind",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "jingle_start_ms",
+        "ordinal": 6,
+        "type_info": "Integer"
+      },
+      {
+        "name": "jingle_end_ms",
+        "ordinal": 7,
+        "type_info": "Integer"
+      },
+      {
+        "name": "method",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "confidence",
+        "ordinal": 9,
+        "type_info": "Float"
+      },
+      {
+        "name": "audiologo_id",
+        "ordinal": 10,
+        "type_info": "Integer"
+      },
+      {
+        "name": "audiologo_name",
+        "ordinal": 11,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "856e4451dddf13549bc2bcf57db3f29af39f408f2e26702a7e22e5b0f72d74a7"
+}

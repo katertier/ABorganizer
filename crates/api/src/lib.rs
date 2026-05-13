@@ -19,6 +19,7 @@
 #![allow(missing_docs)] // scaffold
 
 pub mod audiologo_apply;
+pub mod audiologo_review;
 pub mod cleanup_targets;
 pub mod error;
 pub mod names;

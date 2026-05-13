@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE audiologos\n              SET verified_via = 'review_confirmed',\n                  updated_at = strftime('%s','now')\n            WHERE audiologo_id = ?\n              AND verified_via = 'silence'\n              AND match_count >= ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "9d2970b728c389897fbddee640f9fc0168b5d09a5806428d26fcc587164c0dec"
+}
