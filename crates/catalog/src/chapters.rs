@@ -1,12 +1,23 @@
 //! Audnexus chapters stage.
 //!
 //! Fetches `GET /books/{asin}/chapters` for each enriched book,
-//! walks the configured region order until a hit, persists the
-//! returned chapter list to the `chapters` table (`source =
-//! 'audnexus'`), and writes the brand intro / outro durations to
-//! `books.audiologo_intro_ms` / `audiologo_outro_ms` so the
-//! player can skip publisher jingles before the audiologo-trim
-//! stage exists.
+//! walks the configured region order until a hit, and persists
+//! the returned chapter list to the `chapters` table (`source =
+//! 'audnexus'`).
+//!
+//! ## Brand-duration handling
+//!
+//! Pre-4A this stage also wrote `chapters.brand_intro_duration_ms`
+//! / `brand_outro_duration_ms` into the head-cut columns
+//! `books.audiologo_intro_ms` / `audiologo_outro_ms`. Migration
+//! 010 deprecated those columns: audiologo trims are now per-file
+//! splice rows in `book_file_audiologos` (not head-cut book-level
+//! durations), and the Audnexus brand-duration value is a
+//! bootstrap **hint** consumed by the future audiologo-detect
+//! stage (per ADR-0024 `Method::CatalogBrandDuration`), not
+//! promoted to a column. The full Audnexus chapters payload is
+//! cached in `ai_cache` already, so the detect stage reads the
+//! hint from there — no extra persistence here.
 //!
 //! # Source-of-truth ordering
 //!
@@ -196,28 +207,13 @@ async fn write_chapters(
         .map_err(|e| Error::Database(format!("chapters insert idx={idx}: {e}")))?;
     }
 
-    let intro_ms = i64::try_from(chapters.brand_intro_duration_ms).unwrap_or(i64::MAX);
-    let outro_ms = i64::try_from(chapters.brand_outro_duration_ms).unwrap_or(i64::MAX);
-    if chapters.brand_intro_duration_ms > 0 {
-        sqlx::query!(
-            "UPDATE books SET audiologo_intro_ms = ? WHERE book_id = ?",
-            intro_ms,
-            id,
-        )
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| Error::Database(format!("books.audiologo_intro_ms write: {e}")))?;
-    }
-    if chapters.brand_outro_duration_ms > 0 {
-        sqlx::query!(
-            "UPDATE books SET audiologo_outro_ms = ? WHERE book_id = ?",
-            outro_ms,
-            id,
-        )
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| Error::Database(format!("books.audiologo_outro_ms write: {e}")))?;
-    }
+    // brand_intro_duration_ms / brand_outro_duration_ms from
+    // the Audnexus payload are NOT promoted to a column. Migration
+    // 010 deprecated `books.audiologo_intro_ms` / `_outro_ms`;
+    // the future audiologo-detect stage reads the brand-duration
+    // hint from the cached Audnexus response (ai_cache) when it
+    // needs to bootstrap a `Method::CatalogBrandDuration`
+    // detection. See module docstring + ADR-0024.
 
     tx.commit()
         .await
@@ -258,7 +254,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_chapters_persists_chapters_and_brand_markers() {
+    async fn write_chapters_persists_chapter_rows() {
         let tmp = TempDir::new().expect("tmpdir");
         let ctx = fresh_ctx(tmp.path()).await;
         sqlx::query("INSERT INTO books (book_id, title) VALUES (1, 'fixture')")
@@ -307,18 +303,22 @@ mod tests {
             (1, 60_000, 180_000, "Chapter 2".into(), "audnexus".into())
         );
 
+        // Pin the 4A+ contract: the brand-duration hint is NOT
+        // promoted to the deprecated `books.audiologo_intro_ms`
+        // / `_outro_ms` columns. The detect stage reads it from
+        // the cached Audnexus payload when needed.
         let intro: Option<i64> =
             sqlx::query_scalar("SELECT audiologo_intro_ms FROM books WHERE book_id = 1")
                 .fetch_one(ctx.library.pool())
                 .await
                 .expect("intro");
-        assert_eq!(intro, Some(4500));
+        assert_eq!(intro, None);
         let outro: Option<i64> =
             sqlx::query_scalar("SELECT audiologo_outro_ms FROM books WHERE book_id = 1")
                 .fetch_one(ctx.library.pool())
                 .await
                 .expect("outro");
-        assert_eq!(outro, Some(3000));
+        assert_eq!(outro, None);
     }
 
     #[tokio::test]
