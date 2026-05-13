@@ -154,21 +154,29 @@ enum BookAction {
     List,
     /// Show details of one book (not yet implemented).
     Show { id: i64 },
-    /// Force re-extraction of one stage for one book.
+    /// Force re-extraction of one or more stages for one book.
     ///
-    /// Clears the matching `ai_cache` row (if any) and the
-    /// `pipeline_progress` row, then submits a new background-
-    /// priority job. ADR-0023. Generic across every registered
-    /// pipeline stage (`tag-read`, `extract-summary-spoiler-free`,
-    /// `transcribe-full`, …).
+    /// Calls `Stage::reset()` for each requested stage (which
+    /// clears the matching `ai_cache`, `book_field_provenance`,
+    /// and `pipeline_progress` rows plus any stage-specific
+    /// state), then submits each at background priority. The
+    /// operator names the exact set; no implicit cascade.
+    /// ADR-0023.
+    ///
+    /// Examples:
+    ///
+    ///   aborg book retry 42 --stage tag-read
+    ///   aborg book retry 42 --stage tag-read,fingerprint
+    ///   aborg book retry 42 --stage all
     Retry {
         /// Book ID — matches `books.book_id`.
         book_id: i64,
-        /// Stage to retry — matches a registered stage name.
+        /// Stage(s) to retry. Comma-separated list of registered
+        /// stage names, OR the literal `all` for every stage.
         /// On unknown stage the daemon returns 400 with a list
         /// of known names in the response body.
-        #[arg(long)]
-        stage: String,
+        #[arg(long, value_delimiter = ',', num_args = 1.., required = true)]
+        stage: Vec<String>,
     },
 }
 
@@ -227,7 +235,8 @@ async fn main() -> Result<()> {
             BookAction::Show { id } => tracing::info!(id, "book.show: not yet implemented"),
             BookAction::Retry { book_id, stage } => {
                 book_retry(&cli.daemon, book_id, &stage, cli.output).await?;
-            }
+            } // (Note: BookAction::Retry above carries `stage:
+              // Vec<String>` post-H.1.6.)
         },
         Command::Daemon { action: _ } => {
             tracing::warn!("daemon control not yet implemented in slice 1A");
@@ -350,51 +359,90 @@ struct BooksResponse {
     books: Vec<BookRow>,
 }
 
+/// Wire form of `stages`. Untagged so the operator can pass
+/// either a JSON array OR the literal `"all"`.
+#[derive(Serialize, Debug)]
+#[serde(untagged)]
+enum StagesPayload<'a> {
+    /// One or more explicit stage names.
+    List(&'a [String]),
+    /// `"all"` — every registered stage.
+    Wildcard(&'static str),
+}
+
 #[derive(Serialize, Debug)]
 struct RetryRequest<'a> {
-    stage: &'a str,
+    stages: StagesPayload<'a>,
+}
+
+#[derive(Deserialize, Debug, Serialize)]
+struct RetryStageResult {
+    stage: String,
+    reset_cleared_state: bool,
+    submitted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Serialize)]
 struct RetryResponse {
     book_id: i64,
-    stage: String,
     submitted_at: String,
-    cache_cleared: bool,
-    pipeline_progress_cleared: bool,
+    results: Vec<RetryStageResult>,
 }
 
 #[derive(Deserialize, Debug)]
 struct UnknownStageProblem {
     detail: String,
+    #[serde(default)]
     known_stages: Vec<String>,
 }
 
-/// `aborg book retry <book_id> --stage <stage>` — thin shim
-/// over `POST /api/v1/books/{book_id}/retry`. ADR-0023.
+/// `aborg book retry <book_id> --stage <s>[,<s>...|all]` —
+/// thin shim over `POST /api/v1/books/{book_id}/retry`.
+/// ADR-0023 (multi-stage extension landed in slice H.1.6).
 ///
-/// On a 400 the daemon body carries `known_stages`; we surface
-/// those to the user so a typo is recoverable. On a 404 we
-/// surface the body's `detail` field. Network failures (daemon
-/// down) propagate as `anyhow::Error`.
-async fn book_retry(daemon: &str, book_id: i64, stage: &str, output: OutputFormat) -> Result<()> {
+/// The CLI accepts comma-separated names (or repeated
+/// `--stage`) for a list, or the literal `all` token to expand
+/// to every registered stage. On a 400 the daemon body
+/// carries `known_stages` (when applicable); we surface those
+/// to the user so a typo is recoverable. Network failures
+/// (daemon down) propagate as `anyhow::Error`.
+async fn book_retry(
+    daemon: &str,
+    book_id: i64,
+    stage: &[String],
+    output: OutputFormat,
+) -> Result<()> {
     let url = format!("{daemon}/api/v1/books/{book_id}/retry");
+    // Detect the `all` wildcard. Accept both
+    // `--stage all` and `--stage ALL`; reject mixed usage
+    // (`--stage tag-read,all`) since that's ambiguous.
+    let is_all = stage.iter().any(|s| s.eq_ignore_ascii_case("all"));
+    if is_all && stage.len() > 1 {
+        anyhow::bail!("--stage all must appear alone; got mixed list: {stage:?}");
+    }
+    let payload = if is_all {
+        StagesPayload::Wildcard("all")
+    } else {
+        StagesPayload::List(stage)
+    };
     let resp = client()
         .post(&url)
-        .json(&RetryRequest { stage })
+        .json(&RetryRequest { stages: payload })
         .send()
         .await
         .with_context(|| format!("POST {url}"))?;
 
     let status = resp.status();
     if status == reqwest::StatusCode::BAD_REQUEST {
-        // Try to decode the known_stages list. Surface as a
-        // clean human-readable message; fall through to the
-        // generic error path on a malformed body.
         let problem: UnknownStageProblem = resp
             .json()
             .await
             .context("decode 400 body for unknown-stage detail")?;
+        if problem.known_stages.is_empty() {
+            anyhow::bail!("{}", problem.detail);
+        }
         anyhow::bail!(
             "{}\nknown stages: {}",
             problem.detail,
@@ -415,13 +463,29 @@ async fn book_retry(daemon: &str, book_id: i64, stage: &str, output: OutputForma
             );
         }
         OutputFormat::Human => {
+            for r in &body.results {
+                if let Some(err) = &r.error {
+                    tracing::warn!(
+                        book_id = body.book_id,
+                        stage = %r.stage,
+                        error = %err,
+                        "retry stage failed"
+                    );
+                } else {
+                    tracing::info!(
+                        book_id = body.book_id,
+                        stage = %r.stage,
+                        cleared = r.reset_cleared_state,
+                        submitted = r.submitted,
+                        "retry submitted"
+                    );
+                }
+            }
             tracing::info!(
                 book_id = body.book_id,
-                stage = %body.stage,
-                cache_cleared = body.cache_cleared,
-                progress_cleared = body.pipeline_progress_cleared,
+                stages = body.results.len(),
                 submitted_at = %body.submitted_at,
-                "retry submitted",
+                "retry summary"
             );
         }
     }
