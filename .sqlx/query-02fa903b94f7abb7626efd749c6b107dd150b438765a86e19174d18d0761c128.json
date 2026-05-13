@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT  bf.file_id   AS \"file_id!: i64\",\n                bf.file_path AS \"file_path!: String\",\n                bf.file_size AS \"file_size: i64\"\n          FROM book_files bf\n         WHERE bf.is_active = 1\n           AND bf.format IS NOT NULL\n           AND bf.format != 'm4b'\n           AND EXISTS (\n               SELECT 1 FROM book_files m4b\n                WHERE m4b.book_id   = bf.book_id\n                  AND m4b.is_active = 1\n                  AND m4b.format    = 'm4b'\n                  AND m4b.file_id   != bf.file_id\n           )\n           AND NOT EXISTS (\n               SELECT 1 FROM book_file_refs r\n                WHERE r.file_id    = bf.file_id\n                  AND r.released_at IS NULL\n           )\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "file_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "file_path!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "file_size: i64",
+        "ordinal": 2,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "02fa903b94f7abb7626efd749c6b107dd150b438765a86e19174d18d0761c128"
+}

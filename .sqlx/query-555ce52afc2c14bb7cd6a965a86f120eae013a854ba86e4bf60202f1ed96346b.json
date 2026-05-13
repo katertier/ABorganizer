@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE book_files SET is_active = 0 WHERE file_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "555ce52afc2c14bb7cd6a965a86f120eae013a854ba86e4bf60202f1ed96346b"
+}

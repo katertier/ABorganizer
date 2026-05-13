@@ -17,6 +17,7 @@
 
 #![allow(missing_docs)] // scaffold; will be tightened as queries land
 
+pub mod book_file_refs;
 pub mod ephemeral;
 pub mod library;
 pub mod migrations;
