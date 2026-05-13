@@ -371,6 +371,12 @@ async fn resolve_series(
         .map_err(|e| Error::Database(format!("identity insert book_series: {e}")))?;
     }
 
+    // Slice 10B: recompute franchise prefix for every series this
+    // book now belongs to. Cheap (series have ≤ tens of members
+    // typically); always-on so a new book joining a series
+    // refreshes the prefix without an explicit verb.
+    crate::franchise::recompute_franchise_for_book(tx, id).await?;
+
     Ok(entries.len())
 }
 

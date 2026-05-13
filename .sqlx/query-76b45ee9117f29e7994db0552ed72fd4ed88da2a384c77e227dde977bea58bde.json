@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT b.book_id AS \"book_id!: i64\", b.title FROM books b JOIN book_series bs ON bs.book_id = b.book_id WHERE bs.series_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "book_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "title",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "76b45ee9117f29e7994db0552ed72fd4ed88da2a384c77e227dde977bea58bde"
+}

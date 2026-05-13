@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE series SET franchise_prefix = ? WHERE series_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "bc2b7813ea8987aa8fc51124dd4d6719d22bbf91cf2a01ba5cec87792354062f"
+}
