@@ -6,9 +6,8 @@
 //!
 //! ## Field coverage
 //!
-//! The first slice maps the 8 fields where the
-//! ID3 / MP4 / Vorbis-comments tag systems agree on a canonical
-//! item key. Symmetric with [`ab_tag_read`]'s read path:
+//! 12 of 16 `book_field_provenance` fields map to a canonical
+//! lofty key. Symmetric with [`ab_tag_read`]'s read path:
 //!
 //! | `Field`          | lofty mapping                                     |
 //! |------------------|---------------------------------------------------|
@@ -16,17 +15,23 @@
 //! | `Author`         | `Tag::set_artist` (typed accessor)               |
 //! | `Series`         | `Tag::set_album`  (typed accessor; audiobook    |
 //! |                  | convention — `Album` carries the series name)    |
+//! | `Subtitle`       | `ItemKey::TrackSubtitle` (TIT3)                  |
+//! | `Description`    | `ItemKey::Comment` (audiobook synopsis in COMM)  |
 //! | `Language`       | `ItemKey::Language`                              |
+//! | `ReleaseDate`    | `ItemKey::RecordingDate` (TDRC / Year)           |
 //! | `Genre`          | `ItemKey::Genre`                                 |
 //! | `Publisher`      | `ItemKey::Publisher`                             |
+//! | `Narrator`       | `ItemKey::Composer` (audiobook conv: TCOM)       |
 //! | `Asin`           | `ItemKey::CatalogNumber`                         |
 //! | `Isbn`           | `ItemKey::Isrc`                                  |
 //!
-//! The remaining 8 fields (`Subtitle`, `Description`,
-//! `ReleaseDate`, `DurationSeconds`, `Narrator`, `CoverUrl`,
-//! `Abridged`, `Explicit`) need either custom item keys or
-//! special handling (cover art is a `Picture`, not a string);
-//! they ship in a follow-up slice.
+//! The remaining 4 fields are deliberately unmapped:
+//!
+//! - `DurationSeconds` — derived from decode, not a tag frame.
+//! - `CoverUrl` — cover art is a `Picture` blob; needs a
+//!   fetch-then-embed slice.
+//! - `Abridged` / `Explicit` — no canonical standard tag;
+//!   custom-key handling slated for a follow-up.
 //!
 //! ## Idempotence
 //!
@@ -187,14 +192,44 @@ fn apply_winner(tag: &mut Tag, winner: &FieldWinner) -> FieldWriteOutcome {
         Field::Asin => set_item_if_changed(tag, ItemKey::CatalogNumber, new_value),
         Field::Isbn => set_item_if_changed(tag, ItemKey::Isrc, new_value),
 
-        Field::Subtitle
-        | Field::Description
-        | Field::ReleaseDate
-        | Field::DurationSeconds
-        | Field::Narrator
-        | Field::CoverUrl
-        | Field::Abridged
-        | Field::Explicit => FieldWriteOutcome::Unmapped,
+        // Slice 2 of the field-mapping expansion. Lofty's
+        // `ItemKey` enumerates the standard tag keys; each
+        // here lands the field on the format-specific frame
+        // (ID3 `TIT3` / `COMM` / `TDRC` / `TCOM`; the MP4
+        // and Vorbis equivalents) without per-format
+        // branching.
+        Field::Subtitle => set_item_if_changed(tag, ItemKey::TrackSubtitle, new_value),
+        // Audiobook description / synopsis lands in the
+        // generic Comment frame. ID3v2 `COMM`, MP4 `©cmt`,
+        // Vorbis `COMMENT` — same logical home everywhere.
+        Field::Description => set_item_if_changed(tag, ItemKey::Comment, new_value),
+        // `RecordingDate` (ID3 `TDRC` / "Year") is the
+        // ecosystem's de-facto release-date frame even when
+        // the value is a full ISO-8601 date string —
+        // lofty's `ItemKey` docs call this out explicitly
+        // ("Year" used even for full date strings).
+        Field::ReleaseDate => set_item_if_changed(tag, ItemKey::RecordingDate, new_value),
+        // Audiobook convention: narrator goes in the
+        // Composer frame (ID3 `TCOM`, MP4 `©wrt`). Both
+        // ABS and the older ABtagger workflow round-trip
+        // through this key.
+        Field::Narrator => set_item_if_changed(tag, ItemKey::Composer, new_value),
+
+        // Remaining unmapped fields:
+        //
+        // - `DurationSeconds` — typically derived from the
+        //   audio decode, not a separate tag frame. The
+        //   `book_field_provenance.duration_seconds` row
+        //   carries the consensus winner but a future
+        //   "duration-as-tag" surface needs design work.
+        // - `CoverUrl` — cover art is a `Picture` blob, not
+        //   a string; needs a fetch-then-embed slice.
+        // - `Abridged` / `Explicit` — no canonical standard
+        //   tag; usually custom keys per encoder. Skipped
+        //   until the convention question is decided.
+        Field::DurationSeconds | Field::CoverUrl | Field::Abridged | Field::Explicit => {
+            FieldWriteOutcome::Unmapped
+        }
     }
 }
 
@@ -215,15 +250,13 @@ mod tests {
 
     #[test]
     fn unmapped_fields_return_unmapped_outcome() {
-        // The 8 unmapped variants from the table in the module
-        // doc all return Unmapped today; pin so the field-set
-        // doesn't drift without a docstring update.
+        // The 4 still-unmapped variants from the table in the
+        // module doc all return Unmapped today; pin so the
+        // field-set doesn't drift without a docstring update.
+        // (Slice 1 listed 8 unmapped; slice 2 added Subtitle,
+        // Description, ReleaseDate, Narrator — now 4.)
         let v: Vec<(Field, FieldWriteOutcome)> = [
-            Field::Subtitle,
-            Field::Description,
-            Field::ReleaseDate,
             Field::DurationSeconds,
-            Field::Narrator,
             Field::CoverUrl,
             Field::Abridged,
             Field::Explicit,
@@ -263,6 +296,38 @@ mod tests {
             source: "any".to_owned(),
         };
         assert_eq!(apply_winner(&mut tag, &empty), FieldWriteOutcome::Unmapped);
+    }
+
+    #[test]
+    fn newly_mapped_fields_write_to_expected_item_keys() {
+        // Pin the four mappings added in slice 2 (Subtitle,
+        // Description, ReleaseDate, Narrator). If a future
+        // lofty bump renames any of these ItemKeys this test
+        // turns red before the runtime hit.
+        let cases: &[(Field, ItemKey, &str)] = &[
+            (Field::Subtitle, ItemKey::TrackSubtitle, "Vol. 1"),
+            (Field::Description, ItemKey::Comment, "An adventure tale"),
+            (Field::ReleaseDate, ItemKey::RecordingDate, "1951-06-01"),
+            (Field::Narrator, ItemKey::Composer, "Scott Brick"),
+        ];
+        for (field, expected_key, value) in cases {
+            let mut tag = Tag::new(lofty::tag::TagType::Id3v2);
+            let w = FieldWinner {
+                field: *field,
+                value: Some((*value).to_owned()),
+                source: "audnexus-enrich".to_owned(),
+            };
+            assert_eq!(
+                apply_winner(&mut tag, &w),
+                FieldWriteOutcome::Changed,
+                "{field:?} should write"
+            );
+            assert_eq!(
+                tag.get_string(*expected_key),
+                Some(*value),
+                "{field:?} should land on {expected_key:?}"
+            );
+        }
     }
 
     #[test]
