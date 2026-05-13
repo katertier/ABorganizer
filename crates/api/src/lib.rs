@@ -19,10 +19,12 @@
 #![allow(missing_docs)] // scaffold
 
 pub mod audiologo_apply;
+pub mod cleanup_targets;
 pub mod error;
 pub mod router;
 pub mod state;
 
+pub use cleanup_targets::ExpiredPairingCodesTarget;
 pub use error::ApiError;
 pub use router::build_router;
 pub use state::ApiState;

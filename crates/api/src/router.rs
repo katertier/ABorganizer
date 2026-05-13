@@ -33,7 +33,167 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/books", get(books_list))
         .route("/books/{book_id}/retry", post(books_retry_stage))
         .route("/books/{book_id}/audiologo", post(books_audiologo_cut))
+        .route("/clean/usage", get(clean_usage))
+        .route("/clean/run", post(clean_run))
         .with_state(state)
+}
+
+// ── Cleanup (slice H.2.3, ADR-0025) ────────────────────────────────
+
+/// Optional `?category=disk|db|queue` filter on `GET /clean/usage`.
+#[derive(Deserialize)]
+struct CleanUsageQuery {
+    /// Restrict the dry-run sweep to one category. Absent → every
+    /// registered target reports.
+    category: Option<String>,
+}
+
+/// Per-target row in the cleanup response. Mirrors
+/// [`ab_core::cleanup::CleanupReport`] with the category serialized
+/// as its lowercase wire form.
+#[derive(Serialize)]
+struct CleanReportRow {
+    category: String,
+    name: String,
+    items: u64,
+    bytes: u64,
+}
+
+impl From<ab_core::cleanup::CleanupReport> for CleanReportRow {
+    fn from(r: ab_core::cleanup::CleanupReport) -> Self {
+        Self {
+            category: r.category.to_string(),
+            name: r.name,
+            items: r.items,
+            bytes: r.bytes,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct CleanUsageResponse {
+    /// Effective age cut-off (seconds) — same value targets see in
+    /// their `Policy.age_seconds`. Surfaces what the disk-pressure
+    /// ratchet picked so operators can see whether any tier
+    /// triggered.
+    age_seconds: i64,
+    /// Per-target reports in registration order.
+    targets: Vec<CleanReportRow>,
+}
+
+/// `GET /api/v1/clean/usage` — dry-run sweep across every registered
+/// cleanup target (or just one category when `?category=` is set).
+///
+/// No state mutation. The response mirrors the `aborg clean`
+/// summary the CLI prints. Disk pressure is computed from
+/// `(u64::MAX, u64::MAX)` — the API surface intentionally doesn't
+/// re-stat the disk per request; the periodic loop is the source of
+/// truth for ratchet activation. Operators who want to force a
+/// tighter age can pass `force=true` on `POST /clean/run`.
+async fn clean_usage(
+    State(state): State<ApiState>,
+    axum::extract::Query(q): axum::extract::Query<CleanUsageQuery>,
+) -> Result<Json<CleanUsageResponse>, ApiError> {
+    let category = match q.category.as_deref() {
+        None => None,
+        Some(s) => Some(ab_core::cleanup::Category::parse(s).ok_or_else(|| {
+            ApiError::BadRequest(format!("unknown category `{s}` (valid: disk, db, queue)"))
+        })?),
+    };
+    let tunables = ab_core::tunables::CleanupTunables::default();
+    let age_seconds = ab_core::cleanup::compute_age_seconds(&tunables, u64::MAX, u64::MAX);
+    let policy = ab_core::cleanup::Policy::dry_run(age_seconds);
+    let cleanup_ctx = ab_pipeline::cleanup::CleanupCtx {
+        library: state.inner.library.clone(),
+        ephemeral: state.inner.ephemeral.clone(),
+    };
+    let mut rows: Vec<CleanReportRow> = Vec::new();
+    for target in state.inner.cleanup.iter() {
+        if let Some(want) = category {
+            if target.category() != want {
+                continue;
+            }
+        }
+        match target.report(&cleanup_ctx, &policy).await {
+            Ok(r) => rows.push(r.into()),
+            Err(e) => {
+                tracing::warn!(
+                    target = target.name(),
+                    error = %e,
+                    "api.clean.report_failed"
+                );
+                rows.push(CleanReportRow {
+                    category: target.category().to_string(),
+                    name: target.name().to_owned(),
+                    items: 0,
+                    bytes: 0,
+                });
+            }
+        }
+    }
+    Ok(Json(CleanUsageResponse {
+        age_seconds,
+        targets: rows,
+    }))
+}
+
+/// Body of `POST /api/v1/clean/run`.
+#[derive(Deserialize)]
+struct CleanRunRequest {
+    /// One of `disk`, `db`, `queue`. Required.
+    category: String,
+    /// `true` → actually delete; `false` → dry-run.
+    #[serde(default)]
+    apply: bool,
+    /// `true` → ignore the age gate for every target (per-target
+    /// semantics in their docstrings).
+    #[serde(default)]
+    force: bool,
+}
+
+#[derive(Serialize)]
+struct CleanRunResponse {
+    category: String,
+    apply: bool,
+    force: bool,
+    age_seconds: i64,
+    targets: Vec<CleanReportRow>,
+}
+
+/// `POST /api/v1/clean/run` — operator-triggered cleanup for one
+/// category. `apply=true` switches each target into delete mode;
+/// `apply=false` is identical to `GET /clean/usage?category=…`.
+async fn clean_run(
+    State(state): State<ApiState>,
+    Json(req): Json<CleanRunRequest>,
+) -> Result<Json<CleanRunResponse>, ApiError> {
+    let category = ab_core::cleanup::Category::parse(&req.category).ok_or_else(|| {
+        ApiError::BadRequest(format!(
+            "unknown category `{}` (valid: disk, db, queue)",
+            req.category
+        ))
+    })?;
+    let tunables = ab_core::tunables::CleanupTunables::default();
+    let age_seconds = ab_core::cleanup::compute_age_seconds(&tunables, u64::MAX, u64::MAX);
+    let policy = ab_core::cleanup::Policy {
+        age_seconds,
+        force: req.force,
+        apply: req.apply,
+    };
+    let cleanup_ctx = ab_pipeline::cleanup::CleanupCtx {
+        library: state.inner.library.clone(),
+        ephemeral: state.inner.ephemeral.clone(),
+    };
+    let reports =
+        ab_pipeline::cleanup::run_category(&cleanup_ctx, &state.inner.cleanup, category, policy)
+            .await?;
+    Ok(Json(CleanRunResponse {
+        category: category.to_string(),
+        apply: req.apply,
+        force: req.force,
+        age_seconds,
+        targets: reports.into_iter().map(Into::into).collect(),
+    }))
 }
 
 #[derive(Serialize)]

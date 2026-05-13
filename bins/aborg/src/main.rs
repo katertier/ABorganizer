@@ -86,6 +86,24 @@ enum Command {
         #[command(subcommand)]
         action: AudiologoAction,
     },
+    /// Cleanup subsystem (ADR-0025). Categories: disk, db, queue.
+    ///
+    /// Without `--apply` the daemon dry-runs every registered
+    /// target in the category and prints what it would free.
+    /// `--apply` switches to delete mode; `--force` ignores the
+    /// per-target age gate.
+    Clean {
+        /// One of `disk`, `db`, `queue`.
+        category: String,
+        /// Actually delete (default = dry-run).
+        #[arg(long)]
+        apply: bool,
+        /// Skip per-target age gating (per-target docs spell out
+        /// what this means; pairing codes: invalidates every
+        /// unconsumed code regardless of `expires_at`).
+        #[arg(long)]
+        force: bool,
+    },
     /// Show daemon health.
     Health,
 }
@@ -277,6 +295,13 @@ async fn main() -> Result<()> {
                 audiologo_import(&path, cli.output).await?;
             }
         },
+        Command::Clean {
+            category,
+            apply,
+            force,
+        } => {
+            clean(&cli.daemon, &category, apply, force, cli.output).await?;
+        }
         Command::Health => health(&cli.daemon, cli.output).await?,
     }
     Ok(())
@@ -615,6 +640,101 @@ async fn health(daemon: &str, output: OutputFormat) -> Result<()> {
                 "daemon is {}",
                 body.status
             );
+        }
+    }
+    Ok(())
+}
+
+// ── Cleanup (slice H.2.3, ADR-0025) ──────────────────────────────────
+
+#[derive(Deserialize, Debug, Serialize)]
+struct CleanReportRow {
+    category: String,
+    name: String,
+    items: u64,
+    bytes: u64,
+}
+
+#[derive(Deserialize, Debug, Serialize)]
+struct CleanRunResponse {
+    category: String,
+    apply: bool,
+    force: bool,
+    age_seconds: i64,
+    targets: Vec<CleanReportRow>,
+}
+
+#[derive(Serialize, Debug)]
+struct CleanRunRequest<'a> {
+    category: &'a str,
+    apply: bool,
+    force: bool,
+}
+
+/// `aborg clean <category> [--apply] [--force]` — thin shim over
+/// `POST /api/v1/clean/run`. Dry-run by default; `--apply` deletes;
+/// `--force` ignores per-target age gates. ADR-0025.
+async fn clean(
+    daemon: &str,
+    category: &str,
+    apply: bool,
+    force: bool,
+    output: OutputFormat,
+) -> Result<()> {
+    let url = format!("{daemon}/api/v1/clean/run");
+    let resp = client()
+        .post(&url)
+        .json(&CleanRunRequest {
+            category,
+            apply,
+            force,
+        })
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("clean failed: HTTP {status}: {body}");
+    }
+    let body: CleanRunResponse = resp.json().await.context("parse clean response")?;
+    match output {
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&body).unwrap_or_default()
+            );
+        }
+        OutputFormat::Human => {
+            let mode = if body.apply { "applied" } else { "dry-run" };
+            let force_note = if body.force { " (forced)" } else { "" };
+            let age_days = body.age_seconds / 86_400;
+            println!(
+                "clean {} {} {}{} — age cut-off {} d, {} target(s)",
+                body.category,
+                mode,
+                if body.apply { "→" } else { "↦" },
+                force_note,
+                age_days,
+                body.targets.len(),
+            );
+            let mut total_items: u64 = 0;
+            let mut total_bytes: u64 = 0;
+            for row in &body.targets {
+                println!(
+                    "  {:<24} {:>6} items {:>10} bytes",
+                    row.name, row.items, row.bytes
+                );
+                total_items += row.items;
+                total_bytes += row.bytes;
+            }
+            println!(
+                "  {:<24} {:>6} items {:>10} bytes",
+                "TOTAL", total_items, total_bytes
+            );
+            if !body.apply && (total_items > 0 || total_bytes > 0) {
+                println!("\nrun with --apply to delete.");
+            }
         }
     }
     Ok(())
