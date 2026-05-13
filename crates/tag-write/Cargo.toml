@@ -1,0 +1,25 @@
+[package]
+name         = "ab-tag-write"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+authors      = { workspace = true }
+repository   = { workspace = true }
+description  = "Two-pass embedded-tag writer (ADR-0028): early DNA pass + late AI pass with sticky user-edit semantics."
+
+[lints]
+workspace = true
+
+[dependencies]
+ab-core       = { workspace = true }
+ab-db         = { workspace = true }
+ab-pipeline   = { workspace = true }
+async-trait   = { workspace = true }
+sqlx          = { workspace = true }
+tokio         = { workspace = true }
+tracing       = { workspace = true }
+
+[dev-dependencies]
+tempfile      = { workspace = true }
+tokio-util    = { workspace = true }
