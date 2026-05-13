@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(DISTINCT bn.narrator_id) AS \"n!: i64\"\n               FROM book_narrator bn\n               WHERE bn.book_id = ?\n                 AND bn.narrator_id IN (\n                     SELECT bn2.narrator_id\n                     FROM book_narrator bn2\n                     JOIN books b2 ON b2.book_id = bn2.book_id\n                     WHERE b2.author_id = ? AND b2.book_id <> ?\n                 )",
+  "describe": {
+    "columns": [
+      {
+        "name": "n!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "bb4ec6b8766ad29e3c418b4de8ffe82d552bd6f884eee194d13e868fb5e19634"
+}
