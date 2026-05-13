@@ -67,7 +67,7 @@ struct Args {
 fn build_pipeline_stages(tunables: &Tunables) -> Vec<Arc<dyn Stage>> {
     let audnexus_client = ab_catalog::AudnexusClient::new(&tunables.http_client);
     let audible_client = ab_catalog::AudibleClient::new(&tunables.http_client);
-    vec![
+    let mut stages: Vec<Arc<dyn Stage>> = vec![
         // `tag-read` (slice 1B) — lofty MP4-atom / ID3 reader.
         // Writes title/author/subtitle/description/narrator
         // candidate rows; no dependencies.
@@ -196,7 +196,24 @@ fn build_pipeline_stages(tunables: &Tunables) -> Vec<Arc<dyn Stage>> {
             &tunables.llm,
             &tunables.library_display,
         )),
-    ]
+    ];
+
+    // `tag-write-early` (ADR-0028, Phase A2) — opt-in via
+    // `tunables.pipeline.tag_write_early_enabled`. Default
+    // `false` because flipping it on re-tags every book whose
+    // winners differ from on-disk on the next pipeline pass;
+    // that's a deliberate operator decision, not a fresh-
+    // checkout default. Once enabled, every per-field
+    // mutation logs to `mass_edit_history` with a per-run
+    // batch_id (see PR #47).
+    if tunables.pipeline.tag_write_early_enabled {
+        stages.push(Arc::new(ab_tag_write::TagWriteEarlyStage::new()));
+        info!("daemon.pipeline.tag_write_early_enabled");
+    } else {
+        info!("daemon.pipeline.tag_write_early_disabled");
+    }
+
+    stages
 }
 
 #[tokio::main]
