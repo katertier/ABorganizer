@@ -58,9 +58,21 @@
 //! Match-time lookup uses the junction's `COLLATE NOCASE` index
 //! so the same alias attached to multiple parents (two David
 //! Mitchells — see ADR-0026) is observable as a multi-row hit.
-//! H.3.2 picks the first hit + logs a warn for the ambiguous
-//! case; the three-way `IdentityMatch` enum + corroboration
-//! lands in H.3.5.
+//!
+//! # Ambiguity resolution (slice H.3.5, ADR-0026)
+//!
+//! When multiple parents share an alias, [`corroborate_author`] /
+//! [`corroborate_narrator`] / [`corroborate_series`] score each
+//! candidate against the book's already-known signals (narrator
+//! overlap, publisher overlap, series-author overlap).
+//! [`CORROBORATION_MARGIN`] sets the confidence threshold —
+//! winners with a margin below it land in
+//! `*_disambiguation_pending` for operator review via the
+//! `aborg names resolve` surface (H.3.6).
+//!
+//! Pending state means "don't write the FK; surface a row." The
+//! book's `author_id` / etc. stays NULL until the operator
+//! resolves the pending row.
 
 use std::collections::HashSet;
 
@@ -155,14 +167,22 @@ async fn resolve_author(
     let Some(candidate) = pick_winner_with_id(tx, book_id, Field::Author).await? else {
         return Ok(false);
     };
-    let author_id = find_or_insert_person(
+    let resolved = find_or_insert_person(
         tx,
         "authors",
         "author_id",
         &candidate.name,
         candidate.external_id.as_deref(),
+        book_id,
     )
     .await?;
+    let Some(author_id) = resolved else {
+        // Disambiguation pending — leave `books.author_id` NULL,
+        // pending row was written by `find_or_insert_person`.
+        // Operator resolves via `aborg names resolve`.
+        tracing::info!(book = %book_id, "identity.author.deferred_pending");
+        return Ok(false);
+    };
     let id = book_id.0;
     sqlx::query!(
         "UPDATE books SET author_id = ? WHERE book_id = ?",
@@ -312,11 +332,23 @@ async fn resolve_series(
     }
 
     // Resolve each group to a series_id BEFORE touching the
-    // junction (matches the narrators flow).
+    // junction (matches the narrators flow). Pending-row series
+    // (ambiguous name + no corroboration winner) are skipped;
+    // pending rows surface for operator resolution via the H.3.6
+    // surface.
     let mut entries: Vec<(i64, Option<f64>, bool)> = Vec::with_capacity(groups.len());
     for g in &groups {
-        let sid = find_or_insert_series(tx, &g.display_name, g.asin.as_deref()).await?;
-        entries.push((sid, g.position, g.is_primary));
+        if let Some(sid) =
+            find_or_insert_series(tx, &g.display_name, g.asin.as_deref(), book_id).await?
+        {
+            entries.push((sid, g.position, g.is_primary));
+        } else {
+            tracing::info!(
+                book = %book_id,
+                alias = %g.display_name,
+                "identity.series.deferred_pending"
+            );
+        }
     }
 
     // Clear-then-add the junction. Same shape as resolve_narrators.
@@ -351,7 +383,8 @@ async fn find_or_insert_series(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     name: &str,
     audible_id: Option<&str>,
-) -> Result<i64> {
+    book_id: BookId,
+) -> Result<Option<i64>> {
     // 1) ASIN match wins when we have one.
     if let Some(asin) = audible_id {
         let existing: Option<i64> = sqlx::query_scalar!(
@@ -363,36 +396,62 @@ async fn find_or_insert_series(
         .map_err(|e| Error::Database(format!("identity lookup series by asin: {e}")))?;
         if let Some(id) = existing {
             register_alias_for_kind(tx, "series", id, name, alias_source(audible_id)).await?;
-            return Ok(id);
+            return Ok(Some(id));
         }
     }
 
-    // 2) Alias-junction lookup. Same shape as authors / narrators
-    //    (H.3.2, ADR-0026). Multi-row hit → first + warn; H.3.5
-    //    introduces the three-way enum.
+    // 2) Alias-junction lookup with corroboration on multi-hit.
     let alias_matches = lookup_by_alias(tx, "series", "series_id", name).await?;
-    if let Some(first) = alias_matches.first().copied() {
-        if alias_matches.len() > 1 {
-            tracing::warn!(
-                table = "series",
-                alias = name,
-                candidates = ?alias_matches,
-                "identity.match.ambiguous_alias"
-            );
+    match alias_matches.as_slice() {
+        [] => {}
+        [single] => {
+            let id = *single;
+            if let Some(asin) = audible_id {
+                sqlx::query!(
+                    "UPDATE series SET audible_id = ? \
+                     WHERE series_id = ? AND audible_id IS NULL",
+                    asin,
+                    id,
+                )
+                .execute(&mut **tx)
+                .await
+                .map_err(|e| {
+                    Error::Database(format!("identity backfill series audible_id: {e}"))
+                })?;
+            }
+            register_alias_for_kind(tx, "series", id, name, alias_source(audible_id)).await?;
+            return Ok(Some(id));
         }
-        if let Some(asin) = audible_id {
-            sqlx::query!(
-                "UPDATE series SET audible_id = ? \
-                 WHERE series_id = ? AND audible_id IS NULL",
-                asin,
-                first,
-            )
-            .execute(&mut **tx)
-            .await
-            .map_err(|e| Error::Database(format!("identity backfill series audible_id: {e}")))?;
+        ambiguous => {
+            let scores = corroborate_for_kind(tx, "series", book_id, ambiguous).await?;
+            if let Some(winner) = pick_corroborated(&scores) {
+                tracing::info!(
+                    table = "series",
+                    alias = name,
+                    winner,
+                    candidates = ?ambiguous,
+                    "identity.match.corroborated"
+                );
+                if let Some(asin) = audible_id {
+                    sqlx::query!(
+                        "UPDATE series SET audible_id = ? \
+                         WHERE series_id = ? AND audible_id IS NULL",
+                        asin,
+                        winner,
+                    )
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(|e| {
+                        Error::Database(format!("identity backfill series audible_id: {e}"))
+                    })?;
+                }
+                register_alias_for_kind(tx, "series", winner, name, alias_source(audible_id))
+                    .await?;
+                return Ok(Some(winner));
+            }
+            write_pending_disambiguation(tx, "series", book_id, name, &scores).await?;
+            return Ok(None);
         }
-        register_alias_for_kind(tx, "series", first, name, alias_source(audible_id)).await?;
-        return Ok(first);
     }
 
     // 3) Insert new row + canonical alias.
@@ -405,7 +464,7 @@ async fn find_or_insert_series(
     .await
     .map_err(|e| Error::Database(format!("identity insert series: {e}")))?;
     insert_alias_with_flag(tx, "series", new_id, name, "canonical", true).await?;
-    Ok(new_id)
+    Ok(Some(new_id))
 }
 
 /// Take every distinct narrator candidate for this book, find-or-
@@ -421,18 +480,31 @@ async fn resolve_narrators(
     }
 
     // Resolve every name to an id first so we have a clean target
-    // set before touching the junction.
+    // set before touching the junction. Pending-row narrators (a
+    // name maps ambiguously to multiple parents AND corroboration
+    // doesn't decide) are skipped — the book gets the
+    // unambiguous narrators only; the operator resolves the
+    // pending ones via `aborg names resolve`.
     let mut narrator_ids: Vec<i64> = Vec::with_capacity(candidates.len());
     for c in &candidates {
-        let nid = find_or_insert_person(
+        if let Some(nid) = find_or_insert_person(
             tx,
             "narrators",
             "narrator_id",
             &c.name,
             c.external_id.as_deref(),
+            book_id,
         )
-        .await?;
-        narrator_ids.push(nid);
+        .await?
+        {
+            narrator_ids.push(nid);
+        } else {
+            tracing::info!(
+                book = %book_id,
+                alias = %c.name,
+                "identity.narrator.deferred_pending"
+            );
+        }
     }
 
     // Clear-then-add. SQLite has no ON CONFLICT REPLACE shape that
@@ -576,13 +648,15 @@ async fn fetch_all_distinct(
 /// `format!` is safe from injection here. (The macros require
 /// string literals; for this two-table dispatch the runtime path
 /// is the pragmatic shape.)
+#[allow(clippy::too_many_arguments)] // 5 inputs + tx + book_id — bundling adds indirection that obscures the dispatch
 async fn find_or_insert_person(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     table: &'static str,
     id_column: &'static str,
     name: &str,
     external_id: Option<&str>,
-) -> Result<i64> {
+    book_id: BookId,
+) -> Result<Option<i64>> {
     // 1) ASIN match wins when we have one and someone else has
     //    already inserted this person with it. The
     //    `idx_authors_audible` partial unique index makes this O(log n).
@@ -598,42 +672,63 @@ async fn find_or_insert_person(
             .map_err(|e| Error::Database(format!("identity lookup-by-id {table}: {e}")))?;
         if let Some(id) = existing {
             register_alias_for_kind(tx, table, id, name, alias_source(external_id)).await?;
-            return Ok(id);
+            return Ok(Some(id));
         }
     }
-    // 2) Alias-junction lookup. The junction is the typed
-    //    replacement for the dropped `aliases TEXT` column +
-    //    `lower(name) = ?` shape (H.3.1, ADR-0026). The
-    //    `COLLATE NOCASE` index makes this O(log n). On a multi-
-    //    row hit (two parents share the alias, e.g. two David
-    //    Mitchells) we pick the first ID + log warn; H.3.5 swaps
-    //    in the three-way enum + corroboration.
+    // 2) Alias-junction lookup. Multi-row hits go through the
+    //    corroboration pass (H.3.5).
     let alias_matches = lookup_by_alias(tx, table, id_column, name).await?;
-    if let Some(first) = alias_matches.first().copied() {
-        if alias_matches.len() > 1 {
-            tracing::warn!(
-                table,
-                alias = name,
-                candidates = ?alias_matches,
-                "identity.match.ambiguous_alias"
-            );
+    match alias_matches.as_slice() {
+        [] => {}
+        [single] => {
+            let id = *single;
+            // Back-fill audible_id when we have one and the row
+            // doesn't.
+            if let Some(ext) = external_id {
+                let update_sql = format!(
+                    "UPDATE {table} SET audible_id = ? \
+                     WHERE {id_column} = ? AND audible_id IS NULL"
+                );
+                sqlx::query(&update_sql)
+                    .bind(ext)
+                    .bind(id)
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(|e| Error::Database(format!("identity backfill {table}: {e}")))?;
+            }
+            register_alias_for_kind(tx, table, id, name, alias_source(external_id)).await?;
+            return Ok(Some(id));
         }
-        // Back-fill audible_id when we have one and the row
-        // doesn't.
-        if let Some(ext) = external_id {
-            let update_sql = format!(
-                "UPDATE {table} SET audible_id = ? \
-                 WHERE {id_column} = ? AND audible_id IS NULL"
-            );
-            sqlx::query(&update_sql)
-                .bind(ext)
-                .bind(first)
-                .execute(&mut **tx)
-                .await
-                .map_err(|e| Error::Database(format!("identity backfill {table}: {e}")))?;
+        ambiguous => {
+            // Corroborate. If a clear winner emerges, attach;
+            // otherwise write a pending row and leave the FK NULL.
+            let scores = corroborate_for_kind(tx, table, book_id, ambiguous).await?;
+            if let Some(winner) = pick_corroborated(&scores) {
+                tracing::info!(
+                    table,
+                    alias = name,
+                    winner,
+                    candidates = ?ambiguous,
+                    "identity.match.corroborated"
+                );
+                if let Some(ext) = external_id {
+                    let update_sql = format!(
+                        "UPDATE {table} SET audible_id = ? \
+                         WHERE {id_column} = ? AND audible_id IS NULL"
+                    );
+                    sqlx::query(&update_sql)
+                        .bind(ext)
+                        .bind(winner)
+                        .execute(&mut **tx)
+                        .await
+                        .map_err(|e| Error::Database(format!("identity backfill {table}: {e}")))?;
+                }
+                register_alias_for_kind(tx, table, winner, name, alias_source(external_id)).await?;
+                return Ok(Some(winner));
+            }
+            write_pending_disambiguation(tx, table, book_id, name, &scores).await?;
+            return Ok(None);
         }
-        register_alias_for_kind(tx, table, first, name, alias_source(external_id)).await?;
-        return Ok(first);
     }
     // 3) Fresh insert. Carries the audible_id when present.
     let insert_sql =
@@ -644,13 +739,9 @@ async fn find_or_insert_person(
         .fetch_one(&mut **tx)
         .await
         .map_err(|e| Error::Database(format!("identity insert {table}: {e}")))?;
-    // Seed the canonical alias for the new parent. `is_prime=1`
-    // because no other prime can exist yet (partial unique index
-    // enforces ≤1 prime per parent). Subsequent observations of
-    // alternative spellings come in via `register_alias_for_kind`
-    // with `is_prime=0`.
+    // Seed the canonical alias for the new parent.
     insert_alias_with_flag(tx, table, new_id, name, "canonical", true).await?;
-    Ok(new_id)
+    Ok(Some(new_id))
 }
 
 /// Map a candidate's `external_id` presence to the alias `source`
@@ -754,6 +845,307 @@ fn junction_for(table: &'static str) -> (&'static str, &'static str) {
         // compiler. A new identity kind has to register its
         // junction here before the helpers will dispatch.
         other => unreachable!("junction_for: unknown identity table {other}"),
+    }
+}
+
+/// Disambiguation pending-table dispatch.
+fn pending_tables_for(
+    table: &'static str,
+) -> (&'static str, &'static str, &'static str, &'static str) {
+    // (pending_table, candidate_table, parent_fk_in_pending,
+    // candidate_fk_in_candidate)
+    match table {
+        "authors" => (
+            "author_disambiguation_pending",
+            "author_disambiguation_candidate",
+            "resolved_author_id",
+            "author_id",
+        ),
+        "narrators" => (
+            "narrator_disambiguation_pending",
+            "narrator_disambiguation_candidate",
+            "resolved_narrator_id",
+            "narrator_id",
+        ),
+        "series" => (
+            "series_disambiguation_pending",
+            "series_disambiguation_candidate",
+            "resolved_series_id",
+            "series_id",
+        ),
+        other => unreachable!("pending_tables_for: unknown identity table {other}"),
+    }
+}
+
+/// Minimum winner-vs-runner-up margin for a corroborated match to
+/// auto-attach. Below this → pending row + NULL FK. Conservative
+/// default; tuneable once the pending table has real entries
+/// (ADR-0026 verification section).
+const CORROBORATION_MARGIN: f64 = 0.3;
+
+/// Per-candidate score from the corroboration pass. Returned to the
+/// caller so the pending-row write can persist it for the resolve
+/// UI ("candidate A scored 0.45, candidate B scored 0.42").
+#[derive(Debug, Clone, Copy)]
+struct CandidateScore {
+    id: i64,
+    score: f64,
+}
+
+/// Disambiguate ambiguous author candidates. Signals are narrator
+/// overlap (cap 0.4), publisher overlap (0.2), series-author
+/// overlap via the book's `book_series` rows (0.5). Series carries
+/// the strongest weight because if we know the series and the
+/// series' other books point to one author, that's a near-certain
+/// match.
+async fn corroborate_author(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    book_id: BookId,
+    candidates: &[i64],
+) -> Result<Vec<CandidateScore>> {
+    let mut scores: Vec<CandidateScore> = Vec::with_capacity(candidates.len());
+    for &cand in candidates {
+        let mut s = 0.0_f64;
+        // Narrator overlap. `book_narrator` for this book ∩
+        // narrators on the candidate's other books. Distinct count
+        // capped at 1.0 × 0.4 = 0.4.
+        let id = book_id.0;
+        let narrator_overlap: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(DISTINCT bn.narrator_id) AS "n!: i64"
+               FROM book_narrator bn
+               WHERE bn.book_id = ?
+                 AND bn.narrator_id IN (
+                     SELECT bn2.narrator_id
+                     FROM book_narrator bn2
+                     JOIN books b2 ON b2.book_id = bn2.book_id
+                     WHERE b2.author_id = ? AND b2.book_id <> ?
+                 )"#,
+            id,
+            cand,
+            id,
+        )
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|e| Error::Database(format!("corroborate author narrator-overlap: {e}")))?;
+        if narrator_overlap > 0 {
+            s += 0.4;
+        }
+        // Publisher overlap.
+        let publisher_overlap: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "n!: i64"
+               FROM books b
+               WHERE b.book_id = ?
+                 AND b.publisher_id IS NOT NULL
+                 AND b.publisher_id IN (
+                     SELECT b2.publisher_id FROM books b2
+                     WHERE b2.author_id = ? AND b2.book_id <> ?
+                       AND b2.publisher_id IS NOT NULL
+                 )"#,
+            id,
+            cand,
+            id,
+        )
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|e| Error::Database(format!("corroborate author publisher-overlap: {e}")))?;
+        if publisher_overlap > 0 {
+            s += 0.2;
+        }
+        // Series-author overlap: book is in some series; that
+        // series' other books credit this candidate as author.
+        let series_overlap: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(DISTINCT bs.series_id) AS "n!: i64"
+               FROM book_series bs
+               WHERE bs.book_id = ?
+                 AND bs.series_id IN (
+                     SELECT bs2.series_id
+                     FROM book_series bs2
+                     JOIN books b2 ON b2.book_id = bs2.book_id
+                     WHERE b2.author_id = ? AND b2.book_id <> ?
+                 )"#,
+            id,
+            cand,
+            id,
+        )
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|e| Error::Database(format!("corroborate author series-overlap: {e}")))?;
+        if series_overlap > 0 {
+            s += 0.5;
+        }
+        scores.push(CandidateScore { id: cand, score: s });
+    }
+    Ok(scores)
+}
+
+/// Disambiguate ambiguous narrator candidates. Single signal:
+/// publisher overlap. Narrators don't share series memberships
+/// reliably enough for that signal to count.
+async fn corroborate_narrator(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    book_id: BookId,
+    candidates: &[i64],
+) -> Result<Vec<CandidateScore>> {
+    let mut scores: Vec<CandidateScore> = Vec::with_capacity(candidates.len());
+    for &cand in candidates {
+        let mut s = 0.0_f64;
+        let id = book_id.0;
+        let publisher_overlap: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "n!: i64"
+               FROM books b
+               WHERE b.book_id = ?
+                 AND b.publisher_id IS NOT NULL
+                 AND b.publisher_id IN (
+                     SELECT b2.publisher_id
+                     FROM book_narrator bn2
+                     JOIN books b2 ON b2.book_id = bn2.book_id
+                     WHERE bn2.narrator_id = ? AND b2.book_id <> ?
+                       AND b2.publisher_id IS NOT NULL
+                 )"#,
+            id,
+            cand,
+            id,
+        )
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|e| Error::Database(format!("corroborate narrator publisher-overlap: {e}")))?;
+        if publisher_overlap > 0 {
+            s += 0.2;
+        }
+        scores.push(CandidateScore { id: cand, score: s });
+    }
+    Ok(scores)
+}
+
+/// Disambiguate ambiguous series candidates. Signal: this book's
+/// resolved author (if any) matches the dominant author across the
+/// candidate series' other books. +0.6 weight — series sharing one
+/// author across most members is the strongest single signal we
+/// have.
+async fn corroborate_series(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    book_id: BookId,
+    candidates: &[i64],
+) -> Result<Vec<CandidateScore>> {
+    let mut scores: Vec<CandidateScore> = Vec::with_capacity(candidates.len());
+    let id = book_id.0;
+    let this_author: Option<i64> =
+        sqlx::query_scalar!("SELECT author_id FROM books WHERE book_id = ?", id,)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(|e| Error::Database(format!("corroborate series read author: {e}")))?;
+    for &cand in candidates {
+        let mut s = 0.0_f64;
+        if let Some(author_id) = this_author {
+            let overlap: i64 = sqlx::query_scalar!(
+                r#"SELECT COUNT(*) AS "n!: i64"
+                   FROM book_series bs
+                   JOIN books b ON b.book_id = bs.book_id
+                   WHERE bs.series_id = ? AND b.author_id = ?
+                     AND bs.book_id <> ?"#,
+                cand,
+                author_id,
+                id,
+            )
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(|e| Error::Database(format!("corroborate series author-overlap: {e}")))?;
+            if overlap > 0 {
+                s += 0.6;
+            }
+        }
+        scores.push(CandidateScore { id: cand, score: s });
+    }
+    Ok(scores)
+}
+
+/// Pick a winner from a scored candidate set if the margin
+/// (best − runner-up) exceeds [`CORROBORATION_MARGIN`]. Returns
+/// `None` to mean "ambiguous; write pending."
+fn pick_corroborated(scores: &[CandidateScore]) -> Option<i64> {
+    let mut sorted: Vec<&CandidateScore> = scores.iter().collect();
+    sorted.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    match sorted.as_slice() {
+        [] => None,
+        [only] => Some(only.id),
+        [best, runner_up, ..] => {
+            if best.score - runner_up.score > CORROBORATION_MARGIN {
+                Some(best.id)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Write a pending-disambiguation row + candidate scores so the
+/// operator can resolve via `aborg names resolve` (H.3.6).
+/// Idempotent via the pending table's
+/// `UNIQUE (book_id, observed_alias)`.
+async fn write_pending_disambiguation(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    table: &'static str,
+    book_id: BookId,
+    observed_alias: &str,
+    scores: &[CandidateScore],
+) -> Result<()> {
+    let (pending_table, candidate_table, _resolved_col, candidate_fk) = pending_tables_for(table);
+    let id = book_id.0;
+    let insert_pending = format!(
+        "INSERT OR IGNORE INTO {pending_table} (book_id, observed_alias) \
+         VALUES (?, ?) RETURNING pending_id"
+    );
+    let pending_id: Option<i64> = sqlx::query_scalar(&insert_pending)
+        .bind(id)
+        .bind(observed_alias)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| Error::Database(format!("write pending {pending_table}: {e}")))?;
+    let Some(pending_id) = pending_id else {
+        // Row already present (idempotent re-run); don't re-stamp
+        // candidates — they'd repeat with stale scores. Future
+        // corroboration sweeps can prune.
+        return Ok(());
+    };
+    let insert_candidate = format!(
+        "INSERT OR IGNORE INTO {candidate_table} \
+         (pending_id, {candidate_fk}, score) VALUES (?, ?, ?)"
+    );
+    for s in scores {
+        sqlx::query(&insert_candidate)
+            .bind(pending_id)
+            .bind(s.id)
+            .bind(s.score)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| Error::Database(format!("write pending {candidate_table}: {e}")))?;
+    }
+    tracing::info!(
+        table,
+        book = id,
+        alias = observed_alias,
+        candidates = scores.len(),
+        "identity.disambiguation.pending"
+    );
+    Ok(())
+}
+
+/// Dispatch the corroboration pass to the kind-appropriate helper.
+async fn corroborate_for_kind(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    table: &'static str,
+    book_id: BookId,
+    candidates: &[i64],
+) -> Result<Vec<CandidateScore>> {
+    match table {
+        "authors" => corroborate_author(tx, book_id, candidates).await,
+        "narrators" => corroborate_narrator(tx, book_id, candidates).await,
+        "series" => corroborate_series(tx, book_id, candidates).await,
+        other => unreachable!("corroborate_for_kind: unknown identity table {other}"),
     }
 }
 
@@ -1101,6 +1493,173 @@ mod tests {
         assert_eq!(alias_rows.len(), 2, "two alias spellings recorded");
         let prime_count = alias_rows.iter().filter(|r| r.1 == 1).count();
         assert_eq!(prime_count, 1, "exactly one prime alias");
+    }
+
+    #[tokio::test]
+    async fn ambiguous_alias_with_no_corroboration_lands_in_pending() {
+        // Two David Mitchells with different ASINs already in the
+        // DB. A new book credits "David Mitchell" with no ASIN and
+        // no corroborating signal (no narrator/publisher/series
+        // overlap). Result: pending row + null books.author_id;
+        // both candidates recorded with score 0.
+        let tmp = TempDir::new().expect("tmpdir");
+        let ctx = fresh_ctx(tmp.path()).await;
+        sqlx::query(
+            "INSERT INTO authors (name, audible_id) VALUES \
+                 ('David Mitchell', 'B0034Q40L2'), \
+                 ('David Mitchell', 'B000APTQBE')",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed two David Mitchells");
+        sqlx::query(
+            "INSERT INTO author_aliases (author_id, alias, source, is_prime) VALUES \
+                 (1, 'David Mitchell', 'canonical', 1), \
+                 (2, 'David Mitchell', 'canonical', 1)",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed aliases");
+        sqlx::query("INSERT INTO books (book_id, title) VALUES (1, 'Mystery Title')")
+            .execute(ctx.library.pool())
+            .await
+            .expect("seed book");
+        sqlx::query(
+            "INSERT INTO book_field_provenance \
+             (book_id, field, value, source, stage, confidence) \
+             VALUES (1, 'author', 'David Mitchell', 'tag_file', 'tag-read', 0.7)",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed provenance");
+
+        IdentityResolveStage::new()
+            .run(&ctx, BookId(1))
+            .await
+            .expect("run");
+
+        // books.author_id should still be NULL — pending.
+        let author_id: Option<Option<i64>> =
+            sqlx::query_scalar("SELECT author_id FROM books WHERE book_id = 1")
+                .fetch_optional(ctx.library.pool())
+                .await
+                .expect("read author_id");
+        assert_eq!(
+            author_id.flatten(),
+            None,
+            "ambiguous match should leave author_id NULL"
+        );
+
+        // Pending row exists for the book.
+        let pending_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM author_disambiguation_pending WHERE book_id = 1",
+        )
+        .fetch_one(ctx.library.pool())
+        .await
+        .expect("count pending");
+        assert_eq!(pending_count, 1);
+
+        // Both candidates recorded with score 0 (no corroboration
+        // signal landed).
+        let cand_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM author_disambiguation_candidate")
+                .fetch_one(ctx.library.pool())
+                .await
+                .expect("count candidates");
+        assert_eq!(cand_count, 2);
+    }
+
+    #[tokio::test]
+    async fn ambiguous_alias_with_narrator_overlap_corroborates() {
+        // Two David Mitchells; book has a known narrator that's
+        // shared with one of the David Mitchells' other books.
+        // Corroboration should pick that David Mitchell + no
+        // pending row.
+        let tmp = TempDir::new().expect("tmpdir");
+        let ctx = fresh_ctx(tmp.path()).await;
+        // Seed two authors, two narrators, three books.
+        sqlx::query(
+            "INSERT INTO authors (name, audible_id) VALUES \
+                 ('David Mitchell', 'B0034Q40L2'), \
+                 ('David Mitchell', 'B000APTQBE')",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed authors");
+        sqlx::query(
+            "INSERT INTO author_aliases (author_id, alias, source, is_prime) VALUES \
+                 (1, 'David Mitchell', 'canonical', 1), \
+                 (2, 'David Mitchell', 'canonical', 1)",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed aliases");
+        sqlx::query(
+            "INSERT INTO narrators (narrator_id, name) VALUES \
+                 (10, 'Narrator One'), (20, 'Narrator Two')",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed narrators");
+        // Book by author 1 (David Mitchell A) narrated by 10.
+        sqlx::query(
+            "INSERT INTO books (book_id, title, author_id) VALUES \
+                 (100, 'Existing A Book', 1), \
+                 (200, 'Existing B Book', 2)",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed existing books");
+        sqlx::query(
+            "INSERT INTO book_narrator (book_id, narrator_id) VALUES \
+                 (100, 10), (200, 20)",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed narrator links");
+
+        // New book with narrator 10 → should resolve to author 1.
+        sqlx::query("INSERT INTO books (book_id, title) VALUES (1, 'New Book')")
+            .execute(ctx.library.pool())
+            .await
+            .expect("seed target book");
+        // Wire its narrator before identity-resolve runs (in real
+        // pipeline that's `audnexus-enrich`'s job; we simulate).
+        sqlx::query("INSERT INTO book_narrator (book_id, narrator_id) VALUES (1, 10)")
+            .execute(ctx.library.pool())
+            .await
+            .expect("seed target narrator");
+        sqlx::query(
+            "INSERT INTO book_field_provenance \
+             (book_id, field, value, source, stage, confidence) \
+             VALUES (1, 'author', 'David Mitchell', 'tag_file', 'tag-read', 0.7)",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed provenance");
+
+        IdentityResolveStage::new()
+            .run(&ctx, BookId(1))
+            .await
+            .expect("run");
+
+        // Should resolve to author 1 (the one whose existing book
+        // shares narrator 10).
+        let author_id: Option<i64> =
+            sqlx::query_scalar("SELECT author_id FROM books WHERE book_id = 1")
+                .fetch_one(ctx.library.pool())
+                .await
+                .expect("read author_id");
+        assert_eq!(author_id, Some(1), "narrator overlap should disambiguate");
+
+        // No pending row.
+        let pending_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM author_disambiguation_pending WHERE book_id = 1",
+        )
+        .fetch_one(ctx.library.pool())
+        .await
+        .expect("count pending");
+        assert_eq!(pending_count, 0);
     }
 
     #[tokio::test]

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"n!: i64\"\n               FROM books b\n               WHERE b.book_id = ?\n                 AND b.publisher_id IS NOT NULL\n                 AND b.publisher_id IN (\n                     SELECT b2.publisher_id FROM books b2\n                     WHERE b2.author_id = ? AND b2.book_id <> ?\n                       AND b2.publisher_id IS NOT NULL\n                 )",
+  "describe": {
+    "columns": [
+      {
+        "name": "n!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a22a9a3f29418283e3dc3c0cac6bbaa263ef07bcddfc44b5cd80e321e894f8b4"
+}
