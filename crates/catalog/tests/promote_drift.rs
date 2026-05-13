@@ -99,14 +99,25 @@ async fn books_columns_match_provenance_winners() {
         ("release_date", "2024-01-01", 0.95, "audnexus_asin"),
     ];
     for (field, value, conf, source) in candidates {
+        // Map the test's source string back to a producing
+        // stage so the NOT NULL stage column is populated. The
+        // real `tag_meta` / `audible_search` / `audnexus_asin`
+        // source values come from the corresponding stages.
+        let stage = match *source {
+            s if s.starts_with("audnexus") => "audnexus-enrich",
+            "audible_search" => "audible-search",
+            _ => "tag-read",
+        };
         sqlx::query(
             "INSERT INTO book_field_provenance \
-             (book_id, field, value, confidence, source) VALUES (1, ?, ?, ?, ?)",
+             (book_id, field, value, confidence, source, stage) \
+             VALUES (1, ?, ?, ?, ?, ?)",
         )
         .bind(field)
         .bind(value)
         .bind(conf)
         .bind(source)
+        .bind(stage)
         .execute(library.pool())
         .await
         .expect("seed provenance");
@@ -199,11 +210,12 @@ async fn check_constraint_rejects_off_vocabulary_field() {
 
     let res = sqlx::query(
         "INSERT INTO book_field_provenance \
-         (book_id, field, value, source, confidence) VALUES (1, ?, ?, ?, ?)",
+         (book_id, field, value, source, stage, confidence) VALUES (1, ?, ?, ?, ?, ?)",
     )
     .bind("not_a_field")
     .bind("anything")
     .bind("manual")
+    .bind("tag-read")
     .bind(0.5_f64)
     .execute(library.pool())
     .await;
@@ -256,11 +268,12 @@ async fn check_constraint_accepts_every_field_variant() {
     for f in all_variants {
         let res = sqlx::query(
             "INSERT INTO book_field_provenance \
-             (book_id, field, value, source, confidence) VALUES (1, ?, ?, ?, ?)",
+             (book_id, field, value, source, stage, confidence) VALUES (1, ?, ?, ?, ?, ?)",
         )
         .bind(f.as_str())
         .bind("v")
         .bind("manual")
+        .bind("tag-read")
         .bind(0.5_f64)
         .execute(library.pool())
         .await;

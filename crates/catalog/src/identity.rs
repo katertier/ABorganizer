@@ -691,13 +691,13 @@ mod tests {
             .expect("seed book");
         sqlx::query(
             "INSERT INTO book_field_provenance \
-             (book_id, field, value, source, confidence) \
+             (book_id, field, value, source, stage, confidence) \
              VALUES \
-               (1, 'author', 'Brandon Sanderson', 'audnexus_asin_us', 0.95), \
-               (1, 'author', 'brandon sanderson', 'tag_file', 0.7), \
-               (1, 'publisher', 'Recorded Books', 'audnexus_asin_us', 0.95), \
-               (1, 'narrator', 'Michael Kramer', 'audnexus_asin_us', 0.95), \
-               (1, 'narrator', 'Kate Reading',   'audnexus_asin_us', 0.95)",
+               (1, 'author', 'Brandon Sanderson', 'audnexus_asin_us', 'audnexus-enrich', 0.95), \
+               (1, 'author', 'brandon sanderson', 'tag_file',         'tag-read',        0.7), \
+               (1, 'publisher', 'Recorded Books', 'audnexus_asin_us', 'audnexus-enrich', 0.95), \
+               (1, 'narrator', 'Michael Kramer',  'audnexus_asin_us', 'audnexus-enrich', 0.95), \
+               (1, 'narrator', 'Kate Reading',    'audnexus_asin_us', 'audnexus-enrich', 0.95)",
         )
         .execute(ctx.library.pool())
         .await
@@ -764,8 +764,8 @@ mod tests {
             .expect("seed book");
         sqlx::query(
             "INSERT INTO book_field_provenance \
-             (book_id, field, value, source, confidence) \
-             VALUES (1, 'narrator', 'Original Reader', 'tag_file', 0.7)",
+             (book_id, field, value, source, stage, confidence) \
+             VALUES (1, 'narrator', 'Original Reader', 'tag_file', 'tag-read', 0.7)",
         )
         .execute(ctx.library.pool())
         .await
@@ -781,8 +781,8 @@ mod tests {
             .expect("clear");
         sqlx::query(
             "INSERT INTO book_field_provenance \
-             (book_id, field, value, source, confidence) \
-             VALUES (1, 'narrator', 'New Reader', 'audnexus_asin_us', 0.95)",
+             (book_id, field, value, source, stage, confidence) \
+             VALUES (1, 'narrator', 'New Reader', 'audnexus_asin_us', 'audnexus-enrich', 0.95)",
         )
         .execute(ctx.library.pool())
         .await
@@ -834,10 +834,10 @@ mod tests {
         .expect("seed books");
         sqlx::query(
             "INSERT INTO book_field_provenance \
-             (book_id, field, value, source, confidence, external_id) \
+             (book_id, field, value, source, stage, confidence, external_id) \
              VALUES \
-               (1, 'author', 'Haruki Murakami', 'audnexus_asin_us', 0.95, 'B0AUTHORX'), \
-               (2, 'author', 'Murakami, Haruki', 'audnexus_asin_jp', 0.95, 'B0AUTHORX')",
+               (1, 'author', 'Haruki Murakami',  'audnexus_asin_us', 'audnexus-enrich', 0.95, 'B0AUTHORX'), \
+               (2, 'author', 'Murakami, Haruki', 'audnexus_asin_jp', 'audnexus-enrich', 0.95, 'B0AUTHORX')",
         )
         .execute(ctx.library.pool())
         .await
@@ -880,8 +880,8 @@ mod tests {
         // Run 1: tag-read style, no external_id.
         sqlx::query(
             "INSERT INTO book_field_provenance \
-             (book_id, field, value, source, confidence) \
-             VALUES (1, 'author', 'Brandon Sanderson', 'tag_file', 0.7)",
+             (book_id, field, value, source, stage, confidence) \
+             VALUES (1, 'author', 'Brandon Sanderson', 'tag_file', 'tag-read', 0.7)",
         )
         .execute(ctx.library.pool())
         .await
@@ -904,8 +904,8 @@ mod tests {
         // Run 2: audnexus-enrich brings the ASIN. Append candidate.
         sqlx::query(
             "INSERT INTO book_field_provenance \
-             (book_id, field, value, source, confidence, external_id) \
-             VALUES (1, 'author', 'Brandon Sanderson', 'audnexus_asin_us', 0.95, 'B0SANDXYZ')",
+             (book_id, field, value, source, stage, confidence, external_id) \
+             VALUES (1, 'author', 'Brandon Sanderson', 'audnexus_asin_us', 'audnexus-enrich', 0.95, 'B0SANDXYZ')",
         )
         .execute(ctx.library.pool())
         .await

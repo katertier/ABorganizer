@@ -170,8 +170,8 @@ async fn write_candidate(
     let id = book_id.0;
     let field_str = candidate.field.as_str();
     let exists = sqlx::query_scalar!(
-        "SELECT 1 FROM book_field_provenance \
-         WHERE book_id = ? AND field = ? AND value = ? AND source = ?",
+        r#"SELECT 1 AS "hit!: i64" FROM book_field_provenance
+           WHERE book_id = ? AND field = ? AND value = ? AND source = ?"#,
         id,
         field_str,
         candidate.value,
@@ -184,14 +184,16 @@ async fn write_candidate(
         return Ok(());
     }
     let conf = f64::from(candidate.confidence);
+    let stage = STAGE_ID.as_str();
     sqlx::query!(
         "INSERT INTO book_field_provenance \
-         (book_id, field, value, source, confidence, is_winner) \
-         VALUES (?, ?, ?, ?, ?, 0)",
+         (book_id, field, value, source, stage, confidence, is_winner) \
+         VALUES (?, ?, ?, ?, ?, ?, 0)",
         id,
         field_str,
         candidate.value,
         source,
+        stage,
         conf,
     )
     .execute(library.pool())

@@ -377,14 +377,16 @@ async fn write_provenance(
 ) -> Result<()> {
     let id = book_id.0;
     let field_str = field.as_str();
+    let stage_str = STAGE_ID.as_str();
     sqlx::query!(
         "INSERT INTO book_field_provenance \
-         (book_id, field, value, source, confidence, is_winner) \
-         VALUES (?, ?, ?, ?, ?, 0)",
+         (book_id, field, value, source, stage, confidence, is_winner) \
+         VALUES (?, ?, ?, ?, ?, ?, 0)",
         id,
         field_str,
         value,
         PROVENANCE_SOURCE,
+        stage_str,
         TAG_CONFIDENCE,
     )
     .execute(library.pool())

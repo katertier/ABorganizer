@@ -111,7 +111,14 @@ impl Stage for TranscribeHeadTailStage {
         // consensus has the same view of "where the locale came
         // from."
         if let Some(d) = pre.detection.as_ref() {
-            write_language_candidate(&ctx.library, book_id, SOURCE_NL_LANGUAGE_TAGS, d).await?;
+            write_language_candidate(
+                &ctx.library,
+                book_id,
+                SOURCE_NL_LANGUAGE_TAGS,
+                STAGE_ID.as_str(),
+                d,
+            )
+            .await?;
         }
 
         // Head window. Per 3D.2 the post-transcribe quality
@@ -494,15 +501,17 @@ pub(crate) async fn write_language_candidate_for_samples(
     library: &LibraryDb,
     book_id: BookId,
     source: &str,
+    stage: &str,
     detection: &LanguageDetection,
 ) -> Result<()> {
-    write_language_candidate(library, book_id, source, detection).await
+    write_language_candidate(library, book_id, source, stage, detection).await
 }
 
 async fn write_language_candidate(
     library: &LibraryDb,
     book_id: BookId,
     source: &str,
+    stage: &str,
     detection: &LanguageDetection,
 ) -> Result<()> {
     // Normalise via the central language-code table.
@@ -524,11 +533,12 @@ async fn write_language_candidate(
     let conf = detection.confidence;
     sqlx::query!(
         "INSERT INTO book_field_provenance \
-         (book_id, field, value, source, confidence, is_winner) \
-         VALUES (?, 'language', ?, ?, ?, 0)",
+         (book_id, field, value, source, stage, confidence, is_winner) \
+         VALUES (?, 'language', ?, ?, ?, ?, 0)",
         id,
         canonical,
         source,
+        stage,
         conf,
     )
     .execute(library.pool())
