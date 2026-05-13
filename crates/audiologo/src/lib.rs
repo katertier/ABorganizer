@@ -47,10 +47,16 @@ use serde::{Deserialize, Serialize};
 use ab_core::Result;
 
 pub mod apply;
+pub mod phrases;
 pub mod stage;
+pub mod transcript_aided;
 
 pub use apply::{apply_auto_applicable_candidates, apply_libation_stripped};
 pub use stage::{DetectAudiologoStage, STAGE_ID as DETECT_AUDIOLOGO_STAGE_ID};
+pub use transcript_aided::{
+    TranscriptCandidate, corroborate_with_fingerprint, detect_intro_via_transcript,
+    detect_outro_via_transcript,
+};
 
 /// Which side of the audio we're detecting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

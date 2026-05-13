@@ -463,6 +463,65 @@ async fn bump_audiologo_match_count(library: &LibraryDb, audiologo_id: i64) -> R
     Ok(())
 }
 
+/// Persist a transcript-aided candidate row. Idempotent: skips
+/// the insert when a row at the same `(file_id, kind, status)`
+/// already exists (e.g. fingerprint detection inserted one in
+/// the same `run()` pass).
+///
+/// Returns `true` when a fresh row was inserted, `false` when
+/// the candidate was a duplicate (so the caller doesn't
+/// double-count `any_candidate`).
+async fn persist_transcript_candidate(
+    library: &LibraryDb,
+    file_id: i64,
+    cand: &crate::TranscriptCandidate,
+) -> Result<bool> {
+    let kind_str = cand.kind.as_str();
+    let candidate_status = Status::Candidate.as_str();
+    let exists: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM book_file_audiologos \
+         WHERE file_id = ? AND kind = ? AND status = ? LIMIT 1",
+    )
+    .bind(file_id)
+    .bind(kind_str)
+    .bind(candidate_status)
+    .fetch_optional(library.pool())
+    .await
+    .map_err(|e| Error::Database(format!("transcript candidate dedupe: {e}")))?;
+    if exists.is_some() {
+        return Ok(false);
+    }
+    let method_str = cand.method.as_str();
+    let start_i64 = i64::try_from(cand.jingle_start_ms).unwrap_or(i64::MAX);
+    let end_i64 = i64::try_from(cand.jingle_end_ms).unwrap_or(i64::MAX);
+    let conf_f64 = f64::from(cand.confidence);
+    sqlx::query!(
+        r#"INSERT INTO book_file_audiologos
+             (file_id, kind, jingle_start_ms, jingle_end_ms,
+              padding_ms, method, audiologo_id, confidence, status)
+           VALUES (?, ?, ?, ?, NULL, ?, NULL, ?, ?)"#,
+        file_id,
+        kind_str,
+        start_i64,
+        end_i64,
+        method_str,
+        conf_f64,
+        candidate_status,
+    )
+    .execute(library.pool())
+    .await
+    .map_err(|e| Error::Database(format!("transcript candidate insert: {e}")))?;
+    tracing::info!(
+        file_id,
+        kind = %cand.kind,
+        method = %cand.method,
+        publisher_hint = ?cand.publisher_hint,
+        confidence = cand.confidence,
+        "audiologo.transcript.candidate_inserted"
+    );
+    Ok(true)
+}
+
 /// Update `books.audiologo_status` to the given value.
 async fn update_book_audiologo_status(
     library: &LibraryDb,
@@ -606,6 +665,32 @@ impl Stage for DetectAudiologoStage {
                             "audiologo.detect.outro_skipped_no_duration"
                         );
                     }
+                }
+            }
+        }
+
+        // Slice 4C: transcript-aided detection. Runs after the
+        // fingerprint pass; produces TranscriptOnly candidates
+        // (or FingerprintAndTranscript when corroborating with
+        // an existing fingerprint candidate row from THIS run's
+        // intro / outro file). Always candidate-only — these
+        // tiers never auto-apply per ADR-0024.
+        let intro_transcript_hit =
+            crate::transcript_aided::detect_intro_via_transcript(&ctx.library, book_id).await?;
+        let outro_transcript_hit =
+            crate::transcript_aided::detect_outro_via_transcript(&ctx.library, book_id).await?;
+
+        if let Some(first) = files.first() {
+            if let Some(cand) = intro_transcript_hit {
+                if persist_transcript_candidate(&ctx.library, first.file_id, &cand).await? {
+                    any_candidate = true;
+                }
+            }
+        }
+        if let Some(last) = files.last() {
+            if let Some(cand) = outro_transcript_hit {
+                if persist_transcript_candidate(&ctx.library, last.file_id, &cand).await? {
+                    any_candidate = true;
                 }
             }
         }
