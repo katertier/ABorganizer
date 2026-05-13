@@ -37,6 +37,11 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/clean/run", post(clean_run))
         .route("/names/{kind}/{id}/alias", post(crate::names::names_alias))
         .route("/names/{kind}/{id}/exalt", post(crate::names::names_exalt))
+        .route("/names/pending", get(crate::names::names_pending_list))
+        .route(
+            "/names/pending/{pending_id}/resolve",
+            post(crate::names::names_pending_resolve),
+        )
         .with_state(state)
 }
 
