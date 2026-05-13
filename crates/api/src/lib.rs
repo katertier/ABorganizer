@@ -22,6 +22,7 @@ pub mod audiologo_apply;
 pub mod cleanup_targets;
 pub mod error;
 pub mod names;
+pub mod reports;
 pub mod router;
 pub mod state;
 

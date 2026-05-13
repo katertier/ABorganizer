@@ -42,6 +42,8 @@ pub fn build_router(state: ApiState) -> Router {
             "/names/pending/{pending_id}/resolve",
             post(crate::names::names_pending_resolve),
         )
+        .route("/report/gaps", get(crate::reports::report_gaps))
+        .route("/upcoming", get(crate::reports::report_upcoming))
         .with_state(state)
 }
 
