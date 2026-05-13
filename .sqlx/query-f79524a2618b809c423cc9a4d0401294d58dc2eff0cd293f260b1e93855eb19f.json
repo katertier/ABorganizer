@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE book_file_audiologos SET status = ?, re_detected_at = strftime('%s','now') WHERE file_id IN ( SELECT file_id FROM book_files WHERE book_id = ? ) AND status = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "f79524a2618b809c423cc9a4d0401294d58dc2eff0cd293f260b1e93855eb19f"
+}
