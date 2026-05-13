@@ -45,5 +45,13 @@ for migration in crates/db/migrations/library/*.sql crates/db/migrations/ephemer
 done
 echo "prep DB ready: $PREP_DB"
 
-DATABASE_URL="sqlite://$PREP_DB" cargo sqlx prepare --workspace
+# `cargo sqlx prepare --workspace` invokes `cargo check` under the
+# hood. By default the spawned `cargo check` honours the workspace's
+# `default-members` (a small set of binaries), so any workspace
+# member that isn't transitively depended on by one of those
+# defaults — e.g. an early-slice scaffold crate — gets silently
+# skipped. Passing `--workspace --all-targets` after `--` forces
+# cargo to check every lib + test target in members[], which is
+# the coverage we actually need for the cache.
+DATABASE_URL="sqlite://$PREP_DB" cargo sqlx prepare --workspace -- --workspace --all-targets
 echo "cache refreshed: .sqlx/ ($(ls .sqlx/ | wc -l | tr -d ' ') entries)"
