@@ -186,6 +186,18 @@ pub struct PipelineTunables {
     pub audio_workers: usize,
     /// Maximum pending jobs per stage before scan refuses new entries.
     pub max_pending_per_stage: usize,
+
+    /// Opt-in switch for `tag-write-early` (ADR-0028).
+    ///
+    /// `false` (default) — the stage's body ships but is NOT
+    /// wired into the pipeline DAG, so books never reach it.
+    /// Flip to `true` after dry-running the lofty writes
+    /// against a library copy; once on, every book whose
+    /// `tag-read` + consensus winners differ from on-disk will
+    /// be re-tagged on the next pipeline pass. Per-field
+    /// before/after pairs land in `mass_edit_history` so a
+    /// future undo surface can roll them back if needed.
+    pub tag_write_early_enabled: bool,
 }
 
 impl Default for PipelineTunables {
@@ -196,6 +208,7 @@ impl Default for PipelineTunables {
             transcribe_workers: 1,
             audio_workers: 4,
             max_pending_per_stage: 10_000,
+            tag_write_early_enabled: false,
         }
     }
 }

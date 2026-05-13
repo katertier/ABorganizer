@@ -365,6 +365,7 @@ dependencies = [
  "ab-seed",
  "ab-shelf",
  "ab-tag-read",
+ "ab-tag-write",
  "ab-transcript",
  "ab-webui-config",
  "ab-webui-player",
