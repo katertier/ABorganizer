@@ -31,11 +31,26 @@ use sqlx::SqlitePool;
 
 /// Returned by [`acquire`]. Carries the row id so [`release`]
 /// can target the exact row even if multiple refs are held.
+///
+/// The `ref_id` field is private so callers cannot synthesise a
+/// `RefHandle` and call `release` on it — the only legal way to
+/// produce one is via [`acquire`], which guarantees the row
+/// exists. Use [`RefHandle::ref_id`] when an audit / diagnostic
+/// path needs the raw id.
 #[derive(Debug)]
 pub struct RefHandle {
     /// `book_file_refs.ref_id` of the live row this handle
     /// represents.
-    pub ref_id: i64,
+    ref_id: i64,
+}
+
+impl RefHandle {
+    /// Row id for audit / diagnostic surfaces. Production code
+    /// uses [`Self::release`] instead of poking the id directly.
+    #[must_use]
+    pub const fn ref_id(&self) -> i64 {
+        self.ref_id
+    }
 }
 
 impl RefHandle {

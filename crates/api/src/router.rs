@@ -1066,10 +1066,15 @@ async fn run_retry_for_each(
     book_id: i64,
     resolved: Vec<ResolvedStage>,
 ) -> Vec<RetryStageResult> {
+    // Clone the daemon's root cancellation token (not a fresh
+    // one) so SIGTERM-triggered shutdown also halts retry-spawned
+    // stage work. Constructing a new token here was the bug —
+    // `transcribe-full` retries would keep going past graceful
+    // shutdown.
     let stage_ctx = ab_pipeline::StageContext {
         library: state.inner.library.clone(),
         ephemeral: state.inner.ephemeral.clone(),
-        cancel: tokio_util::sync::CancellationToken::new(),
+        cancel: state.inner.cancel.clone(),
         stage_name: "",
     };
     let mut results = Vec::with_capacity(resolved.len());
