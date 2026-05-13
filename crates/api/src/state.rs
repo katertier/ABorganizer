@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use ab_core::tunables::SecurityTunables;
 use ab_db::{EphemeralDb, LibraryDb};
 use ab_pipeline::cleanup::CleanupRegistry;
 use ab_pipeline::{Dag, Scheduler};
@@ -38,6 +39,10 @@ pub struct ApiStateInner {
     /// SIGTERM cancels the token and every long-running task
     /// races to clean shutdown.
     pub cancel: CancellationToken,
+    /// Security knobs (bearer-token + library-root allowlist).
+    /// Consumed by the auth middleware in [`crate::auth`] and
+    /// by the `library_scan` handler's path-validation guard.
+    pub security: SecurityTunables,
     /// Daemon start time (for `/health` uptime).
     pub started_at: std::time::Instant,
 }
@@ -60,6 +65,7 @@ impl ApiState {
         dag: Arc<Dag>,
         cleanup: CleanupRegistry,
         cancel: CancellationToken,
+        security: SecurityTunables,
     ) -> Self {
         Self {
             inner: Arc::new(ApiStateInner {
@@ -69,6 +75,7 @@ impl ApiState {
                 dag,
                 cleanup,
                 cancel,
+                security,
                 started_at: std::time::Instant::now(),
             }),
         }

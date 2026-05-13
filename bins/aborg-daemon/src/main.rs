@@ -224,7 +224,28 @@ async fn main() -> Result<()> {
     let _lock =
         lockfile::acquire(&storage_root.join("daemon.lock")).context("acquire daemon lockfile")?;
 
-    let tunables = Tunables::default();
+    // Layered config: defaults → <storage_root>/config.toml →
+    // AB_* env. Per `ARCHITECTURE.md`, every tunable is meant to
+    // be reachable from config; until this slice, the daemon was
+    // hardcoded to `Tunables::default()` and silently ignored
+    // operator config files. Failures are hard boot errors —
+    // better to refuse to start than to drift from declared
+    // operator intent.
+    let tunables = Tunables::load(&storage_root).context("load tunables")?;
+    if tunables.security.admin_token.is_none() {
+        tracing::warn!(
+            "daemon.start.no_admin_token — API runs unauthenticated. \
+             Set `security.admin_token` in config.toml or AB_SECURITY__ADMIN_TOKEN \
+             env to enable bearer-token auth."
+        );
+    }
+    if tunables.security.library_roots.is_empty() {
+        tracing::warn!(
+            "daemon.start.no_library_roots — POST /library/scan will reject all requests. \
+             Set `security.library_roots` in config.toml or AB_SECURITY__LIBRARY_ROOTS \
+             env to allow scanning."
+        );
+    }
 
     // Open both databases. Pool sizing + busy-timeout come from
     // `tunables.db` (single source of truth in `ab_core::tunables`).
@@ -297,6 +318,7 @@ async fn main() -> Result<()> {
         dag,
         cleanup,
         cancel.clone(),
+        tunables.security.clone(),
     );
 
     // Build the unified Router for the API port (api + webuis).

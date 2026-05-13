@@ -77,6 +77,10 @@ pub struct Tunables {
     /// Cleanup subsystem — periodic-loop interval + age-ratchet
     /// tiers. See [`CleanupTunables`] and ADR-0025.
     pub cleanup: CleanupTunables,
+
+    /// Bearer-token authentication + path-validation roots.
+    /// See [`SecurityTunables`].
+    pub security: SecurityTunables,
 }
 
 impl Default for Tunables {
@@ -99,6 +103,7 @@ impl Default for Tunables {
             llm: LlmTunables::default(),
             library_display: LibraryDisplayTunables::default(),
             cleanup: CleanupTunables::default(),
+            security: SecurityTunables::default(),
         }
     }
 }
@@ -903,6 +908,89 @@ impl Default for CleanupTunables {
                 },
             ],
         }
+    }
+}
+
+/// Security knobs: bearer-token auth + path-validation roots.
+///
+/// Both fields default to "disabled" so a fresh checkout keeps
+/// the existing dev ergonomics — but the daemon's startup logs
+/// a `warn` line for each `None` field at boot so operators
+/// running on a non-loopback bind know what they're missing.
+///
+/// Set via `config.toml`:
+///
+/// ```toml
+/// [security]
+/// admin_token = "abc123..."  # 32+ random bytes hex-encoded
+/// library_roots = ["/Volumes/Audiobooks/Library"]
+/// ```
+///
+/// Or via env: `AB_SECURITY_ADMIN_TOKEN=...`,
+/// `AB_SECURITY_LIBRARY_ROOTS=/path1:/path2` (figment's array
+/// env handling splits on the platform path separator).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SecurityTunables {
+    /// Bearer token the API layer compares against the
+    /// `Authorization: Bearer <token>` header. `None` disables
+    /// auth entirely — only safe on loopback binds. A future
+    /// slice graduates to the per-user tokens table; this is
+    /// the v0 hard-stop until that lands.
+    pub admin_token: Option<String>,
+
+    /// Allowed library roots for `POST /library/scan`. The
+    /// handler canonicalises the requested path and verifies it
+    /// is at-or-under one of these. Empty list disables
+    /// scan-by-path (the future `POST /library/roots` will be
+    /// the only way to register).
+    pub library_roots: Vec<PathBuf>,
+}
+
+impl Tunables {
+    /// Load tunables from a layered config: built-in defaults
+    /// → `<storage_root>/config.toml` (if it exists) → `AB_*`
+    /// env (figment's `__` nested separator: e.g.
+    /// `AB_SECURITY__ADMIN_TOKEN`).
+    ///
+    /// `storage_root` is used both as the lookup root for
+    /// `config.toml` AND wins over the default `storage_root`
+    /// field if no config file override sets it. Callers
+    /// (`aborg-daemon::main`) pass the resolved `app_support`
+    /// directory.
+    ///
+    /// Failures (malformed TOML, env coercion errors) return
+    /// `Err` with figment's diagnostic chain attached. The
+    /// daemon treats this as a hard boot error — better to
+    /// refuse to start than to silently fall back to defaults
+    /// that don't match operator intent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`figment::Error`] wrapped in
+    /// [`crate::Error::Config`] on any merge / coercion failure.
+    pub fn load(storage_root: &std::path::Path) -> crate::Result<Self> {
+        use figment::Figment;
+        use figment::providers::{Env, Format, Serialized, Toml};
+
+        let config_path = storage_root.join("config.toml");
+        let mut figment = Figment::from(Serialized::defaults(Self {
+            storage_root: storage_root.to_path_buf(),
+            ..Self::default()
+        }));
+        if config_path.exists() {
+            figment = figment.merge(Toml::file(&config_path));
+        }
+        // Env layer last so AB_* always wins. `__` is figment's
+        // documented nested-key separator.
+        figment = figment.merge(Env::prefixed("AB_").split("__"));
+
+        figment.extract().map_err(|e| {
+            crate::Error::Config(format!(
+                "tunables load (config={}): {e}",
+                config_path.display(),
+            ))
+        })
     }
 }
 
