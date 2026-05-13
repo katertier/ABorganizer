@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE books SET story_arc_json = ? WHERE book_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "a8c56c6d19f3e81b6d970a0b2e0fda102660c0bb4127c8a568236c412a294f17"
+}

@@ -17,10 +17,12 @@
 //! - [`ExtractSeriesSummaryStage`] — spoiler-free series synopsis
 //!   into `series.summary` + `_lang` (regenerated when a book
 //!   joins a series or member-book summaries change).
+//! - [`ExtractStoryArcStage`] — 5-7 narrative beats into
+//!   `books.story_arc_json` (per ADR-0022 per-book content
+//!   extractor template).
 //!
-//! Planned (slices 3K.5 / 3K.6):
+//! Planned (slice 3K.6):
 //!
-//! - Story arc into `books.story_arc_json`.
 //! - Characters into the `characters` table.
 //!
 //! All extractors follow the same pattern: idempotent re-runs
@@ -35,10 +37,15 @@
 //! off-schema tokens; the DNA stage was retrofitted to the
 //! same pattern in slice C5.7.d.
 
+pub mod arc_stage;
 pub mod dna_stage;
 pub mod series_summary_stage;
 pub mod summary_stage;
 
+pub use arc_stage::{
+    ARC_SCHEMA_JSON, ArcBeat, ExtractStoryArcStage, STAGE_NAME as EXTRACT_STORY_ARC_STAGE,
+    build_prompt as build_arc_prompt,
+};
 pub use dna_stage::{
     DNA_SCHEMA_JSON, ExtractDnaTagsStage, STAGE_NAME as EXTRACT_DNA_TAGS_STAGE, TAG_SOURCE_DNA_LLM,
     build_prompt as build_dna_prompt, normalise_tag,
