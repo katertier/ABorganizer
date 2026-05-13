@@ -1,29 +1,38 @@
-//! `tag-write-early` and `tag-write-final` Stage skeletons
-//! (ADR-0028).
+//! `tag-write-early` (lofty-backed body) + `tag-write-final`
+//! (still scaffolding) Stage impls (ADR-0028).
 //!
-//! Both stages are scaffolding-only at this slice: `run()` returns
-//! `Skipped` until the lofty-based tag-write integration lands.
-//! What's real here:
+//! Slice scope notes:
 //!
-//! - Typed [`StageId`] constants ([`TAG_WRITE_EARLY_STAGE_ID`],
-//!   [`TAG_WRITE_FINAL_STAGE_ID`]) — usable by other stages in
-//!   their `requires()` lists immediately, without waiting for
-//!   the write body.
-//! - `requires()` lists — the minimal subset needed for this
-//!   slice's `Stage::requires` graph to type-check. The full set
-//!   per ADR-0028 (every AI extractor + transcode for the late
-//!   pass) lands as each upstream stage's `StageId` becomes
-//!   referenceable.
+//! - **`TagWriteEarlyStage::run`** ships its real body in this
+//!   slice. It pulls winners via [`crate::winners`], filters
+//!   away the no-op "everything came from the tag file" case
+//!   (ADR-0028 § "Skips"), and writes the supported fields back
+//!   to every active `book_files` row for the book via
+//!   [`crate::write::write_winners`]. Each per-file pass
+//!   acquires + releases a `book_file_refs` row so the future
+//!   `transcode-m4b` cleanup target never reaps a source the
+//!   stage is mid-write on (ADR-0027 lifecycle).
+//! - **`TagWriteFinalStage::run`** still returns `Skipped`. The
+//!   final pass needs the AI-extractor surface (`extract-summary-
+//!   spoiler-free`, `extract-story-arc`, `extract-characters`,
+//!   `extract-setting`) to actually produce non-`tag_file`
+//!   winners; until those land at the `StageId` level the
+//!   late pass would just rewrite what Early already wrote.
 //!
-//! Not registered in `aborg-daemon`'s pipeline registry yet — a
-//! `Skipped` skeleton has no operator-visible effect, and
-//! registering it would surface a confusing "stage runs but does
-//! nothing" in the pipeline-progress UI.
+//! Neither stage is registered in `aborg-daemon` yet — turning
+//! on Early means every existing book gets re-tagged on the next
+//! pipeline pass, which is a deliberate operator opt-in. The
+//! daemon-wiring flip is its own slice.
 
 use async_trait::async_trait;
 
-use ab_core::{BookId, Result};
+use ab_core::{BookId, Error, FileId, Result};
+use ab_db::book_file_refs;
 use ab_pipeline::{Stage, StageContext, StageId, StageOutcome};
+
+use crate::USER_EDIT_SOURCE;
+use crate::winners::{FieldWinner, select_winners_for_book};
+use crate::write::{WriteReport, write_winners};
 
 /// Typed stage identifier for the early tag-write pass.
 pub const TAG_WRITE_EARLY_STAGE_ID: StageId = StageId::new("tag-write-early");
@@ -40,33 +49,27 @@ pub const TAG_WRITE_FINAL_STAGE_NAME: &str = TAG_WRITE_FINAL_STAGE_ID.as_str();
 /// Per ADR-0028: `tag-read`, `identity-resolve`, `extract-dna-tags`.
 /// Only `tag-read` exists as a referenceable `StageId` today; the
 /// other two land on their owning crates' typed-`StageId` slices
-/// and get appended here. Keeping the partial list live (rather
-/// than empty) is intentional — the dispatcher can already enforce
-/// the one ordering dependency we know about.
+/// and get appended here. The scheduler treats `Skipped` outcomes
+/// as satisfied so partial lists don't deadlock.
 const TAG_WRITE_EARLY_REQUIRES: &[StageId] = &[StageId::new("tag-read")];
 
 /// `Stage::requires` set for the final pass.
 ///
 /// Per ADR-0028 § "`TagWriteFinal` `requires()`": every AI extractor
 /// that can produce a `book_field_provenance` row, plus
-/// `transcode-m4b` when present. Today only `tag-read` exists as a
-/// referenceable `StageId`; the rest land slice-by-slice. The
-/// scheduler treats `Skipped` outcomes as satisfied, so missing
-/// upstreams don't deadlock books with no transcript.
+/// `transcode-m4b` when present. Today only `tag-read` exists as
+/// a referenceable `StageId`; the rest land slice-by-slice.
 const TAG_WRITE_FINAL_REQUIRES: &[StageId] = &[StageId::new("tag-read")];
 
 /// Early-pass tag-write stage (ADR-0028 § `TagWriteEarly`).
 ///
-/// Intended priority: `Foreground`. Writes the 16 fields in the
-/// `book_field_provenance.field` `CHECK` set (`title`, `subtitle`,
-/// `description`, `language`, `release_date`, `duration_seconds`,
-/// `asin`, `isbn`, `author`, `narrator`, `publisher`, `series`,
-/// `genre`, `cover_url`, `abridged`, `explicit`) using the
-/// `is_winner = 1` row for each field. Skips the I/O when only
-/// `source = 'tag_file'` winners exist (no point writing tags we
-/// just read).
-///
-/// Scaffolding only at this slice — `run()` returns `Skipped`.
+/// Intended priority: `Foreground`. Writes the supported subset
+/// of the 16 `book_field_provenance` fields (Title, Author,
+/// Series, Language, Genre, Publisher, Asin, Isbn — the rest
+/// land in a follow-up slice per
+/// [`crate::write`]'s coverage table) using the `is_winner = 1`
+/// row for each field. Skips when every winner is itself from
+/// `source = 'tag_file'` (no point writing tags we just read).
 #[derive(Debug, Default)]
 pub struct TagWriteEarlyStage;
 
@@ -88,17 +91,164 @@ impl Stage for TagWriteEarlyStage {
         TAG_WRITE_EARLY_REQUIRES
     }
 
-    async fn run(&self, _ctx: &StageContext, book_id: BookId) -> Result<StageOutcome> {
-        // Skeleton — the lofty-based tag writer lives in a
-        // follow-up slice. Returning Skipped keeps the
-        // dispatcher's graph healthy.
-        tracing::debug!(
+    async fn run(&self, ctx: &StageContext, book_id: BookId) -> Result<StageOutcome> {
+        let winners = select_winners_for_book(ctx.library.pool(), book_id.0).await?;
+        if winners.is_empty() {
+            tracing::debug!(
+                book = %book_id,
+                stage = TAG_WRITE_EARLY_STAGE_NAME,
+                "tag-write.early.no_winners"
+            );
+            return Ok(StageOutcome::Skipped);
+        }
+
+        // ADR-0028 § "Skips": when every available winner is
+        // itself from `source = 'tag_file'`, writing them is a
+        // tautology — we'd just be persisting what we read. Skip
+        // entirely. (`user_edit` rows count as non-tag_file so
+        // they survive the filter for the late pass; Early
+        // doesn't differentiate by source, only by tautology.)
+        if winners.iter().all(|w| w.source == "tag_file") {
+            tracing::debug!(
+                book = %book_id,
+                stage = TAG_WRITE_EARLY_STAGE_NAME,
+                winner_count = winners.len(),
+                "tag-write.early.all_winners_from_tag_file_skip"
+            );
+            return Ok(StageOutcome::Skipped);
+        }
+
+        let files = load_active_file_paths(ctx, book_id).await?;
+        if files.is_empty() {
+            tracing::debug!(
+                book = %book_id,
+                stage = TAG_WRITE_EARLY_STAGE_NAME,
+                "tag-write.early.no_active_files"
+            );
+            return Ok(StageOutcome::Skipped);
+        }
+
+        // The skip-list constant from `crate` keeps the "what
+        // does user_edit mean" knowledge in one place even
+        // though Early doesn't use it for filtering — the
+        // import is the trail-leaving move that helps the
+        // future final-stage author find the constant.
+        let _ = USER_EDIT_SOURCE;
+
+        let mut totals = WriteReport::default();
+        let mut any_changed = false;
+        for (file_id, file_path) in files {
+            match write_one_file(ctx, book_id, file_id, &file_path, &winners).await {
+                Ok(report) => {
+                    totals.fields_changed += report.fields_changed;
+                    totals.fields_already_matched += report.fields_already_matched;
+                    totals.fields_unmapped += report.fields_unmapped;
+                    if report.fields_changed > 0 {
+                        any_changed = true;
+                    }
+                }
+                Err(e) => {
+                    // Per-file errors don't abort the book — a
+                    // single broken file shouldn't block the
+                    // others. Surface to tracing; the scheduler
+                    // will retry the stage on a future pass via
+                    // ADR-0023.
+                    tracing::warn!(
+                        book = %book_id,
+                        file_id = file_id.0,
+                        path = %file_path,
+                        error = %e,
+                        "tag-write.early.file_failed"
+                    );
+                }
+            }
+        }
+
+        tracing::info!(
             book = %book_id,
             stage = TAG_WRITE_EARLY_STAGE_NAME,
-            "tag-write.early.skeleton_skip"
+            fields_changed = totals.fields_changed,
+            fields_already_matched = totals.fields_already_matched,
+            fields_unmapped = totals.fields_unmapped,
+            "tag-write.early.done"
         );
-        Ok(StageOutcome::Skipped)
+
+        if any_changed {
+            Ok(StageOutcome::Done)
+        } else {
+            // Every file was either a no-op match or covered
+            // unmapped-only fields. Idempotent re-runs hit this
+            // path.
+            Ok(StageOutcome::Skipped)
+        }
     }
+}
+
+/// Active `book_files` rows for the book — `(file_id, file_path)`
+/// tuples used by the per-file write loop.
+async fn load_active_file_paths(
+    ctx: &StageContext,
+    book_id: BookId,
+) -> Result<Vec<(FileId, String)>> {
+    let id = book_id.0;
+    let rows = sqlx::query!(
+        r#"SELECT file_id AS "file_id!: i64", file_path
+             FROM book_files
+            WHERE book_id = ? AND is_active = 1
+            ORDER BY file_id"#,
+        id,
+    )
+    .fetch_all(ctx.library.pool())
+    .await
+    .map_err(|e| Error::Database(format!("tag-write-early load files: {e}")))?;
+    Ok(rows
+        .into_iter()
+        .map(|r| (FileId(r.file_id), r.file_path))
+        .collect())
+}
+
+/// Per-file write: acquire ref, write tags, release ref. The
+/// ref guard is explicit because `Drop` can't be async; both
+/// success and error paths release before returning.
+async fn write_one_file(
+    ctx: &StageContext,
+    book_id: BookId,
+    file_id: FileId,
+    file_path: &str,
+    winners: &[FieldWinner],
+) -> Result<WriteReport> {
+    let handle = book_file_refs::acquire(
+        ctx.library.pool(),
+        file_id,
+        TAG_WRITE_EARLY_STAGE_NAME,
+        book_id,
+    )
+    .await?;
+
+    // Block on lofty's sync I/O via `spawn_blocking`. Audio
+    // file rewrites can run hundreds of ms (tag sections inside
+    // large mp4 atoms); blocking the async runtime here would
+    // stall every other in-flight stage on the same worker.
+    let path_owned = file_path.to_owned();
+    let winners_owned: Vec<FieldWinner> = winners.to_vec();
+    let result = tokio::task::spawn_blocking(move || {
+        write_winners(std::path::Path::new(&path_owned), &winners_owned)
+    })
+    .await
+    .map_err(|e| Error::Io(std::io::Error::other(format!("tag-write-early join: {e}"))))?;
+
+    // Release happens regardless of write outcome — never leak
+    // a ref on the error path.
+    if let Err(e) = handle.release(ctx.library.pool()).await {
+        tracing::warn!(
+            book = %book_id,
+            file_id = file_id.0,
+            error = %e,
+            "tag-write.early.release_failed"
+        );
+    }
+
+    result
 }
 
 /// Final-pass tag-write stage (ADR-0028 § `TagWriteFinal`).
@@ -110,11 +260,11 @@ impl Stage for TagWriteEarlyStage {
 /// user-edit": the user's correction wins until they explicitly
 /// clear it.
 ///
-/// The per-field skip is via [`crate::skip_for_final_pass`] —
-/// kept as a free function so the convention's exact spelling
-/// lives in one place (`crate::USER_EDIT_SOURCE`).
-///
-/// Scaffolding only at this slice — `run()` returns `Skipped`.
+/// Still scaffolding at this slice — `run()` returns `Skipped`.
+/// The final pass becomes meaningful only after the AI
+/// extractors (`extract-summary-spoiler-free`, `extract-story-arc`,
+/// `extract-characters`, `extract-setting`) start producing
+/// non-`tag_file` winners.
 #[derive(Debug, Default)]
 pub struct TagWriteFinalStage;
 
@@ -170,11 +320,33 @@ mod tests {
         }
     }
 
+    async fn seed_book(ctx: &StageContext, book_id: i64) {
+        sqlx::query("INSERT INTO books (book_id, title) VALUES (?, 'fixture')")
+            .bind(book_id)
+            .execute(ctx.library.pool())
+            .await
+            .expect("seed book");
+    }
+
+    async fn seed_winner(ctx: &StageContext, book_id: i64, field: &str, value: &str, source: &str) {
+        sqlx::query(
+            "INSERT INTO book_field_provenance \
+                 (book_id, field, value, source, stage, confidence, is_winner) \
+             VALUES (?, ?, ?, ?, 'test-stage', 0.9, 1)",
+        )
+        .bind(book_id)
+        .bind(field)
+        .bind(value)
+        .bind(source)
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed provenance");
+    }
+
     #[test]
     fn typed_stage_ids_pin_strings() {
         assert_eq!(TAG_WRITE_EARLY_STAGE_ID.as_str(), "tag-write-early");
         assert_eq!(TAG_WRITE_FINAL_STAGE_ID.as_str(), "tag-write-final");
-        // Mirror constants stay in lock-step.
         assert_eq!(
             TAG_WRITE_EARLY_STAGE_NAME,
             TAG_WRITE_EARLY_STAGE_ID.as_str()
@@ -189,8 +361,6 @@ mod tests {
     async fn early_stage_metadata() {
         let s = TagWriteEarlyStage::new();
         assert_eq!(s.name(), "tag-write-early");
-        // Partial requires: tag-read only, rest land as upstream
-        // StageIds become referenceable.
         assert_eq!(s.requires(), &[StageId::new("tag-read")]);
     }
 
@@ -199,20 +369,6 @@ mod tests {
         let s = TagWriteFinalStage::new();
         assert_eq!(s.name(), "tag-write-final");
         assert_eq!(s.requires(), &[StageId::new("tag-read")]);
-    }
-
-    #[tokio::test]
-    async fn early_skeleton_run_returns_skipped() {
-        let tmp = TempDir::new().expect("tmpdir");
-        let ctx = fresh_ctx(tmp.path(), TAG_WRITE_EARLY_STAGE_NAME).await;
-        let outcome = TagWriteEarlyStage::new()
-            .run(&ctx, BookId(1))
-            .await
-            .expect("run");
-        match outcome {
-            StageOutcome::Skipped => {}
-            other => panic!("expected Skipped, got {other:?}"),
-        }
     }
 
     #[tokio::test]
@@ -226,6 +382,87 @@ mod tests {
         match outcome {
             StageOutcome::Skipped => {}
             other => panic!("expected Skipped, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn early_skips_when_no_winners() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let ctx = fresh_ctx(tmp.path(), TAG_WRITE_EARLY_STAGE_NAME).await;
+        seed_book(&ctx, 1).await;
+
+        let outcome = TagWriteEarlyStage::new()
+            .run(&ctx, BookId(1))
+            .await
+            .expect("run");
+        match outcome {
+            StageOutcome::Skipped => {}
+            other => panic!("expected Skipped (no winners), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn early_skips_when_only_tag_file_winners() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let ctx = fresh_ctx(tmp.path(), TAG_WRITE_EARLY_STAGE_NAME).await;
+        seed_book(&ctx, 1).await;
+        seed_winner(&ctx, 1, "title", "Foundation", "tag_file").await;
+        seed_winner(&ctx, 1, "author", "Asimov", "tag_file").await;
+
+        let outcome = TagWriteEarlyStage::new()
+            .run(&ctx, BookId(1))
+            .await
+            .expect("run");
+        match outcome {
+            StageOutcome::Skipped => {}
+            other => panic!("expected Skipped (all tag_file winners), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn early_skips_when_no_active_files() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let ctx = fresh_ctx(tmp.path(), TAG_WRITE_EARLY_STAGE_NAME).await;
+        seed_book(&ctx, 1).await;
+        // Winner from audnexus, NOT tag_file — survives the
+        // tautology filter — but no active file rows.
+        seed_winner(&ctx, 1, "title", "Foundation", "audnexus-enrich").await;
+
+        let outcome = TagWriteEarlyStage::new()
+            .run(&ctx, BookId(1))
+            .await
+            .expect("run");
+        match outcome {
+            StageOutcome::Skipped => {}
+            other => panic!("expected Skipped (no active files), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn early_recovers_when_file_path_is_unreadable() {
+        // Pure resilience test: an active row with a path that
+        // doesn't exist on disk. lofty fails to open it; the
+        // stage logs + continues to the next file (none here),
+        // returns Skipped because no successful writes.
+        let tmp = TempDir::new().expect("tmpdir");
+        let ctx = fresh_ctx(tmp.path(), TAG_WRITE_EARLY_STAGE_NAME).await;
+        seed_book(&ctx, 1).await;
+        seed_winner(&ctx, 1, "title", "Foundation", "audnexus-enrich").await;
+        sqlx::query(
+            "INSERT INTO book_files (file_id, book_id, file_path, is_active) \
+             VALUES (1, 1, '/nonexistent/path/should/never/exist.mp3', 1)",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed file");
+
+        let outcome = TagWriteEarlyStage::new()
+            .run(&ctx, BookId(1))
+            .await
+            .expect("run");
+        match outcome {
+            StageOutcome::Skipped => {}
+            other => panic!("expected Skipped (no successful write), got {other:?}"),
         }
     }
 }
