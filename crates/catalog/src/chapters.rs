@@ -143,6 +143,27 @@ impl Stage for AudnexusChaptersStage {
         );
         Ok(StageOutcome::Done)
     }
+
+    /// Override the default reset to also wipe the `chapters`
+    /// rows this stage wrote (`source = 'audnexus'`). Without
+    /// this the post-reset rerun would converge correctly (the
+    /// stage's own `write_chapters` clears its source rows
+    /// before inserting), but an interim state where reset has
+    /// happened and rerun is queued-but-not-yet-run would
+    /// surface the stale chapters to readers. Explicit reset
+    /// keeps the contract honest.
+    async fn reset(&self, ctx: &StageContext, book_id: BookId) -> Result<()> {
+        let id = book_id.0;
+        sqlx::query!(
+            "DELETE FROM chapters WHERE book_id = ? AND source = ?",
+            id,
+            CHAPTER_SOURCE,
+        )
+        .execute(ctx.library.pool())
+        .await
+        .map_err(|e| Error::Database(format!("audnexus-chapters reset: {e}")))?;
+        ab_pipeline::default_reset(STAGE_ID.as_str(), ctx, book_id).await
+    }
 }
 
 /// Fetch the ASIN that audnexus-enrich promoted into `books.asin`.
@@ -382,5 +403,65 @@ mod tests {
         let stage = AudnexusChaptersStage::new(client, &NetworkTunables::default());
         let outcome = stage.run(&ctx, BookId(1)).await.expect("run");
         assert_eq!(outcome, StageOutcome::Skipped);
+    }
+
+    #[tokio::test]
+    async fn reset_clears_audnexus_chapter_rows_only() {
+        // Slice H.1.5: the per-stage `reset()` override must
+        // wipe the `chapters` rows this stage produced (source =
+        // 'audnexus') while leaving rows from other sources
+        // (embedded / cue / etc.) untouched.
+        let tmp = TempDir::new().expect("tmpdir");
+        let ctx = fresh_ctx(tmp.path()).await;
+        sqlx::query("INSERT INTO books (book_id, title) VALUES (1, 'fixture')")
+            .execute(ctx.library.pool())
+            .await
+            .expect("seed book");
+        sqlx::query(
+            "INSERT INTO chapters (book_id, idx, start_ms, end_ms, title, source) VALUES \
+                (1, 0, 0, 10_000, 'audnexus-row', 'audnexus'), \
+                (1, 1, 10_000, 20_000, 'audnexus-row-2', 'audnexus'), \
+                (1, 0, 0, 10_000, 'embedded-row', 'embedded')",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed chapters");
+        // Also seed a pipeline_progress row so we can confirm
+        // the chained `default_reset` call clears it.
+        sqlx::query(
+            "INSERT INTO pipeline_progress (book_id, stage, status) \
+             VALUES (1, 'audnexus-chapters', 'succeeded')",
+        )
+        .execute(ctx.ephemeral.pool())
+        .await
+        .expect("seed progress");
+
+        let client = AudnexusClient::new(&HttpClientTunables::default());
+        let stage = AudnexusChaptersStage::new(client, &NetworkTunables::default());
+        stage.reset(&ctx, BookId(1)).await.expect("reset");
+
+        let remaining: Vec<(String, String)> = sqlx::query_as(
+            "SELECT source, title FROM chapters WHERE book_id = 1 ORDER BY source, idx",
+        )
+        .fetch_all(ctx.library.pool())
+        .await
+        .expect("read remaining");
+        assert_eq!(
+            remaining,
+            vec![("embedded".into(), "embedded-row".into())],
+            "audnexus rows wiped, embedded row preserved"
+        );
+
+        let progress_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pipeline_progress WHERE book_id = 1 AND stage = ?",
+        )
+        .bind(STAGE_ID.as_str())
+        .fetch_one(ctx.ephemeral.pool())
+        .await
+        .expect("read progress");
+        assert_eq!(
+            progress_count, 0,
+            "default_reset cleared the progress row too"
+        );
     }
 }

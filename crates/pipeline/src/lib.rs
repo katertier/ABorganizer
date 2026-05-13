@@ -33,4 +33,4 @@ pub mod stage;
 
 pub use dag::{Dag, DagBuildError};
 pub use scheduler::{Priority, Scheduler};
-pub use stage::{Stage, StageContext, StageId, StageOutcome};
+pub use stage::{Stage, StageContext, StageId, StageOutcome, default_reset};
