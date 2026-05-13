@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT audiologo_id AS \"audiologo_id!: i64\",\n                  fingerprint,\n                  duration_ms,\n                  match_threshold\n             FROM audiologos\n            WHERE kind = ?\n            ORDER BY audiologo_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "audiologo_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "fingerprint",
+        "ordinal": 1,
+        "type_info": "Blob"
+      },
+      {
+        "name": "duration_ms",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "match_threshold",
+        "ordinal": 3,
+        "type_info": "Float"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "6d4ab0a0a33392c9ca7cde71375dfad6d83abd51be06056992b9c12e4e475f63"
+}
