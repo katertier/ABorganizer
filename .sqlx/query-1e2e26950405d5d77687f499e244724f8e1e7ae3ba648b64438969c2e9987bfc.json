@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE books SET duration_ms = duration_ms - ? WHERE book_id = ? AND duration_ms IS NOT NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "1e2e26950405d5d77687f499e244724f8e1e7ae3ba648b64438969c2e9987bfc"
+}

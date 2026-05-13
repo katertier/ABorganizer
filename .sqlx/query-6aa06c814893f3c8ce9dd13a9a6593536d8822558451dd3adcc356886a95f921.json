@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT audiologo_status FROM books WHERE book_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "audiologo_status",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6aa06c814893f3c8ce9dd13a9a6593536d8822558451dd3adcc356886a95f921"
+}
