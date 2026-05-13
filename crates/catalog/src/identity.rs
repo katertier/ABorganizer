@@ -43,6 +43,24 @@
 //! partial index. When a name-match wins on a row that's missing
 //! `audible_id` and the current candidate has one, the existing
 //! row is updated to fill it in.
+//!
+//! # Alias junction (slice H.3.2, ADR-0026)
+//!
+//! Every observed spelling is registered in the appropriate
+//! `*_aliases` junction (`author_aliases`, `narrator_aliases`,
+//! `series_aliases`). The first row inserted gets
+//! `source='canonical' is_prime=1`; subsequent spellings get
+//! `source` from the candidate's origin and `is_prime=0`. The
+//! partial unique index on the junction enforces "at most one
+//! prime per parent." Manual exaltation (H.3.4) flips
+//! `is_prime` between rows.
+//!
+//! Match-time lookup uses the junction's `COLLATE NOCASE` index
+//! so the same alias attached to multiple parents (two David
+//! Mitchells — see ADR-0026) is observable as a multi-row hit.
+//! H.3.2 picks the first hit + logs a warn for the ambiguous
+//! case; the three-way `IdentityMatch` enum + corroboration
+//! lands in H.3.5.
 
 use std::collections::HashSet;
 
@@ -344,43 +362,40 @@ async fn find_or_insert_series(
         .await
         .map_err(|e| Error::Database(format!("identity lookup series by asin: {e}")))?;
         if let Some(id) = existing {
+            register_alias_for_kind(tx, "series", id, name, alias_source(audible_id)).await?;
             return Ok(id);
         }
     }
 
-    // 2) Case-insensitive name lookup. sqlx's nullability
-    //    inference treats `SELECT pk FROM t WHERE lower(name) = …`
-    //    as `Option<Option<i64>>` (the lower() arg defeats the
-    //    non-null inference); flatten back to Option<i64>.
-    //    Same shape as `find_or_insert_publisher`.
-    let existing: Option<i64> = sqlx::query_scalar!(
-        "SELECT series_id FROM series WHERE lower(name) = lower(?) LIMIT 1",
-        name,
-    )
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|e| Error::Database(format!("identity lookup series by name: {e}")))?
-    .flatten();
-
-    if let Some(id) = existing {
-        // Back-fill audible_id when we now have one and the row
-        // doesn't (e.g. tag-read seeded the row; an Audnexus call
-        // followed).
+    // 2) Alias-junction lookup. Same shape as authors / narrators
+    //    (H.3.2, ADR-0026). Multi-row hit → first + warn; H.3.5
+    //    introduces the three-way enum.
+    let alias_matches = lookup_by_alias(tx, "series", "series_id", name).await?;
+    if let Some(first) = alias_matches.first().copied() {
+        if alias_matches.len() > 1 {
+            tracing::warn!(
+                table = "series",
+                alias = name,
+                candidates = ?alias_matches,
+                "identity.match.ambiguous_alias"
+            );
+        }
         if let Some(asin) = audible_id {
             sqlx::query!(
                 "UPDATE series SET audible_id = ? \
                  WHERE series_id = ? AND audible_id IS NULL",
                 asin,
-                id,
+                first,
             )
             .execute(&mut **tx)
             .await
             .map_err(|e| Error::Database(format!("identity backfill series audible_id: {e}")))?;
         }
-        return Ok(id);
+        register_alias_for_kind(tx, "series", first, name, alias_source(audible_id)).await?;
+        return Ok(first);
     }
 
-    // 3) Insert new row.
+    // 3) Insert new row + canonical alias.
     let new_id: i64 = sqlx::query_scalar!(
         "INSERT INTO series (name, audible_id) VALUES (?, ?) RETURNING series_id",
         name,
@@ -389,6 +404,7 @@ async fn find_or_insert_series(
     .fetch_one(&mut **tx)
     .await
     .map_err(|e| Error::Database(format!("identity insert series: {e}")))?;
+    insert_alias_with_flag(tx, "series", new_id, name, "canonical", true).await?;
     Ok(new_id)
 }
 
@@ -581,34 +597,43 @@ async fn find_or_insert_person(
             .await
             .map_err(|e| Error::Database(format!("identity lookup-by-id {table}: {e}")))?;
         if let Some(id) = existing {
+            register_alias_for_kind(tx, table, id, name, alias_source(external_id)).await?;
             return Ok(id);
         }
     }
-    // 2) Case-insensitive name lookup.
-    let select_sql = format!(
-        "SELECT {id_column}, audible_id FROM {table} \
-         WHERE lower(name) = lower(?) LIMIT 1"
-    );
-    let existing: Option<(i64, Option<String>)> = sqlx::query_as(&select_sql)
-        .bind(name)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(|e| Error::Database(format!("identity lookup {table}: {e}")))?;
-    if let Some((id, existing_id)) = existing {
-        // Back-fill audible_id if the row has none and we have one
-        // to offer.
-        if existing_id.is_none() {
-            if let Some(ext) = external_id {
-                let update_sql = format!("UPDATE {table} SET audible_id = ? WHERE {id_column} = ?");
-                sqlx::query(&update_sql)
-                    .bind(ext)
-                    .bind(id)
-                    .execute(&mut **tx)
-                    .await
-                    .map_err(|e| Error::Database(format!("identity backfill {table}: {e}")))?;
-            }
+    // 2) Alias-junction lookup. The junction is the typed
+    //    replacement for the dropped `aliases TEXT` column +
+    //    `lower(name) = ?` shape (H.3.1, ADR-0026). The
+    //    `COLLATE NOCASE` index makes this O(log n). On a multi-
+    //    row hit (two parents share the alias, e.g. two David
+    //    Mitchells) we pick the first ID + log warn; H.3.5 swaps
+    //    in the three-way enum + corroboration.
+    let alias_matches = lookup_by_alias(tx, table, id_column, name).await?;
+    if let Some(first) = alias_matches.first().copied() {
+        if alias_matches.len() > 1 {
+            tracing::warn!(
+                table,
+                alias = name,
+                candidates = ?alias_matches,
+                "identity.match.ambiguous_alias"
+            );
         }
-        return Ok(id);
+        // Back-fill audible_id when we have one and the row
+        // doesn't.
+        if let Some(ext) = external_id {
+            let update_sql = format!(
+                "UPDATE {table} SET audible_id = ? \
+                 WHERE {id_column} = ? AND audible_id IS NULL"
+            );
+            sqlx::query(&update_sql)
+                .bind(ext)
+                .bind(first)
+                .execute(&mut **tx)
+                .await
+                .map_err(|e| Error::Database(format!("identity backfill {table}: {e}")))?;
+        }
+        register_alias_for_kind(tx, table, first, name, alias_source(external_id)).await?;
+        return Ok(first);
     }
     // 3) Fresh insert. Carries the audible_id when present.
     let insert_sql =
@@ -619,7 +644,117 @@ async fn find_or_insert_person(
         .fetch_one(&mut **tx)
         .await
         .map_err(|e| Error::Database(format!("identity insert {table}: {e}")))?;
+    // Seed the canonical alias for the new parent. `is_prime=1`
+    // because no other prime can exist yet (partial unique index
+    // enforces ≤1 prime per parent). Subsequent observations of
+    // alternative spellings come in via `register_alias_for_kind`
+    // with `is_prime=0`.
+    insert_alias_with_flag(tx, table, new_id, name, "canonical", true).await?;
     Ok(new_id)
+}
+
+/// Map a candidate's `external_id` presence to the alias `source`
+/// closed-vocab string per ADR-0026.
+const fn alias_source(external_id: Option<&str>) -> &'static str {
+    if external_id.is_some() {
+        "audnexus"
+    } else {
+        "tag_file"
+    }
+}
+
+/// Look up parent IDs whose alias junction contains `alias`
+/// (case-insensitive via the junction's `COLLATE NOCASE` index).
+/// Returns every match — caller decides how to handle multi-row
+/// hits.
+///
+/// `table` is the closed-allowlist parent name (`authors` /
+/// `narrators` / `series`); the junction is derived by stripping
+/// the trailing `s` and appending `_aliases`. SQL is built with
+/// `format!` because the literal-only `sqlx::query!` can't
+/// dispatch across three tables. The values come from a static
+/// allowlist so injection isn't reachable here.
+async fn lookup_by_alias(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    table: &'static str,
+    id_column: &'static str,
+    alias: &str,
+) -> Result<Vec<i64>> {
+    let (junction, parent_fk) = junction_for(table);
+    let sql = format!(
+        "SELECT {parent_fk} FROM {junction} \
+         WHERE alias = ? COLLATE NOCASE"
+    );
+    let rows: Vec<i64> = sqlx::query_scalar(&sql)
+        .bind(alias)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|e| Error::Database(format!("identity alias lookup {table}: {e}")))?;
+    // `id_column` is shadowed by the FK column we actually select;
+    // keep the param so the call site stays symmetric with
+    // `find_or_insert_person`.
+    let _ = id_column;
+    Ok(rows)
+}
+
+/// Register an observed alias on an existing parent row. Idempotent
+/// via the junction's `UNIQUE (parent_id, alias)` constraint —
+/// repeat insertions for the same `(parent, alias)` pair are no-ops.
+/// Never sets `is_prime`; manual exaltation goes through the
+/// dedicated H.3.4 surface.
+async fn register_alias_for_kind(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    table: &'static str,
+    parent_id: i64,
+    alias: &str,
+    source: &'static str,
+) -> Result<()> {
+    insert_alias_with_flag(tx, table, parent_id, alias, source, false).await
+}
+
+/// Lower-level junction insert. `is_prime` true is only used at
+/// canonical-insert time; the partial unique index would reject a
+/// second prime row.
+#[allow(clippy::too_many_arguments)] // 5 inputs + tx + is_prime — bundling either adds an indirection that obscures the call site
+async fn insert_alias_with_flag(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    table: &'static str,
+    parent_id: i64,
+    alias: &str,
+    source: &'static str,
+    is_prime: bool,
+) -> Result<()> {
+    let (junction, parent_fk) = junction_for(table);
+    let prime: i64 = i64::from(is_prime);
+    let sql = format!(
+        "INSERT OR IGNORE INTO {junction} \
+         ({parent_fk}, alias, source, is_prime) VALUES (?, ?, ?, ?)"
+    );
+    sqlx::query(&sql)
+        .bind(parent_id)
+        .bind(alias)
+        .bind(source)
+        .bind(prime)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| Error::Database(format!("identity alias insert {table}: {e}")))?;
+    Ok(())
+}
+
+/// Closed-allowlist dispatch from the parent table name to its
+/// `_aliases` junction + the FK column inside that junction.
+/// Panics on an unknown table; only callers in this module
+/// supply the name, so the panic-arm is unreachable in practice.
+fn junction_for(table: &'static str) -> (&'static str, &'static str) {
+    match table {
+        "authors" => ("author_aliases", "author_id"),
+        "narrators" => ("narrator_aliases", "narrator_id"),
+        "series" => ("series_aliases", "series_id"),
+        // The allowlist is closed; this branch exists for the
+        // compiler. A new identity kind has to register its
+        // junction here before the helpers will dispatch.
+        other => unreachable!("junction_for: unknown identity table {other}"),
+    }
 }
 
 /// Publishers have `name TEXT NOT NULL UNIQUE`, so the find step
@@ -863,6 +998,109 @@ mod tests {
                 .expect("read book authors");
         assert_eq!(book_authors[0], book_authors[1], "same author for both");
         assert!(book_authors[0].is_some());
+    }
+
+    #[tokio::test]
+    async fn alias_junction_seeded_on_insert_and_observation() {
+        // Single book, two provenance rows: Audnexus brings the
+        // ASIN-stamped canonical, tag-read brings a variant
+        // spelling. Result: one `authors` row, two
+        // `author_aliases` rows — canonical (is_prime=1) and the
+        // variant (is_prime=0).
+        let tmp = TempDir::new().expect("tmpdir");
+        let ctx = fresh_ctx(tmp.path()).await;
+        sqlx::query("INSERT INTO books (book_id, title) VALUES (1, 'Book')")
+            .execute(ctx.library.pool())
+            .await
+            .expect("seed book");
+        sqlx::query(
+            "INSERT INTO book_field_provenance \
+             (book_id, field, value, source, stage, confidence, external_id) \
+             VALUES \
+               (1, 'author', 'Brandon Sanderson', 'audnexus_asin_us', 'audnexus-enrich', 0.95, 'B0SANDXYZ'), \
+               (1, 'author', 'brandon sanderson', 'tag_file',         'tag-read',        0.7,  NULL)",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed provenance");
+
+        IdentityResolveStage::new()
+            .run(&ctx, BookId(1))
+            .await
+            .expect("run");
+
+        // One author row.
+        let author_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM authors")
+            .fetch_one(ctx.library.pool())
+            .await
+            .expect("count authors");
+        assert_eq!(author_count, 1);
+
+        // Canonical alias from the canonical insertion path. The
+        // case-insensitive winner ("Brandon Sanderson") becomes
+        // the canonical; the tag-derived "brandon sanderson"
+        // doesn't appear as a distinct alias because the
+        // dedup-on-lower-name in `fetch_all_distinct` and the
+        // junction's `UNIQUE (author_id, alias)` together filter
+        // it before it lands.
+        let canonical_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM author_aliases \
+             WHERE is_prime = 1 AND source = 'canonical'",
+        )
+        .fetch_one(ctx.library.pool())
+        .await
+        .expect("canonical count");
+        assert_eq!(canonical_count, 1);
+
+        let canonical_alias: String =
+            sqlx::query_scalar("SELECT alias FROM author_aliases WHERE is_prime = 1 LIMIT 1")
+                .fetch_one(ctx.library.pool())
+                .await
+                .expect("canonical alias");
+        assert_eq!(canonical_alias, "Brandon Sanderson");
+    }
+
+    #[tokio::test]
+    async fn second_distinct_spelling_lands_as_non_prime_alias() {
+        // Two books, two different spellings for the same
+        // Audnexus-ASIN'd author. Both books should attach to
+        // one author row (ASIN match collapses); both spellings
+        // should appear as alias rows; exactly one is the prime.
+        let tmp = TempDir::new().expect("tmpdir");
+        let ctx = fresh_ctx(tmp.path()).await;
+        sqlx::query("INSERT INTO books (book_id, title) VALUES (1, 'A'), (2, 'B')")
+            .execute(ctx.library.pool())
+            .await
+            .expect("seed books");
+        sqlx::query(
+            "INSERT INTO book_field_provenance \
+             (book_id, field, value, source, stage, confidence, external_id) \
+             VALUES \
+               (1, 'author', 'Haruki Murakami',  'audnexus_asin_us', 'audnexus-enrich', 0.95, 'B0AUTHOR'), \
+               (2, 'author', 'Murakami, Haruki', 'audnexus_asin_jp', 'audnexus-enrich', 0.95, 'B0AUTHOR')",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed");
+
+        IdentityResolveStage::new()
+            .run(&ctx, BookId(1))
+            .await
+            .expect("run 1");
+        IdentityResolveStage::new()
+            .run(&ctx, BookId(2))
+            .await
+            .expect("run 2");
+
+        // Exactly one author row, two alias rows, one prime.
+        let alias_rows: Vec<(String, i64)> =
+            sqlx::query_as("SELECT alias, is_prime FROM author_aliases ORDER BY alias")
+                .fetch_all(ctx.library.pool())
+                .await
+                .expect("read aliases");
+        assert_eq!(alias_rows.len(), 2, "two alias spellings recorded");
+        let prime_count = alias_rows.iter().filter(|r| r.1 == 1).count();
+        assert_eq!(prime_count, 1, "exactly one prime alias");
     }
 
     #[tokio::test]
