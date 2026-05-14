@@ -21,6 +21,8 @@ pub mod book_file_refs;
 pub mod ephemeral;
 pub mod library;
 pub mod migrations;
+pub mod tokens;
 
 pub use ephemeral::EphemeralDb;
 pub use library::LibraryDb;
+pub use tokens::{AuthenticatedToken, lookup_by_raw_token, tokens_table_is_empty, unix_now_secs};
