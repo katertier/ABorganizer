@@ -65,11 +65,12 @@ use crate::checks::walk;
 /// reference the slice / task tracking the gap so the entry is
 /// removable. New entries need a code-review challenge — the
 /// default is enforcement.
-const CRATE_EXEMPTIONS: &[(&str, &str)] = &[(
-    "api",
-    "router predates integration-test scaffolding; ~30 routes \
-         need harness work tracked as a follow-up to #83",
-)];
+const CRATE_EXEMPTIONS: &[(&str, &str)] = &[
+    // No entries today. The api crate's exemption was dropped in
+    // slice #85 — `crates/api/tests/router_smoke.rs` covers every
+    // route via the auth-middleware fire path. New entries here
+    // need a code-review challenge; the default is enforcement.
+];
 
 /// Run the check.
 pub(crate) fn run() -> Result<u32> {
