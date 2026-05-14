@@ -12,6 +12,11 @@ description  = "Shared types, errors, IDs, build-info constants, and the Tunable
 workspace = true
 
 [dependencies]
+# argon2id PHF for low-entropy secret material (pairing codes,
+# future user passwords). The `password-hash` re-export gives us
+# the PHC string format so encoded outputs round-trip
+# self-describingly (params + salt embedded).
+argon2     = { workspace = true }
 chrono     = { workspace = true }
 # Layered TOML + env config loader for `Tunables::load`. Pulled
 # in here (not in the daemon) so every binary that uses

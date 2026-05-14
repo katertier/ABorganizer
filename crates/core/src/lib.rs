@@ -11,6 +11,7 @@ pub mod build_info {
     include!(concat!(env!("OUT_DIR"), "/build_info.rs"));
 }
 
+pub mod auth;
 pub mod cache;
 pub mod cleanup;
 pub mod error;
