@@ -310,14 +310,12 @@ async fn main() -> Result<()> {
              env to enable bearer-token auth."
         );
     }
-    // Note: the tunable `security.library_roots` is in deprecation
-    // mode — backlog item 3 moved authoritative storage into the
-    // `library_roots` DB table managed via the API surface. We
-    // still seed the table from this tunable on first boot below
-    // (after the DB is opened) so config-file-only operators
-    // upgrade frictionlessly. Empty tunable + empty table is
-    // surfaced as a runtime 400 from `POST /library/scan`, so the
-    // boot warning is no longer needed.
+    // B.7 (tracker #119): the `security.library_roots` Vec field
+    // is gone. Authoritative storage lives in the DB-backed
+    // `library_roots` table managed via the REST surface
+    // (POST/GET/DELETE /api/v1/library_roots). The previous
+    // one-cycle seed bridge from config.toml has been removed;
+    // operators register roots through the API.
 
     // Open both databases. Pool sizing + busy-timeout come from
     // `tunables.db` (single source of truth in `ab_core::tunables`).
@@ -392,19 +390,6 @@ async fn main() -> Result<()> {
         cancel.clone(),
         tunables.security.clone(),
     );
-
-    // One-cycle bridge (backlog item 3, migration 021): seed the
-    // `library_roots` table from the deprecated
-    // `tunables.security.library_roots` Vec when the table is
-    // empty. Operators that have already moved to the API don't
-    // need this — `seed_if_empty` short-circuits cheaply on a
-    // populated table. Failures here log + continue; a broken
-    // seed shouldn't take the daemon down.
-    match ab_api::library_roots::seed_if_empty(&api_state, &tunables.security.library_roots).await {
-        Ok(0) => {}
-        Ok(n) => info!(seeded = n, "daemon.start.library_roots.seeded_from_tunable"),
-        Err(e) => tracing::warn!(error = %e, "daemon.start.library_roots.seed_failed"),
-    }
 
     // Build the unified Router for the API port (api + webuis).
     let mut router = Router::new()

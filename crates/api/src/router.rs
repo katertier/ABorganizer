@@ -328,15 +328,12 @@ struct ScanResponse {
 /// rejection (empty root list, nonexistent path, path outside
 /// the allow-list).
 ///
-/// **Source-of-truth migration (backlog item 3)**: this gate
-/// used to walk the `tunables.security.library_roots` Vec at
-/// every request. The roots now live in the `library_roots`
-/// table (DB-backed, managed via `GET/POST/DELETE
-/// /api/v1/library_roots`). The tunable still exists as a
-/// one-cycle bridge — `aborg-daemon::main` seeds the table from
-/// it on first boot when the table is empty. Operators that
-/// have already registered roots via POST no longer need the
-/// tunable.
+/// **Source of truth (post-B.7, tracker #119)**: roots live in
+/// the `library_roots` table (DB-backed, managed via
+/// `GET/POST/DELETE /api/v1/library_roots`). The previous
+/// `tunables.security.library_roots` Vec + one-cycle seed bridge
+/// have been removed; the REST surface is the only registration
+/// path.
 ///
 /// Surfaced as a free function so the `library_scan` handler
 /// stays under the `clippy::too_many_lines` cap.
