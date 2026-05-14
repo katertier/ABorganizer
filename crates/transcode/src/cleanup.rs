@@ -36,6 +36,24 @@
 //! the live-ref gate would defeat the whole point of ADR-0027's
 //! refcount lifecycle. The age gate is also unused; m4b-existence
 //! plus refcount are the only knobs.
+//!
+//! ## Path canonicalisation + library-root containment (slice B.1)
+//!
+//! Defence-in-depth before `tokio::fs::remove_file`: every source
+//! path is `canonicalize`-resolved and the result must start with
+//! at least one active `library_roots.path`. Paths that resolve
+//! outside the operator's roots are skipped + a warning logged;
+//! the DB row stays active so the operator can investigate (and
+//! a future scan + re-classify can route the row elsewhere). The
+//! "already gone" case (canonicalize returns `NotFound`) preserves
+//! the existing idempotent path: no FS delete, mark inactive,
+//! move on.
+//!
+//! See ADR-0024 / ADR-0025 for cleanup framing; the containment
+//! gate addresses CWE-22 (path traversal) on a cleanup surface
+//! that operates on operator-supplied filesystem state.
+
+use std::path::PathBuf;
 
 use async_trait::async_trait;
 
@@ -119,6 +137,41 @@ async fn select_eligible(pool: &sqlx::SqlitePool) -> Result<Vec<EligibleRow>> {
         .collect())
 }
 
+/// Load every active `library_roots.path` and canonicalise. Unreachable
+/// roots (renamed / unmounted) are dropped with a warning; the remaining
+/// list is the containment whitelist.
+async fn library_roots_canonical(pool: &sqlx::SqlitePool) -> Result<Vec<PathBuf>> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT path AS "path!: String"
+          FROM library_roots
+         WHERE is_active = 1
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| Error::Database(format!("library_roots fetch: {e}")))?;
+
+    let mut roots = Vec::with_capacity(rows.len());
+    for r in rows {
+        match tokio::fs::canonicalize(&r.path).await {
+            Ok(p) => roots.push(p),
+            Err(e) => tracing::warn!(
+                path = %r.path,
+                error = %e,
+                "transcode.cleanup.library_root_unreachable"
+            ),
+        }
+    }
+    Ok(roots)
+}
+
+/// True iff `path` starts with any root in `roots`. Both arguments must
+/// already be canonicalised — symlink-resolved + absolute.
+fn contained_in_any(path: &std::path::Path, roots: &[PathBuf]) -> bool {
+    roots.iter().any(|r| path.starts_with(r))
+}
+
 #[async_trait]
 impl CleanupTarget for PostTranscodeSourcesTarget {
     /// `Disk`, not `Audio`.
@@ -156,13 +209,46 @@ impl CleanupTarget for PostTranscodeSourcesTarget {
 
     async fn apply(&self, ctx: &CleanupCtx, _policy: &Policy) -> Result<CleanupReport> {
         let rows = select_eligible(ctx.library.pool()).await?;
+        let library_roots = library_roots_canonical(ctx.library.pool()).await?;
         let mut items: u64 = 0;
         let mut bytes: u64 = 0;
         for row in rows {
-            // FS delete first. ENOENT is fine (already gone); any
-            // other error → skip the DB update so a retry can try
-            // again with the still-active row intact.
+            // Canonicalise + containment check BEFORE any FS mutation.
+            // Defence-in-depth: a `book_files.file_path` row pointing
+            // outside any active `library_roots` must NOT be unlinked
+            // — log + skip + leave row active. ENOENT preserves the
+            // existing idempotent "already gone" path (no FS action,
+            // row marked inactive so the next pass is a no-op).
             let path = std::path::Path::new(&row.file_path);
+            let canonical = match tokio::fs::canonicalize(path).await {
+                Ok(p) => Some(p),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => {
+                    tracing::warn!(
+                        file_id = row.file_id,
+                        path = %row.file_path,
+                        error = %e,
+                        "transcode.cleanup.canonicalize_failed"
+                    );
+                    continue;
+                }
+            };
+
+            if let Some(canonical) = canonical.as_ref() {
+                if !contained_in_any(canonical, &library_roots) {
+                    tracing::warn!(
+                        file_id = row.file_id,
+                        path = %row.file_path,
+                        canonical = %canonical.display(),
+                        "transcode.cleanup.path_outside_library_roots"
+                    );
+                    continue;
+                }
+            }
+
+            // FS delete. ENOENT is fine (already gone); any other
+            // error → skip the DB update so a retry can try again
+            // with the still-active row intact.
             match tokio::fs::remove_file(path).await {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -238,6 +324,18 @@ mod tests {
             .execute(ctx.library.pool())
             .await
             .expect("seed book");
+    }
+
+    /// Seed an active `library_roots` row pointing at `path`. The
+    /// containment check (B.1) canonicalises both sides, so passing
+    /// the raw tempdir path is fine — `canonicalize()` resolves
+    /// `/var → /private/var` etc.
+    async fn seed_library_root(ctx: &CleanupCtx, path: &str) {
+        sqlx::query("INSERT INTO library_roots (path, is_active) VALUES (?, 1)")
+            .bind(path)
+            .execute(ctx.library.pool())
+            .await
+            .expect("seed library_root");
     }
 
     #[allow(
@@ -330,6 +428,7 @@ mod tests {
     async fn apply_deletes_source_and_marks_inactive() {
         let (ctx, tmp) = fresh().await;
         seed_book(&ctx, 1).await;
+        seed_library_root(&ctx, tmp.path().to_str().expect("utf8")).await;
 
         // Real file on disk so the FS delete path runs end-to-end.
         let src = tmp.path().join("a.mp3");
@@ -366,6 +465,7 @@ mod tests {
     async fn apply_is_idempotent() {
         let (ctx, tmp) = fresh().await;
         seed_book(&ctx, 1).await;
+        seed_library_root(&ctx, tmp.path().to_str().expect("utf8")).await;
         let src = tmp.path().join("a.mp3");
         tokio::fs::write(&src, b"x").await.expect("write src");
         let src_str = src.to_str().expect("utf8");
@@ -387,6 +487,9 @@ mod tests {
 
     #[tokio::test]
     async fn apply_proceeds_when_file_already_gone() {
+        // NotFound from canonicalize short-circuits the containment
+        // check (B.1) and falls through to the existing
+        // "already gone" handler. No library_roots seed needed.
         let (ctx, _tmp) = fresh().await;
         seed_book(&ctx, 1).await;
         seed_file(&ctx, 100, 1, "/tmp/does-not-exist.mp3", "mp3", 999).await;
@@ -408,5 +511,56 @@ mod tests {
                 .await
                 .expect("query");
         assert_eq!(is_active, 0);
+    }
+
+    #[tokio::test]
+    async fn apply_skips_path_outside_library_roots() {
+        // Slice B.1: a real file on disk that lives *outside* any
+        // active library_roots row must NOT be unlinked + must
+        // stay active in the DB so the operator can investigate.
+        let (ctx, tmp) = fresh().await;
+        seed_book(&ctx, 1).await;
+
+        // Two tempdirs: one is the configured library root; the
+        // file lives in the OTHER one.
+        let library_root = tmp.path().join("library");
+        let outside_dir = tmp.path().join("outside");
+        tokio::fs::create_dir(&library_root)
+            .await
+            .expect("mkdir library");
+        tokio::fs::create_dir(&outside_dir)
+            .await
+            .expect("mkdir outside");
+        seed_library_root(&ctx, library_root.to_str().expect("utf8")).await;
+
+        let src = outside_dir.join("a.mp3");
+        tokio::fs::write(&src, b"junk").await.expect("write src");
+        let src_str = src.to_str().expect("utf8");
+        let m4b = library_root.join("a.m4b");
+        tokio::fs::write(&m4b, b"junk2").await.expect("write m4b");
+        let m4b_str = m4b.to_str().expect("utf8");
+
+        seed_file(&ctx, 100, 1, src_str, "mp3", 4).await;
+        seed_file(&ctx, 200, 1, m4b_str, "m4b", 5).await;
+
+        let policy = Policy {
+            age_seconds: 0,
+            force: false,
+            apply: true,
+        };
+        let target = PostTranscodeSourcesTarget::new();
+        let report = target.apply(&ctx, &policy).await.expect("apply");
+
+        // Source outside the root → skipped. items must be 0; the
+        // file must remain on disk; the DB row must remain active.
+        assert_eq!(report.items, 0, "source outside roots not retired");
+        assert_eq!(report.bytes, 0);
+        assert!(src.exists(), "outside-roots source NOT deleted");
+        let is_active: i64 =
+            sqlx::query_scalar("SELECT is_active FROM book_files WHERE file_id=100")
+                .fetch_one(ctx.library.pool())
+                .await
+                .expect("query");
+        assert_eq!(is_active, 1, "outside-roots row stays active");
     }
 }
