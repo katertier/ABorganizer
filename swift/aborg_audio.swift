@@ -37,6 +37,10 @@ private let kErrCodeAssetLoadFailed: Int32 = 2
 private let kErrCodeNoAudioTrack: Int32 = 3
 private let kErrCodeWindowEmpty: Int32 = 4
 private let kErrCodeReadFailure: Int32 = 5
+// Transcode-specific (slice C2a). Reserved values for future
+// bridge entries continue the integer sequence; never reorder.
+private let kErrCodeExportSetupFailed: Int32 = 6
+private let kErrCodeExportRunFailed: Int32 = 7
 
 // MARK: - Callback signature
 //
@@ -191,5 +195,110 @@ public func aborg_audio_read_window(
         @unknown default:
             fireCallback(ctx, callback, nil, kErrCodeGeneric)
         }
+    }
+}
+
+// MARK: - Transcode-to-m4b entry point (slice C2a).
+//
+// Re-encodes an input audio file to AAC-LC inside an MPEG-4
+// container, written to `outputPath`. The .m4b extension is an
+// audiobook convention; the on-disk bytes are identical to an
+// .m4a (Apple's `appleM4A` preset writes that container). Caller
+// chooses .m4b for the file extension.
+//
+// We use `AVAssetExportSession` with the `appleM4A` preset for
+// MVP. The preset's bitrate is fixed (~64kbps mono for typical
+// audiobook input); per-bitrate control needs the AVAssetWriter
+// path which a future slice can wire in if operators ask for it.
+// For ADR-0027's "canonical m4b library" goal the preset's quality
+// is already a meaningful drop from typical 128kbps source files.
+//
+// Failure modes split into two codes so Rust can disambiguate
+// "session refused to configure" (codec mismatch, output path
+// unwritable) from "session ran but errored mid-export" (decode
+// failure, disk full).
+@_cdecl("aborg_audio_transcode_to_m4b")
+public func aborg_audio_transcode_to_m4b(
+    inputPath: UnsafePointer<CChar>,
+    outputPath: UnsafePointer<CChar>,
+    ctx: UnsafeMutableRawPointer?,
+    callback: @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<UInt8>?, Int, Int32) -> Void
+) {
+    let inputPathString = String(cString: inputPath)
+    let outputPathString = String(cString: outputPath)
+    let inputURL = URL(fileURLWithPath: inputPathString)
+    let outputURL = URL(fileURLWithPath: outputPathString)
+
+    Task.detached {
+        let asset = AVURLAsset(url: inputURL)
+
+        // ── Verify the asset has at least one audio track ───────────
+        let tracks: [AVAssetTrack]
+        do {
+            tracks = try await asset.loadTracks(withMediaType: .audio)
+        } catch {
+            FileHandle.standardError.write(Data(
+                "aborg_audio: transcode loadTracks failed for \(inputPathString): \(error)\n".utf8))
+            fireCallback(ctx, callback, nil, kErrCodeAssetLoadFailed)
+            return
+        }
+        guard !tracks.isEmpty else {
+            fireCallback(ctx, callback, nil, kErrCodeNoAudioTrack)
+            return
+        }
+
+        // ── Remove any stale output (export refuses to overwrite) ───
+        // The race window is acceptable: the Rust side picks an
+        // output path it owns, and a leftover from a previous
+        // failed run is the only realistic source of conflict.
+        if FileManager.default.fileExists(atPath: outputPathString) {
+            do {
+                try FileManager.default.removeItem(at: outputURL)
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "aborg_audio: removeItem(\(outputPathString)) failed: \(error)\n".utf8))
+                fireCallback(ctx, callback, nil, kErrCodeExportSetupFailed)
+                return
+            }
+        }
+
+        // ── Configure the export session ────────────────────────────
+        guard let session = AVAssetExportSession(
+            asset: asset, presetName: AVAssetExportPresetAppleM4A)
+        else {
+            FileHandle.standardError.write(Data(
+                "aborg_audio: AVAssetExportSession init returned nil for preset appleM4A\n".utf8))
+            fireCallback(ctx, callback, nil, kErrCodeExportSetupFailed)
+            return
+        }
+        session.outputURL = outputURL
+        session.outputFileType = .m4a
+        // No `audioMix` / `metadata` here — slice C2a is a content
+        // re-encode only. Cover art + chapter / tag carryover are
+        // C3 (ADR-0028 two-pass tag-write) territory.
+
+        // ── Run the export and await terminal state ─────────────────
+        do {
+            try await session.export(to: outputURL, as: .m4a)
+        } catch {
+            FileHandle.standardError.write(Data(
+                "aborg_audio: export to \(outputPathString) failed: \(error)\n".utf8))
+            fireCallback(ctx, callback, nil, kErrCodeExportRunFailed)
+            return
+        }
+
+        // ── Sanity-check the output exists and is non-empty ─────────
+        let attrs = try? FileManager.default.attributesOfItem(atPath: outputPathString)
+        let size = (attrs?[.size] as? NSNumber)?.intValue ?? 0
+        if size <= 0 {
+            FileHandle.standardError.write(Data(
+                "aborg_audio: export reported success but output is empty: \(outputPathString)\n".utf8))
+            fireCallback(ctx, callback, nil, kErrCodeExportRunFailed)
+            return
+        }
+
+        // Success — buffer is nil on transcode (the output is a
+        // file path, not bytes). Code 0 = success.
+        fireCallback(ctx, callback, nil, 0)
     }
 }
