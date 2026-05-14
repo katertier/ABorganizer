@@ -26,7 +26,7 @@ members = [
     "bins/aborg-tools",
     "xtask",
 ]
-default-members = ["bins/aborg", "bins/aborg-daemon"]
+default-members = ["bins/aborg", "bins/aborg-daemon", "bins/aborg-tools"]
 
 # ── App branding ─────────────────────────────────────────────────────────
 # Single source of truth for every user-facing name + identifier. Crates

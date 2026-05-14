@@ -32,6 +32,3 @@ CREATE TABLE book_file_refs (
 
 CREATE INDEX idx_book_file_refs_live
     ON book_file_refs(file_id) WHERE released_at IS NULL;
-
-CREATE INDEX idx_book_file_refs_acquired_at
-    ON book_file_refs(acquired_at) WHERE released_at IS NULL;
