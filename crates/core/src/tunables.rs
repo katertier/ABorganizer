@@ -228,6 +228,24 @@ pub struct PipelineTunables {
     /// `ab_tag_write::USER_EDIT_SOURCE`) so user corrections
     /// stay sticky across the AI cycle.
     pub tag_write_final_enabled: bool,
+
+    /// Watch-folder exclusion globs applied during scan (B.4,
+    /// tracker #119). Each pattern is a `globset`-compatible
+    /// glob matched against either the file basename
+    /// (`*.tmp`, `.DS_Store`) or any directory component in the
+    /// file's path (`temp`, `sample`). A matching path is
+    /// skipped during scan + watchdog walks before any
+    /// `is_audio_file` test, so download-manager junk
+    /// (partials, system metadata, sample dirs) never
+    /// pollutes `book_files`.
+    ///
+    /// Defaults cover the empirically-common noise:
+    /// `*.tmp`, `*.part`, `*.crdownload`, `.DS_Store`, `Thumbs.db`,
+    /// `temp`, `sample`, `samples`. Operators can extend in
+    /// config.toml; pattern compilation errors at boot are
+    /// surfaced as a startup warning and the offending pattern
+    /// is silently dropped from the active set.
+    pub scan_excludes: Vec<String>,
 }
 
 impl Default for PipelineTunables {
@@ -240,6 +258,16 @@ impl Default for PipelineTunables {
             max_pending_per_stage: 10_000,
             tag_write_early_enabled: false,
             tag_write_final_enabled: false,
+            scan_excludes: vec![
+                "*.tmp".into(),
+                "*.part".into(),
+                "*.crdownload".into(),
+                ".DS_Store".into(),
+                "Thumbs.db".into(),
+                "temp".into(),
+                "sample".into(),
+                "samples".into(),
+            ],
         }
     }
 }

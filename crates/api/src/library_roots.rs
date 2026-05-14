@@ -463,6 +463,7 @@ mod tests {
             cleanup,
             cancel,
             SecurityTunables::default(),
+            globset::GlobSet::empty(),
         );
         (state, tmp)
     }

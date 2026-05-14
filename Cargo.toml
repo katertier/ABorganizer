@@ -73,6 +73,10 @@ clap           = { version = "4.6", features = ["derive", "env", "string"] }
 fd-lock        = "4.0"
 figment        = { version = "0.10", features = ["toml", "env"] }
 futures        = "0.3"
+# Multi-glob set matcher for the scan watch-folder exclusion list
+# (B.4, tracker #119). Compiles each pattern once; the `is_match`
+# probe is faster than building a `glob::Pattern` per call.
+globset        = "0.4"
 # Stream adapters over Tokio channels. Used by the
 # foundation-models bridge to expose `complete_stream(...)
 # -> impl Stream` over an mpsc::UnboundedReceiver fed by the

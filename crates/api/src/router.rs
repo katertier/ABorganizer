@@ -387,7 +387,9 @@ async fn library_scan(
     Json(req): Json<ScanRequest>,
 ) -> Result<Json<ScanResponse>, ApiError> {
     let requested = validate_scan_path(&state, &req.path).await?;
-    let report = ab_scan::scan(&requested, &state.inner.library).await?;
+    let report =
+        ab_scan::scan_with_excludes(&requested, &state.inner.library, &state.inner.scan_excludes)
+            .await?;
 
     // Submit each newly-discovered book to the scheduler for
     // downstream pipeline work (tag-read in slice 1B; more stages

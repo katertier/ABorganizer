@@ -38,6 +38,8 @@ argon2      = { workspace = true }
 async-trait = { workspace = true }
 axum        = { workspace = true }
 chrono      = { workspace = true }
+# B.4: ApiState carries the compiled scan_excludes GlobSet.
+globset     = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 sqlx        = { workspace = true }

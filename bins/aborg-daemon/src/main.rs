@@ -383,6 +383,11 @@ async fn main() -> Result<()> {
         cleanup.clone(),
         &cancel,
     );
+    // B.4: compile watch-folder exclusion globs at boot so every
+    // scan + watchdog pass reuses the same matcher. Pattern
+    // compilation errors are warned-and-dropped inside
+    // `compile_excludes`.
+    let scan_excludes = ab_scan::compile_excludes(&tunables.pipeline.scan_excludes);
     let api_state = ab_api::ApiState::new(
         library.clone(),
         ephemeral.clone(),
@@ -391,6 +396,7 @@ async fn main() -> Result<()> {
         cleanup,
         cancel.clone(),
         tunables.security.clone(),
+        scan_excludes,
     );
 
     // One-cycle bridge (backlog item 3, migration 021): seed the
