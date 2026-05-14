@@ -27,5 +27,8 @@
 pub mod ffi;
 pub mod info;
 
-pub use ffi::{BridgeError, is_bridge_compiled, read_samples_window, read_samples_window_typed};
+pub use ffi::{
+    BridgeError, is_bridge_compiled, read_samples_window, read_samples_window_typed,
+    transcode_to_m4b, transcode_to_m4b_typed,
+};
 pub use info::probe_duration_ms;

@@ -17,3 +17,8 @@ anyhow    = { workspace = true }
 thiserror = { workspace = true }
 tokio     = { workspace = true }
 tracing   = { workspace = true }
+
+[dev-dependencies]
+# Round-trip transcode test wants a writable tmp dir.
+tempfile  = { workspace = true }
+tokio     = { workspace = true, features = ["macros", "rt-multi-thread"] }

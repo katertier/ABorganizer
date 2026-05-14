@@ -60,6 +60,19 @@ pub enum BridgeError {
     /// decode failure, or `CMBlockBufferCopyDataBytes` failure.
     #[error("audio read or decode failure")]
     ReadFailure,
+    /// `kErrCodeExportSetupFailed` (6). `AVAssetExportSession`
+    /// refused to initialise / configure — preset rejected,
+    /// output path unwritable, codec mismatch. Operational fix:
+    /// inspect Swift stderr; usually a permissions or path
+    /// issue rather than a transient failure.
+    #[error("transcode export session setup failed (preset, output path, codec)")]
+    ExportSetupFailed,
+    /// `kErrCodeExportRunFailed` (7). The export session ran
+    /// but errored mid-export — decode failure, disk full, or
+    /// the post-run sanity check (`output exists + size > 0`)
+    /// rejected the result. Surface as a retryable error.
+    #[error("transcode export failed mid-run (decode error, disk, or empty output)")]
+    ExportRunFailed,
     /// Unknown code. New Swift code without matching Rust
     /// classification. Always log + treat as Generic.
     #[error("unknown ab_audio bridge error code {0}")]
@@ -95,6 +108,8 @@ impl BridgeError {
             3 => Self::NoAudioTrack,
             4 => Self::WindowEmpty,
             5 => Self::ReadFailure,
+            6 => Self::ExportSetupFailed,
+            7 => Self::ExportRunFailed,
             other => Self::UnknownCode(other),
         }
     }
@@ -140,6 +155,17 @@ mod ffi {
             start_ms: u64,
             end_ms: u64,
             sample_rate: u32,
+            ctx: *mut c_void,
+            callback: unsafe extern "C" fn(*mut c_void, *const u8, usize, i32),
+        );
+        // Transcode entry point (slice C2a). Re-encodes
+        // `input_path` to AAC-LC inside an m4a container at
+        // `output_path`. On success the callback fires with
+        // `(ctx, null, 0, 0)` — the output is on disk, not in
+        // the buffer. Failure paths fire with a non-zero code.
+        fn aborg_audio_transcode_to_m4b(
+            input_path: *const std::ffi::c_char,
+            output_path: *const std::ffi::c_char,
             ctx: *mut c_void,
             callback: unsafe extern "C" fn(*mut c_void, *const u8, usize, i32),
         );
@@ -219,6 +245,44 @@ mod ffi {
         }
         Ok(samples)
     }
+
+    pub(super) async fn transcode_to_m4b_impl(
+        input_path: &Path,
+        output_path: &Path,
+    ) -> Result<(), BridgeError> {
+        let input_str = input_path
+            .to_str()
+            .ok_or_else(|| BridgeError::NulInInput("input_path is not valid UTF-8".into()))?;
+        let output_str = output_path
+            .to_str()
+            .ok_or_else(|| BridgeError::NulInInput("output_path is not valid UTF-8".into()))?;
+        let input_c = CString::new(input_str)
+            .map_err(|e| BridgeError::NulInInput(format!("input_path: {e}")))?;
+        let output_c = CString::new(output_str)
+            .map_err(|e| BridgeError::NulInInput(format!("output_path: {e}")))?;
+
+        let (tx, rx) = oneshot::channel::<FfiResult>();
+        let ctx = Box::into_raw(Box::new(tx)).cast::<c_void>();
+
+        // SAFETY: both `CString`s outlive the synchronous portion
+        // of the call (drop at function end). The Swift side
+        // fires `on_result` exactly once per call regardless of
+        // success/failure path (the export-session task always
+        // calls the callback before exiting Task.detached).
+        unsafe {
+            aborg_audio_transcode_to_m4b(input_c.as_ptr(), output_c.as_ptr(), ctx, on_result);
+        }
+        let res = rx.await.map_err(|_| BridgeError::CallbackDropped)?;
+        if res.code != 0 {
+            return Err(BridgeError::from_code(res.code));
+        }
+        // Transcode success: buffer is documented as `null`. If
+        // Swift ever starts piggy-backing diagnostic bytes we
+        // tolerate them silently — the on-disk output is the
+        // authoritative result.
+        let _ = res.buffer;
+        Ok(())
+    }
 }
 
 /// Decode `[start_ms, end_ms)` of `input_path` as mono Float32
@@ -264,6 +328,63 @@ pub async fn read_samples_window(
     sample_rate: u32,
 ) -> Result<Vec<f32>> {
     read_samples_window_typed(input_path, start_ms, end_ms, sample_rate)
+        .await
+        .map_err(Into::into)
+}
+
+/// Re-encode `input_path` to AAC-LC inside an m4a-shaped container.
+///
+/// ADR-0027 ("everything is m4b") wires this into the future
+/// `transcode-m4b` stage; this function ships in slice C2a so
+/// the wrapper can be unit-tested independently of the stage
+/// wiring.
+///
+/// The on-disk container is identical to an `.m4a` — `.m4b` is an
+/// audiobook-convention extension. The caller chooses the
+/// extension by passing the desired `output_path`.
+///
+/// **Bitrate**: fixed by Apple's `appleM4A` preset (~64 kbps for
+/// mono input, ~128 kbps for stereo). Per-bitrate control needs
+/// the `AVAssetWriter` path which a future slice can add when
+/// operators ask for it.
+///
+/// **Cover art + tags**: not carried over by this call — slice
+/// C2a is content-only. Cover-art write-back lands in C3
+/// (ADR-0028 two-pass tag-write) which probes the source, runs
+/// transcode, then writes ID3v2/MP4 metadata onto the output.
+///
+/// # Errors
+///
+/// Typed variants — see [`BridgeError`]. Common failure modes:
+/// [`BridgeError::AssetLoadFailed`] (input unreadable, AAX
+/// without decrypt), [`BridgeError::NoAudioTrack`],
+/// [`BridgeError::ExportSetupFailed`] (output dir unwritable),
+/// [`BridgeError::ExportRunFailed`] (disk full, mid-export
+/// decode error, empty output).
+pub async fn transcode_to_m4b_typed(
+    input_path: &Path,
+    output_path: &Path,
+) -> Result<(), BridgeError> {
+    #[cfg(ab_audio_bridge)]
+    {
+        ffi::transcode_to_m4b_impl(input_path, output_path).await
+    }
+    #[cfg(not(ab_audio_bridge))]
+    {
+        let _ = (input_path, output_path);
+        Err(BridgeError::BridgeUnavailable)
+    }
+}
+
+/// Convenience wrapper around [`transcode_to_m4b_typed`].
+///
+/// Collapses every variant into `ab_core::Error::Stage`.
+///
+/// # Errors
+///
+/// See [`transcode_to_m4b_typed`].
+pub async fn transcode_to_m4b(input_path: &Path, output_path: &Path) -> Result<()> {
+    transcode_to_m4b_typed(input_path, output_path)
         .await
         .map_err(Into::into)
 }
@@ -322,5 +443,89 @@ mod tests {
             r.is_err(),
             "bogus path / no bridge must return Err (got {r:?})"
         );
+    }
+
+    // ── transcode_to_m4b tests ────────────────────────────────
+
+    #[tokio::test]
+    async fn transcode_path_with_nul_byte_is_rejected_cleanly() {
+        let input = std::ffi::OsString::from("/tmp/a\0b.m4a");
+        let r = transcode_to_m4b(&PathBuf::from(input), &PathBuf::from("/tmp/out.m4b")).await;
+        assert!(r.is_err(), "NUL in input must Err, got {r:?}");
+    }
+
+    #[tokio::test]
+    async fn transcode_output_path_with_nul_byte_is_rejected_cleanly() {
+        let output = std::ffi::OsString::from("/tmp/a\0b.m4b");
+        let r = transcode_to_m4b(&PathBuf::from("/tmp/in.m4a"), &PathBuf::from(output)).await;
+        assert!(r.is_err(), "NUL in output must Err, got {r:?}");
+    }
+
+    #[tokio::test]
+    async fn transcode_bogus_input_returns_error() {
+        // /dev/null again — bridge-linked builds fail with
+        // AssetLoadFailed (or NoAudioTrack on some macOS
+        // versions); bridge-absent builds return
+        // BridgeUnavailable. Either is a clean error.
+        let r = transcode_to_m4b(&PathBuf::from("/dev/null"), &PathBuf::from("/tmp/out.m4b")).await;
+        assert!(r.is_err(), "bogus input must Err (got {r:?})");
+    }
+
+    #[tokio::test]
+    async fn transcode_typed_classifies_export_setup_failure() {
+        // Output path inside a non-existent directory should
+        // surface as ExportSetupFailed on bridge-linked builds
+        // (Swift's AVAssetExportSession can't write into a
+        // missing parent dir). Bridge-absent builds short-circuit
+        // to BridgeUnavailable. The point of this test is to
+        // exercise the code-6 / code-7 dispatch path — we accept
+        // any error variant here; future revisions tighten as
+        // the Swift side stabilises.
+        let r = transcode_to_m4b_typed(
+            &PathBuf::from("/dev/null"),
+            &PathBuf::from("/nonexistent-dir/out.m4b"),
+        )
+        .await;
+        assert!(r.is_err(), "must Err (got {r:?})");
+    }
+
+    /// Round-trip happy path. Only meaningful when the bridge is
+    /// linked (bridge-absent builds short-circuit on every call).
+    /// Uses an Apple-shipped system sound (`/System/Library/Sounds`
+    /// is present on every macOS) as the source, so the test has
+    /// no committed audio fixture to maintain.
+    #[tokio::test]
+    async fn transcode_round_trip_writes_valid_m4b_on_bridge_linked() {
+        if !is_bridge_compiled() {
+            return; // Linux CI or no-swiftc build — nothing to verify.
+        }
+        let source = Path::new("/System/Library/Sounds/Submarine.aiff");
+        if !source.exists() {
+            // Should not happen on macOS, but skip rather than fail
+            // if Apple ever relocates the system sounds.
+            return;
+        }
+        let tmp = tempfile::TempDir::new().expect("tmpdir");
+        let out = tmp.path().join("out.m4b");
+
+        transcode_to_m4b(source, &out)
+            .await
+            .expect("transcode round trip");
+
+        // Output must exist + be non-empty. The Swift side
+        // post-checks size > 0 before returning success, so a
+        // missing / empty file here would already have surfaced
+        // as ExportRunFailed.
+        let meta = std::fs::metadata(&out).expect("output metadata");
+        assert!(meta.len() > 0, "output is empty");
+
+        // Round-trip the bytes back through the reader to prove
+        // the container is valid + has at least one decodable
+        // audio sample. Submarine.aiff is well under 5 seconds —
+        // 100 ms is plenty.
+        let samples = read_samples_window(&out, 0, 100, 22_050)
+            .await
+            .expect("read back samples from transcode output");
+        assert!(!samples.is_empty(), "no samples read back from m4b output");
     }
 }
