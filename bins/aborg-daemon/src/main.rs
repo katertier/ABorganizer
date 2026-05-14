@@ -385,8 +385,12 @@ async fn main() -> Result<()> {
             .await
             .context("bind ABS listener")?;
         Some(
-            axum::serve(abs_listener, ab_shelf::build_router().into_make_service())
-                .with_graceful_shutdown(cancel.clone().cancelled_owned()),
+            axum::serve(
+                abs_listener,
+                ab_shelf::build_router(ab_shelf::ShelfState::new(library.clone()))
+                    .into_make_service(),
+            )
+            .with_graceful_shutdown(cancel.clone().cancelled_owned()),
         )
     } else {
         None

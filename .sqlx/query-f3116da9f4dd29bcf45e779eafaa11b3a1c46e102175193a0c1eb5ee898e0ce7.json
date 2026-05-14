@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT n.name AS \"name!: String\"\n             FROM book_narrator bn\n             JOIN narrators n ON n.narrator_id = bn.narrator_id\n            WHERE bn.book_id = ?\n            ORDER BY n.name",
+  "describe": {
+    "columns": [
+      {
+        "name": "name!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f3116da9f4dd29bcf45e779eafaa11b3a1c46e102175193a0c1eb5ee898e0ce7"
+}

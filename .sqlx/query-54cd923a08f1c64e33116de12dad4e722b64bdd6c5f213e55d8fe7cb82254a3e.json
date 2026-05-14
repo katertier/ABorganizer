@@ -1,0 +1,80 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT b.book_id      AS \"book_id!: i64\",\n                  b.title        AS \"title!: String\",\n                  b.subtitle     AS \"subtitle?: String\",\n                  b.description  AS \"description?: String\",\n                  b.language     AS \"language?: String\",\n                  b.isbn         AS \"isbn?: String\",\n                  b.asin         AS \"asin?: String\",\n                  b.duration_ms  AS \"duration_ms?: i64\",\n                  b.release_date AS \"release_date?: String\",\n                  a.name         AS \"author?: String\",\n                  p.name         AS \"publisher?: String\"\n             FROM books b\n             LEFT JOIN authors a ON a.author_id = b.author_id\n             LEFT JOIN publishers p ON p.publisher_id = b.publisher_id\n            WHERE b.book_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "book_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "title!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "subtitle?: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "description?: String",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "language?: String",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "isbn?: String",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "asin?: String",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "duration_ms?: i64",
+        "ordinal": 7,
+        "type_info": "Integer"
+      },
+      {
+        "name": "release_date?: String",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "author?: String",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "publisher?: String",
+        "ordinal": 10,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "54cd923a08f1c64e33116de12dad4e722b64bdd6c5f213e55d8fe7cb82254a3e"
+}
