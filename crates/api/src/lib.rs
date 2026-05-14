@@ -22,7 +22,6 @@ pub mod audiologo_apply;
 pub mod audiologo_review;
 pub mod auth;
 pub mod cleanup_targets;
-pub mod edits;
 pub mod error;
 pub mod library_roots;
 pub mod names;
@@ -31,6 +30,7 @@ pub mod reports;
 pub mod router;
 pub mod state;
 pub mod tokens;
+pub mod user_edits;
 
 pub use cleanup_targets::ExpiredPairingCodesTarget;
 pub use error::ApiError;
