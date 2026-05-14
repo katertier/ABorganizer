@@ -8,6 +8,8 @@ use ab_pipeline::cleanup::CleanupRegistry;
 use ab_pipeline::{Dag, Scheduler};
 use tokio_util::sync::CancellationToken;
 
+use crate::rate_limit::RateLimiter;
+
 /// Application state injected into every handler via axum's `State<>`.
 #[derive(Clone)]
 pub struct ApiState {
@@ -45,6 +47,14 @@ pub struct ApiStateInner {
     pub security: SecurityTunables,
     /// Daemon start time (for `/health` uptime).
     pub started_at: std::time::Instant,
+    /// Rate limiter for the anonymous
+    /// `POST /api/v1/pairing/consume` endpoint. Defaults to
+    /// [`crate::rate_limit::DEFAULT_PAIRING_CONSUME_LIMIT`]
+    /// failed attempts per
+    /// [`crate::rate_limit::DEFAULT_PAIRING_CONSUME_WINDOW`].
+    /// Initialised inline by [`ApiState::new`] so the existing
+    /// constructor signature is unchanged.
+    pub pairing_consume_limiter: Arc<RateLimiter>,
 }
 
 impl ApiState {
@@ -77,6 +87,7 @@ impl ApiState {
                 cancel,
                 security,
                 started_at: std::time::Instant::now(),
+                pairing_consume_limiter: Arc::new(RateLimiter::default()),
             }),
         }
     }
