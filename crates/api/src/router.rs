@@ -56,6 +56,7 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/doctor/speech", get(doctor_speech))
         .route("/doctor/speech/install", post(doctor_speech_install))
         .route("/books", get(books_list))
+        .route("/books/{book_id}", get(books_get))
         .route("/books/{book_id}/retry", post(books_retry_stage))
         .route("/books/{book_id}/audiologo", post(books_audiologo_cut))
         .route(
@@ -869,6 +870,254 @@ async fn books_list(
         })
         .collect();
     Ok(Json(BooksResponse { books }))
+}
+
+// ── GET /books/{book_id} ─────────────────────────────────────────
+
+/// Active file row inside [`BookDetailResponse`].
+#[derive(Serialize)]
+struct BookFileDetail {
+    file_id: i64,
+    file_path: String,
+    duration_ms: Option<i64>,
+    file_size: Option<i64>,
+    is_active: bool,
+}
+
+/// Per-stage row of `pipeline_progress` (lives in the ephemeral DB).
+#[derive(Serialize)]
+struct StageProgressRow {
+    stage: String,
+    /// One of `pending`, `running`, `succeeded`, `failed`, `skipped`.
+    status: String,
+    /// Unix seconds; `None` if the stage has never run.
+    started_at: Option<i64>,
+    /// Unix seconds; `None` until the stage terminates.
+    completed_at: Option<i64>,
+    /// Populated when `status = 'failed'`; surfaces the failure
+    /// reason for the diagnostic CLI.
+    failure_reason: Option<String>,
+}
+
+/// Per-chapter-source row count.
+#[derive(Serialize)]
+struct ChapterSourceCount {
+    source: String,
+    count: i64,
+}
+
+/// Successful response body for `GET /books/{book_id}`.
+///
+/// Diagnostic-shaped: every field an operator might want when
+/// asking "why didn't this book extract / why does it look
+/// wrong." Heavier than `/books` list rows by design — this is
+/// the per-book detail surface.
+#[derive(Serialize)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "JSON response struct — each bool is an independent presence flag for a specific AI-derived field. A state machine doesn't fit the open-set semantics; clients (web UI + CLI) consume each flag separately."
+)]
+struct BookDetailResponse {
+    // Core book row.
+    book_id: i64,
+    title: String,
+    subtitle: Option<String>,
+    description: Option<String>,
+    language: Option<String>,
+    duration_ms: Option<i64>,
+    asin: Option<String>,
+    isbn: Option<String>,
+    release_date: Option<String>,
+    abridged: Option<bool>,
+    explicit: Option<bool>,
+    audiologo_status: String,
+
+    // Joined.
+    author: Option<String>,
+    narrators: Option<String>,
+    publisher: Option<String>,
+    series: Option<String>,
+
+    // AI-derived field presence (avoid bloating response with
+    // multi-KB string payloads on a "show" call). Operator can
+    // ask for full content via per-field endpoints when needed.
+    has_summary: bool,
+    has_story_arc: bool,
+    has_setting: bool,
+    has_characters: bool,
+
+    files: Vec<BookFileDetail>,
+    stages: Vec<StageProgressRow>,
+    chapters: Vec<ChapterSourceCount>,
+}
+
+/// `GET /api/v1/books/{book_id}` — per-book detail surface.
+/// Returns 404 if the book doesn't exist.
+#[allow(
+    clippy::too_many_lines,
+    reason = "Diagnostic endpoint: per-book row + files + stages + chapters all assembled in one handler. Four separate sqlx::query! calls each with their own error mapping, then one composition step. Splitting hurts top-to-bottom readability — the steps are sequential and the macro requires inline query literals."
+)]
+async fn books_get(
+    State(state): State<ApiState>,
+    Path(book_id): Path<i64>,
+) -> Result<Json<BookDetailResponse>, ApiError> {
+    let pool = state.inner.library.pool();
+
+    // Core book row + joined identity fields. The COALESCE
+    // expressions mirror `books_list`'s prime-alias preference
+    // so display strings are consistent across endpoints.
+    let core = sqlx::query!(
+        r#"SELECT
+              b.book_id      AS "book_id!: i64",
+              b.title,
+              b.subtitle,
+              b.description,
+              b.language,
+              b.duration_ms,
+              b.asin,
+              b.isbn,
+              b.release_date,
+              b.abridged,
+              b.explicit,
+              b.audiologo_status,
+              b.summary_spoiler_free AS summary,
+              b.story_arc_json,
+              b.setting,
+              COALESCE(
+                  (SELECT alias FROM author_aliases
+                     WHERE author_id = b.author_id AND is_prime = 1 LIMIT 1),
+                  (SELECT name FROM authors WHERE author_id = b.author_id LIMIT 1)
+              ) AS author,
+              (SELECT GROUP_CONCAT(
+                          COALESCE(
+                              (SELECT alias FROM narrator_aliases na
+                                 WHERE na.narrator_id = n.narrator_id AND is_prime = 1 LIMIT 1),
+                              n.name
+                          ), ', ')
+                 FROM book_narrator bn
+                 JOIN narrators n ON n.narrator_id = bn.narrator_id
+                 WHERE bn.book_id = b.book_id) AS narrators,
+              (SELECT name FROM publishers WHERE publisher_id = b.publisher_id LIMIT 1) AS publisher,
+              (SELECT COALESCE(
+                          (SELECT alias FROM series_aliases sa
+                             WHERE sa.series_id = s.series_id AND is_prime = 1 LIMIT 1),
+                          s.name)
+                 FROM book_series bs
+                 JOIN series s ON s.series_id = bs.series_id
+                 WHERE bs.book_id = b.book_id
+                 LIMIT 1) AS series
+          FROM books b
+          WHERE b.book_id = ?"#,
+        book_id,
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| ApiError::Internal(ab_core::Error::Database(format!("books_get core: {e}"))))?
+    .ok_or_else(|| ApiError::NotFound(format!("book {book_id}")))?;
+
+    // `characters` is its own table — a presence check is "does
+    // at least one row exist for this book".
+    let chars_row = sqlx::query!(
+        r#"SELECT EXISTS(SELECT 1 FROM characters WHERE book_id = ?) AS "exists!: i64""#,
+        book_id,
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| ApiError::Internal(ab_core::Error::Database(format!("books_get chars: {e}"))))?;
+    let has_characters = chars_row.exists != 0;
+
+    let file_rows = sqlx::query!(
+        r#"SELECT
+              file_id      AS "file_id!: i64",
+              file_path,
+              duration_ms,
+              file_size,
+              is_active    AS "is_active!: i64"
+            FROM book_files
+            WHERE book_id = ?
+            ORDER BY file_id"#,
+        book_id,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| ApiError::Internal(ab_core::Error::Database(format!("books_get files: {e}"))))?;
+
+    // `pipeline_progress` lives in the ephemeral DB (restartable
+    // state — see migrations/ephemeral/001_initial.sql).
+    let stage_rows = sqlx::query!(
+        r#"SELECT stage, status, started_at, completed_at, failure_reason
+            FROM pipeline_progress
+            WHERE book_id = ?
+            ORDER BY stage"#,
+        book_id,
+    )
+    .fetch_all(state.inner.ephemeral.pool())
+    .await
+    .map_err(|e| ApiError::Internal(ab_core::Error::Database(format!("books_get stages: {e}"))))?;
+
+    let chapter_rows = sqlx::query!(
+        r#"SELECT source, COUNT(*) AS "count!: i64"
+            FROM chapters
+            WHERE book_id = ? AND is_winner = 1
+            GROUP BY source
+            ORDER BY source"#,
+        book_id,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        ApiError::Internal(ab_core::Error::Database(format!("books_get chapters: {e}")))
+    })?;
+
+    Ok(Json(BookDetailResponse {
+        book_id: core.book_id,
+        title: core.title,
+        subtitle: core.subtitle,
+        description: core.description,
+        language: core.language,
+        duration_ms: core.duration_ms,
+        asin: core.asin,
+        isbn: core.isbn,
+        release_date: core.release_date,
+        abridged: core.abridged.map(|v| v != 0),
+        explicit: core.explicit.map(|v| v != 0),
+        audiologo_status: core.audiologo_status,
+        author: core.author,
+        narrators: core.narrators,
+        publisher: core.publisher,
+        series: core.series,
+        has_summary: core.summary.is_some(),
+        has_story_arc: core.story_arc_json.is_some(),
+        has_setting: core.setting.is_some(),
+        has_characters,
+        files: file_rows
+            .into_iter()
+            .map(|r| BookFileDetail {
+                file_id: r.file_id,
+                file_path: r.file_path,
+                duration_ms: r.duration_ms,
+                file_size: r.file_size,
+                is_active: r.is_active != 0,
+            })
+            .collect(),
+        stages: stage_rows
+            .into_iter()
+            .map(|r| StageProgressRow {
+                stage: r.stage,
+                status: r.status,
+                started_at: r.started_at,
+                completed_at: r.completed_at,
+                failure_reason: r.failure_reason,
+            })
+            .collect(),
+        chapters: chapter_rows
+            .into_iter()
+            .map(|r| ChapterSourceCount {
+                source: r.source,
+                count: r.count,
+            })
+            .collect(),
+    }))
 }
 
 // ── /doctor/speech ───────────────────────────────────────────────

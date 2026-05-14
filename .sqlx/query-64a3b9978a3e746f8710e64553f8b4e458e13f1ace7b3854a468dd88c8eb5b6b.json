@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT source, COUNT(*) AS \"count!: i64\"\n            FROM chapters\n            WHERE book_id = ? AND is_winner = 1\n            GROUP BY source\n            ORDER BY source",
+  "describe": {
+    "columns": [
+      {
+        "name": "source",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "count!: i64",
+        "ordinal": 1,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "64a3b9978a3e746f8710e64553f8b4e458e13f1ace7b3854a468dd88c8eb5b6b"
+}
