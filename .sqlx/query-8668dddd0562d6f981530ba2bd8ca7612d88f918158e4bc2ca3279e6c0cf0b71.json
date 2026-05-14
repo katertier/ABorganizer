@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO media_progress (\n            book_id, current_time_ms, is_finished,\n            last_listened_at, last_synced_from, last_synced_at\n         ) VALUES (?, ?, ?, ?, ?, ?)\n         ON CONFLICT(book_id) DO UPDATE SET\n            current_time_ms  = excluded.current_time_ms,\n            is_finished      = excluded.is_finished,\n            last_listened_at = excluded.last_listened_at,\n            last_synced_from = excluded.last_synced_from,\n            last_synced_at   = excluded.last_synced_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "8668dddd0562d6f981530ba2bd8ca7612d88f918158e4bc2ca3279e6c0cf0b71"
+}

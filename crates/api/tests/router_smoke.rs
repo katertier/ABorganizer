@@ -273,6 +273,31 @@ async fn books_audiologo_protected() {
 }
 
 #[tokio::test]
+async fn books_status_protected() {
+    assert_protected("PATCH", "/books/1/status").await;
+}
+
+#[tokio::test]
+async fn books_rating_protected() {
+    assert_protected("PATCH", "/books/1/rating").await;
+}
+
+#[tokio::test]
+async fn books_notes_protected() {
+    assert_protected("PATCH", "/books/1/notes").await;
+}
+
+#[tokio::test]
+async fn books_progress_protected() {
+    assert_protected("GET", "/books/1/progress").await;
+}
+
+#[tokio::test]
+async fn session_sync_protected() {
+    assert_protected("POST", "/session/1/sync").await;
+}
+
+#[tokio::test]
 async fn audiologos_review_protected() {
     assert_protected("GET", "/audiologos/review").await;
 }

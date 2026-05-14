@@ -27,6 +27,7 @@ ab-fingerprint  = { workspace = true }
 # (ADR-0027) alongside every other per-book stage.
 ab-transcode    = { workspace = true }
 ab-pipeline     = { workspace = true }
+ab-progress     = { workspace = true }
 ab-scan         = { workspace = true }
 ab-transcript   = { workspace = true }
 ab-speech       = { workspace = true }

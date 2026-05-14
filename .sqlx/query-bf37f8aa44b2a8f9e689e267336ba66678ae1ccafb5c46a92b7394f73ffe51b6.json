@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE books SET reading_status = 'finished', updated_at = strftime('%s','now') WHERE book_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "bf37f8aa44b2a8f9e689e267336ba66678ae1ccafb5c46a92b7394f73ffe51b6"
+}

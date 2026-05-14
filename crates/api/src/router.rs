@@ -64,6 +64,26 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/books/{book_id}/retry", post(books_retry_stage))
         .route("/books/{book_id}/audiologo", post(books_audiologo_cut))
         .route(
+            "/books/{book_id}/status",
+            axum::routing::patch(crate::progress::books_status_patch),
+        )
+        .route(
+            "/books/{book_id}/rating",
+            axum::routing::patch(crate::progress::books_rating_patch),
+        )
+        .route(
+            "/books/{book_id}/notes",
+            axum::routing::patch(crate::progress::books_notes_patch),
+        )
+        .route(
+            "/books/{book_id}/progress",
+            get(crate::progress::books_progress_get),
+        )
+        .route(
+            "/session/{book_id}/sync",
+            post(crate::progress::session_sync),
+        )
+        .route(
             "/audiologos/review",
             get(crate::audiologo_review::audiologos_review_list),
         )
