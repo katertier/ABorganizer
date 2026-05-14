@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT file_path AS \"file_path!: String\",\n                  file_size AS \"file_size?: i64\",\n                  format    AS \"format?: String\"\n             FROM book_files\n            WHERE book_id = ? AND file_id = ? AND is_active = 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "file_path!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "file_size?: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "format?: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "b776094ba1f761437e62860eef3b80df7946181714b1bcc7f8d8193eab90fcf0"
+}
