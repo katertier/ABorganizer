@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT code_id      AS \"code_id!: i64\",\n                  code_hash    AS \"code_hash!: String\",\n                  device_label AS \"device_label!: String\",\n                  scopes_json  AS \"scopes_json!: String\",\n                  expires_at   AS \"expires_at!: i64\"\n             FROM pairing_codes\n            WHERE consumed_token_id IS NULL\n              AND expires_at > ?\n            ORDER BY issued_at DESC, code_id DESC",
+  "describe": {
+    "columns": [
+      {
+        "name": "code_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "code_hash!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "device_label!: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "scopes_json!: String",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "expires_at!: i64",
+        "ordinal": 4,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "77495c117e0faff2eb29c195a6466060521469c4911b9a8b064dae05a89290c7"
+}

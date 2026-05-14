@@ -143,14 +143,22 @@ mod tests {
         (CleanupCtx { library, ephemeral }, tmp)
     }
 
-    async fn seed_code(ctx: &CleanupCtx, code: &str, expires_at: i64, consumed: bool) {
+    async fn seed_code(ctx: &CleanupCtx, code_label: &str, expires_at: i64, consumed: bool) {
+        // Migration 004 reshaped this table: `code TEXT PK` →
+        // `code_id INTEGER PK AUTOINCREMENT, code_hash TEXT`.
+        // The `ExpiredPairingCodesTarget` cleanup target only
+        // filters on `consumed_token_id` + `expires_at` (no
+        // reference to the code column at all), so the test
+        // seed just needs a plausible row shape — the `code_hash`
+        // value here is a placeholder, not a real argon2id hash.
         let token: Option<i64> = if consumed { Some(1) } else { None };
         sqlx::query(
             "INSERT INTO pairing_codes \
-             (code, device_label, scopes_json, issued_at, expires_at, consumed_token_id) \
-             VALUES (?, 'test', '[]', 0, ?, ?)",
+             (code_hash, device_label, scopes_json, issued_at, expires_at, consumed_token_id) \
+             VALUES (?, ?, '[]', 0, ?, ?)",
         )
-        .bind(code)
+        .bind(format!("hash-of-{code_label}"))
+        .bind(code_label)
         .bind(expires_at)
         .bind(token)
         .execute(ctx.ephemeral.pool())

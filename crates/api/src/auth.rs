@@ -64,7 +64,16 @@ use crate::state::ApiState;
 /// Paths that bypass auth. Order-independent; exact match only
 /// (no prefix tricks — every protected handler that nests under
 /// these would also be exempt, which we don't want).
-const PUBLIC_PATHS: &[&str] = &["/health", "/version"];
+const PUBLIC_PATHS: &[&str] = &[
+    "/health",
+    "/version",
+    // Pairing consume — anonymous by design: it's how a new
+    // device gets its first bearer. Defense lives in the
+    // argon2id-slow verify + 10-min code lifetime + single-use
+    // semantics. See crate::pairing module docs for the full
+    // brute-force analysis.
+    crate::pairing::CONSUME_PUBLIC_PATH,
+];
 
 /// True iff `request_path` is on the allow-list.
 fn is_public(request_path: &str) -> bool {

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT code_id FROM pairing_codes WHERE code_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "code_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9e943cb8ea19ae865f969f20622dc835e9b56477580cc03bbbca641c7dfeef07"
+}

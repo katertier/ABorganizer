@@ -25,6 +25,7 @@ pub mod cleanup_targets;
 pub mod error;
 pub mod library_roots;
 pub mod names;
+pub mod pairing;
 pub mod reports;
 pub mod router;
 pub mod state;
