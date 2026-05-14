@@ -6,9 +6,9 @@
 //!
 //! ## Field coverage
 //!
-//! 13 of 16 `book_field_provenance` fields map to a canonical
-//! lofty key (slice C3a added `CoverUrl`). Symmetric with
-//! [`ab_tag_read`]'s read path:
+//! 14 of 16 `book_field_provenance` fields map to a canonical
+//! lofty key (slice C3a added `CoverUrl`; slice C3b added
+//! `Explicit`). Symmetric with [`ab_tag_read`]'s read path:
 //!
 //! | `Field`          | lofty mapping                                     |
 //! |------------------|---------------------------------------------------|
@@ -27,13 +27,20 @@
 //! | `Isbn`           | `ItemKey::Isrc`                                  |
 //! | `CoverUrl`       | `Tag::push_picture` (front cover, MIME sniffed   |
 //! |                  | from fetched bytes via [`crate::cover`])         |
+//! | `Explicit`       | `ItemKey::ParentalAdvisory` — `ITUNESADVISORY`   |
+//! |                  | on ID3 / `rtng` atom on MP4. Truthy → `"4"`,    |
+//! |                  | falsy → `"0"` (iTunes advisory integer scheme)  |
 //!
-//! The remaining 3 fields are deliberately unmapped:
+//! The remaining 2 fields are deliberately unmapped:
 //!
 //! - `DurationSeconds` — derived from decode, not a tag frame.
-//! - `Abridged` / `Explicit` — no canonical standard tag;
-//!   custom-key handling slated for slice C3b (`TXXX:ABRIDGED`
-//!   on ID3, `rtng` atom on MP4 per iTunes convention).
+//! - `Abridged` — no canonical `ItemKey`. Custom-frame
+//!   handling (`TXXX:ABRIDGED` on ID3, `----:com.apple.iTunes:ABRIDGED`
+//!   on MP4) requires dropping below the abstract `Tag` API
+//!   to the format-specific `Id3v2Tag` / `Ilst` types.
+//!   Deferred to a hygiene slice — the field is rarely
+//!   populated in the wild + the complexity outsizes the
+//!   user-facing benefit for an MVP.
 //!
 //! ## Idempotence
 //!
@@ -81,11 +88,11 @@ pub struct WriteReport {
     /// dedup guard hit).
     pub fields_already_matched: usize,
     /// How many winners had a `Field` that the slice's mapping
-    /// doesn't cover yet (`DurationSeconds`, `Abridged`,
-    /// `Explicit`) OR for which the side-channel input wasn't
-    /// available (e.g. `CoverUrl` with `cover_bytes == None`).
-    /// Logged so operators can track "how much of the data is
-    /// reaching the file" coverage.
+    /// doesn't cover yet (`DurationSeconds`, `Abridged`) OR for
+    /// which the side-channel input wasn't available (e.g.
+    /// `CoverUrl` with `cover_bytes == None`, or `Explicit` with
+    /// an unclassifiable value). Logged so operators can track
+    /// "how much of the data is reaching the file" coverage.
     pub fields_unmapped: usize,
 }
 
@@ -295,6 +302,16 @@ fn apply_winner(
 
         Field::CoverUrl => apply_cover(tag, cover_bytes),
 
+        // Slice C3b: Explicit lands on `ItemKey::ParentalAdvisory`
+        // which lofty maps to ID3v2 `ITUNESADVISORY` (`TXXX`
+        // frame with that user-defined description) and to the
+        // MP4 `rtng` atom — the convention every Apple-adjacent
+        // ecosystem reads. iTunes' integer value scheme is
+        // `0=None`, `1=Clean`, `2=Explicit (old)`,
+        // `4=Explicit`. We normalise the catalog's truthy/falsy
+        // string into that integer below.
+        Field::Explicit => apply_explicit(tag, new_value),
+
         // Remaining unmapped fields:
         //
         // - `DurationSeconds` — typically derived from the
@@ -302,11 +319,15 @@ fn apply_winner(
         //   `book_field_provenance.duration_seconds` row
         //   carries the consensus winner but a future
         //   "duration-as-tag" surface needs design work.
-        // - `Abridged` / `Explicit` — no canonical standard
-        //   tag; usually custom keys per encoder. Slated for
-        //   slice C3b (`TXXX:ABRIDGED` on ID3, `rtng` atom on
-        //   MP4 per iTunes convention).
-        Field::DurationSeconds | Field::Abridged | Field::Explicit => FieldWriteOutcome::Unmapped,
+        // - `Abridged` — no canonical `ItemKey`. Custom-frame
+        //   handling (`TXXX:ABRIDGED` on ID3, `----:com.apple.iTunes:ABRIDGED`
+        //   on MP4) requires dropping below the abstract `Tag`
+        //   API to the format-specific `Id3v2Tag` / `Ilst`
+        //   types. Deferred to a separate hygiene slice — the
+        //   field is rarely populated in the wild + the
+        //   complexity cost outsizes the user-facing benefit
+        //   for an MVP.
+        Field::DurationSeconds | Field::Abridged => FieldWriteOutcome::Unmapped,
     }
 }
 
@@ -408,6 +429,44 @@ fn set_item_if_changed(tag: &mut Tag, key: ItemKey, new_value: &str) -> FieldWri
     FieldWriteOutcome::Changed { before }
 }
 
+/// Translate the catalog's truthy / falsy string into the
+/// iTunes advisory integer + dispatch through
+/// [`ItemKey::ParentalAdvisory`]. Returns `Unmapped` for
+/// inputs we can't classify (rather than guessing — the
+/// audit log surfaces "we didn't write" so an operator can
+/// fix the source).
+fn apply_explicit(tag: &mut Tag, new_value: &str) -> FieldWriteOutcome {
+    let Some(int_str) = explicit_value_to_advisory(new_value) else {
+        return FieldWriteOutcome::Unmapped;
+    };
+    set_item_if_changed(tag, ItemKey::ParentalAdvisory, int_str)
+}
+
+/// Map a catalog truthy / falsy string to the iTunes advisory
+/// integer as a `&'static str`. Returns `None` when the input
+/// can't be classified (preserves the audit-log "Unmapped"
+/// signal).
+///
+/// Apple's `rtng` atom values:
+/// - `0` — None (not rated)
+/// - `1` — Clean
+/// - `2` — Explicit (deprecated, kept for back-compat)
+/// - `4` — Explicit (modern)
+///
+/// We emit `"4"` for truthy + `"0"` for falsy. `Clean` (1)
+/// isn't reachable from the boolean source; future schema
+/// could promote to a tri-state.
+fn explicit_value_to_advisory(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        // Truthy: explicit content acknowledged.
+        "1" | "true" | "t" | "yes" | "y" | "explicit" => Some("4"),
+        // Falsy: not flagged.
+        "0" | "false" | "f" | "no" | "n" | "none" | "clean" => Some("0"),
+        // Unknown / not a boolean — leave the tag alone.
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
@@ -416,24 +475,24 @@ mod tests {
 
     #[test]
     fn still_unmapped_fields_return_unmapped_outcome() {
-        // Three variants remain unmapped after slice C3a
-        // (DurationSeconds — no tag frame; Abridged + Explicit
-        // — deferred to C3b's custom-key handling). The
-        // CoverUrl branch is now covered by separate tests
+        // Two variants remain unmapped after slice C3b:
+        // - DurationSeconds: no tag frame
+        // - Abridged: needs lower-level custom-frame dispatch
+        //
+        // CoverUrl + Explicit have their own dedicated tests
         // below.
-        let v: Vec<(Field, FieldWriteOutcome)> =
-            [Field::DurationSeconds, Field::Abridged, Field::Explicit]
-                .iter()
-                .map(|f| {
-                    let mut tag = Tag::new(lofty::tag::TagType::Id3v2);
-                    let w = FieldWinner {
-                        field: *f,
-                        value: Some("anything".to_owned()),
-                        source: "any".to_owned(),
-                    };
-                    (*f, apply_winner(&mut tag, &w, None))
-                })
-                .collect();
+        let v: Vec<(Field, FieldWriteOutcome)> = [Field::DurationSeconds, Field::Abridged]
+            .iter()
+            .map(|f| {
+                let mut tag = Tag::new(lofty::tag::TagType::Id3v2);
+                let w = FieldWinner {
+                    field: *f,
+                    value: Some("anything".to_owned()),
+                    source: "any".to_owned(),
+                };
+                (*f, apply_winner(&mut tag, &w, None))
+            })
+            .collect();
         for (field, outcome) in v {
             assert_eq!(
                 outcome,
@@ -441,6 +500,106 @@ mod tests {
                 "{field:?} should be unmapped in this slice"
             );
         }
+    }
+
+    #[test]
+    fn explicit_truthy_writes_advisory_4() {
+        for value in ["1", "true", "TRUE", "yes", "Y", "explicit"] {
+            let mut tag = Tag::new(lofty::tag::TagType::Id3v2);
+            let w = FieldWinner {
+                field: Field::Explicit,
+                value: Some(value.to_owned()),
+                source: "audnexus-enrich".to_owned(),
+            };
+            assert!(
+                matches!(
+                    apply_winner(&mut tag, &w, None),
+                    FieldWriteOutcome::Changed { before: None }
+                ),
+                "{value:?} should map to advisory=4 / Changed"
+            );
+            assert_eq!(
+                tag.get_string(ItemKey::ParentalAdvisory),
+                Some("4"),
+                "iTunes advisory integer for Explicit"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_falsy_writes_advisory_0() {
+        for value in ["0", "false", "no", "n", "clean", "none"] {
+            let mut tag = Tag::new(lofty::tag::TagType::Id3v2);
+            let w = FieldWinner {
+                field: Field::Explicit,
+                value: Some(value.to_owned()),
+                source: "audnexus-enrich".to_owned(),
+            };
+            assert!(
+                matches!(
+                    apply_winner(&mut tag, &w, None),
+                    FieldWriteOutcome::Changed { before: None }
+                ),
+                "{value:?} should map to advisory=0 / Changed"
+            );
+            assert_eq!(
+                tag.get_string(ItemKey::ParentalAdvisory),
+                Some("0"),
+                "iTunes advisory integer for Not Flagged"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_unclassifiable_value_is_unmapped() {
+        // The catalog could theoretically emit a stray value
+        // we don't recognise; rather than guess + write the
+        // wrong integer we leave the tag alone.
+        let mut tag = Tag::new(lofty::tag::TagType::Id3v2);
+        let w = FieldWinner {
+            field: Field::Explicit,
+            value: Some("kinda?".to_owned()),
+            source: "audnexus-enrich".to_owned(),
+        };
+        assert_eq!(
+            apply_winner(&mut tag, &w, None),
+            FieldWriteOutcome::Unmapped,
+            "unrecognised truthy → Unmapped"
+        );
+        assert_eq!(
+            tag.get_string(ItemKey::ParentalAdvisory),
+            None,
+            "tag untouched"
+        );
+    }
+
+    #[test]
+    fn explicit_dedup_matches_when_advisory_already_set() {
+        let mut tag = Tag::new(lofty::tag::TagType::Id3v2);
+        tag.insert_text(ItemKey::ParentalAdvisory, "4".to_owned());
+        let w = FieldWinner {
+            field: Field::Explicit,
+            value: Some("true".to_owned()),
+            source: "audnexus-enrich".to_owned(),
+        };
+        assert_eq!(
+            apply_winner(&mut tag, &w, None),
+            FieldWriteOutcome::Matched,
+            "advisory already = 4 → Matched (no re-write)"
+        );
+    }
+
+    #[test]
+    fn explicit_value_to_advisory_matrix() {
+        // Pin the truthy / falsy alphabets so a future tweak
+        // (or a CHECK constraint on the catalog's value
+        // column) doesn't drift silently.
+        assert_eq!(explicit_value_to_advisory("true"), Some("4"));
+        assert_eq!(explicit_value_to_advisory("FALSE"), Some("0"));
+        assert_eq!(explicit_value_to_advisory("  Yes "), Some("4"));
+        assert_eq!(explicit_value_to_advisory("clean"), Some("0"));
+        assert_eq!(explicit_value_to_advisory("maybe"), None);
+        assert_eq!(explicit_value_to_advisory(""), None);
     }
 
     #[test]
