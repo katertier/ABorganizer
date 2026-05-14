@@ -81,6 +81,34 @@ private func logError(_ tag: String, _ err: Error) {
     FileHandle.standardError.write(msg.data(using: .utf8) ?? Data())
 }
 
+// MARK: - Optional Swift-side debug logs
+//
+// Set `ABORG_FM_SWIFT_DEBUG_LOGS=1` (or any non-empty value)
+// in the daemon's environment to get verbose diagnostics from
+// inside the bridge: prompts received, generation options
+// constructed, response sizes, structured-output schema parse
+// breadcrumbs. Off by default — production daemon stays quiet,
+// stderr only carries the `logError` lines on actual failure.
+//
+// Why a Swift env var instead of routing through Rust tracing:
+// the Rust tracing layer can't see into the Task that runs
+// inside `runComplete()` after `Task.detached` jumps. Without a
+// Swift-local print we go blind whenever the model returns
+// malformed JSON, the schema rejects a token, etc. The cost
+// of the helper is one ProcessInfo lookup per call when the
+// var is unset (cached below).
+
+private let aborgFmDebugLogsEnabled: Bool = {
+    let env = ProcessInfo.processInfo.environment["ABORG_FM_SWIFT_DEBUG_LOGS"]
+    return env != nil && !(env?.isEmpty ?? true)
+}()
+
+private func debugLog(_ tag: String, _ msg: @autoclosure () -> String) {
+    guard aborgFmDebugLogsEnabled else { return }
+    let line = "[aborg_fm.debug] \(tag): \(msg())\n"
+    FileHandle.standardError.write(line.data(using: .utf8) ?? Data())
+}
+
 // MARK: - Availability probe
 
 // What the doctor needs: a single JSON blob with `available: bool`
@@ -206,7 +234,7 @@ public func aborg_fm_supported_languages(
 // it as an upper bound but may stop earlier on its own EOS
 // signal.
 @available(macOS 26.0, *)
-private func runComplete(prompt: String, maxTokens: Int) async throws -> String {
+private func runComplete(prompt: String, maxTokens: Int, temperature: Double?) async throws -> String {
     #if canImport(FoundationModels)
     let model = SystemLanguageModel.default
     switch model.availability {
@@ -271,16 +299,33 @@ private func runComplete(prompt: String, maxTokens: Int) async throws -> String 
     // side to log + skip. Re-evaluate on each macOS / Xcode
     // release.
     let session = LanguageModelSession()
-    let options = GenerationOptions(maximumResponseTokens: max(1, maxTokens))
+    let clampedMaxTokens = max(1, maxTokens)
+    let options: GenerationOptions
+    if let t = temperature {
+        options = GenerationOptions(
+            temperature: t,
+            maximumResponseTokens: clampedMaxTokens
+        )
+        debugLog(
+            "runComplete",
+            "max_tokens=\(clampedMaxTokens) temperature=\(t) prompt_len=\(prompt.count)"
+        )
+    } else {
+        options = GenerationOptions(maximumResponseTokens: clampedMaxTokens)
+        debugLog(
+            "runComplete",
+            "max_tokens=\(clampedMaxTokens) temperature=default prompt_len=\(prompt.count)"
+        )
+    }
     do {
         let response = try await session.respond(to: prompt, options: options)
+        debugLog("runComplete", "response_len=\(response.content.count)")
         return response.content
     } catch {
         throw AborgFmError.generationFailed("\(error)")
     }
     #else
-    _ = prompt
-    _ = maxTokens
+    _ = (prompt, maxTokens, temperature)
     throw AborgFmError.frameworkUnavailable
     #endif
 }
@@ -289,15 +334,25 @@ private func runComplete(prompt: String, maxTokens: Int) async throws -> String 
 public func aborg_fm_complete(
     _ prompt: UnsafePointer<CChar>?,
     _ maxTokens: Int,
+    _ temperature: Double,
+    _ useTemperature: Int32,
     _ ctx: UnsafeMutableRawPointer?,
     _ callback: @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?, Int, Int32) -> Void
 ) {
     let promptStr = prompt.flatMap { String(validatingCString: $0) } ?? ""
+    // Rust packs `Option<f64>` into the (Double, Int32) pair:
+    // `useTemperature != 0` means "use the value"; `== 0` means
+    // "keep framework default and ignore `temperature`."
+    let tempOpt: Double? = useTemperature != 0 ? temperature : nil
     Task.detached {
         do {
             let text: String
             if #available(macOS 26.0, *) {
-                text = try await runComplete(prompt: promptStr, maxTokens: maxTokens)
+                text = try await runComplete(
+                    prompt: promptStr,
+                    maxTokens: maxTokens,
+                    temperature: tempOpt
+                )
             } else {
                 throw AborgFmError.frameworkUnavailable
             }
@@ -397,7 +452,8 @@ private func buildDynamicSchema(
 private func runCompleteStructured(
     prompt: String,
     schemaJsonStr: String,
-    maxTokens: Int
+    maxTokens: Int,
+    temperature: Double?
 ) async throws -> String {
     #if canImport(FoundationModels)
     let model = SystemLanguageModel.default
@@ -450,7 +506,24 @@ private func runCompleteStructured(
     // `runComplete()` for the diagnostic + the reason we won't
     // adopt the entro314-labs private-memory hack.
     let session = LanguageModelSession()
-    let options = GenerationOptions(maximumResponseTokens: max(1, maxTokens))
+    let clampedMaxTokens = max(1, maxTokens)
+    let options: GenerationOptions
+    if let t = temperature {
+        options = GenerationOptions(
+            temperature: t,
+            maximumResponseTokens: clampedMaxTokens
+        )
+        debugLog(
+            "runCompleteStructured",
+            "max_tokens=\(clampedMaxTokens) temperature=\(t) prompt_len=\(prompt.count) schema_len=\(schemaJsonStr.count)"
+        )
+    } else {
+        options = GenerationOptions(maximumResponseTokens: clampedMaxTokens)
+        debugLog(
+            "runCompleteStructured",
+            "max_tokens=\(clampedMaxTokens) temperature=default prompt_len=\(prompt.count) schema_len=\(schemaJsonStr.count)"
+        )
+    }
     do {
         let response = try await session.respond(
             to: prompt,
@@ -458,12 +531,14 @@ private func runCompleteStructured(
             includeSchemaInPrompt: true,
             options: options
         )
-        return response.content.jsonString
+        let json = response.content.jsonString
+        debugLog("runCompleteStructured", "response_json_len=\(json.count)")
+        return json
     } catch {
         throw AborgFmError.generationFailed("\(error)")
     }
     #else
-    _ = (prompt, schemaJsonStr, maxTokens)
+    _ = (prompt, schemaJsonStr, maxTokens, temperature)
     throw AborgFmError.frameworkUnavailable
     #endif
 }
@@ -473,11 +548,14 @@ public func aborg_fm_complete_structured(
     _ prompt: UnsafePointer<CChar>?,
     _ schemaJson: UnsafePointer<CChar>?,
     _ maxTokens: Int,
+    _ temperature: Double,
+    _ useTemperature: Int32,
     _ ctx: UnsafeMutableRawPointer?,
     _ callback: @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?, Int, Int32) -> Void
 ) {
     let promptStr = prompt.flatMap { String(validatingCString: $0) } ?? ""
     let schemaStr = schemaJson.flatMap { String(validatingCString: $0) } ?? ""
+    let tempOpt: Double? = useTemperature != 0 ? temperature : nil
     Task.detached {
         do {
             let text: String
@@ -485,7 +563,8 @@ public func aborg_fm_complete_structured(
                 text = try await runCompleteStructured(
                     prompt: promptStr,
                     schemaJsonStr: schemaStr,
-                    maxTokens: maxTokens
+                    maxTokens: maxTokens,
+                    temperature: tempOpt
                 )
             } else {
                 throw AborgFmError.frameworkUnavailable

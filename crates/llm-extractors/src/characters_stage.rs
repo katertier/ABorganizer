@@ -54,7 +54,7 @@ use ab_core::{BookId, CacheKey, Error, Result};
 use ab_db::LibraryDb;
 use ab_pipeline::{Stage, StageContext, StageId, StageOutcome};
 
-use ab_foundation_models::{BridgeError, complete_structured};
+use ab_foundation_models::{BridgeError, GenerationOptions, complete_structured};
 
 /// Typed identifier for this stage.
 pub const STAGE_ID: StageId = StageId::new("extract-characters");
@@ -156,13 +156,8 @@ impl Stage for ExtractCharactersStage {
                 desc_words_high: self.tunables.character_desc_target_words_high,
             },
         );
-        let raw = match complete_structured(
-            &prompt,
-            CHARACTERS_SCHEMA_JSON,
-            self.tunables.characters_max_tokens,
-        )
-        .await
-        {
+        let opts = GenerationOptions::new(self.tunables.characters_max_tokens);
+        let raw = match complete_structured(&prompt, CHARACTERS_SCHEMA_JSON, &opts).await {
             Ok(s) => s,
             Err(BridgeError::PromptEmpty) => return Ok(StageOutcome::Skipped),
             Err(e) => return Err(bridge_to_stage_error(&e)),

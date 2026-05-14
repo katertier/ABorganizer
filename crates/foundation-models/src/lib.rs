@@ -39,6 +39,62 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Knobs passed to a single generation call.
+///
+/// Replaces the bare `max_tokens: usize` arg the surface used
+/// previously. Added in the AI-improvements cross-reference with
+/// `bbrangeo/apple_ai` so the DNA-tag extractor can request
+/// deterministic output (`temperature = Some(0.0)`) while the
+/// description / story-arc / characters extractors stay at the
+/// framework default (`temperature = None`) for creative variety.
+///
+/// `temperature = None` → the Swift bridge constructs
+/// `GenerationOptions(maximumResponseTokens:)` only, leaving
+/// Apple's default sampling alone. `temperature = Some(t)` →
+/// the bridge constructs
+/// `GenerationOptions(temperature:, maximumResponseTokens:)`.
+#[derive(Debug, Clone, Copy)]
+pub struct GenerationOptions {
+    /// Soft cap on response tokens — passed to
+    /// `GenerationOptions.maximumResponseTokens`. The framework
+    /// may stop earlier on EOS.
+    pub max_tokens: usize,
+    /// Sampling temperature in the framework's range (Apple
+    /// documents 0.0 ≤ t ≤ 2.0). `None` keeps the framework
+    /// default; `Some(0.0)` is deterministic-greedy.
+    pub temperature: Option<f64>,
+}
+
+impl GenerationOptions {
+    /// Build the no-temperature baseline (framework default).
+    #[must_use]
+    pub const fn new(max_tokens: usize) -> Self {
+        Self {
+            max_tokens,
+            temperature: None,
+        }
+    }
+
+    /// Build with an explicit temperature.
+    #[must_use]
+    pub const fn with_temperature(max_tokens: usize, temperature: f64) -> Self {
+        Self {
+            max_tokens,
+            temperature: Some(temperature),
+        }
+    }
+}
+
+impl Default for GenerationOptions {
+    /// 512-token budget, framework-default sampling. Reasonable
+    /// for a one-shot ask-the-model-a-yes-or-no probe; concrete
+    /// extractors tend to override `max_tokens` to their own
+    /// tunable.
+    fn default() -> Self {
+        Self::new(512)
+    }
+}
+
 /// Reason the on-device LLM isn't usable.
 ///
 /// Mirrors `SystemLanguageModel.Availability.UnavailabilityReason`
@@ -227,9 +283,12 @@ pub async fn supported_locales() -> Result<Vec<String>, BridgeError> {
 
 /// Run a one-shot text completion against the on-device LLM.
 ///
-/// `max_tokens` is a soft budget passed straight to
-/// `GenerationOptions.maximumResponseTokens` — the framework may
-/// stop earlier on its own EOS signal.
+/// [`GenerationOptions::max_tokens`] is a soft budget passed
+/// straight to `GenerationOptions.maximumResponseTokens` — the
+/// framework may stop earlier on its own EOS signal.
+/// [`GenerationOptions::temperature`] (when `Some`) is passed to
+/// `GenerationOptions.temperature`; `None` keeps the framework
+/// default.
 ///
 /// # Errors
 ///
@@ -244,14 +303,14 @@ pub async fn supported_locales() -> Result<Vec<String>, BridgeError> {
     clippy::unused_async,
     reason = "Uniform async surface — see status() for the rationale."
 )]
-pub async fn complete(prompt: &str, max_tokens: usize) -> Result<String, BridgeError> {
+pub async fn complete(prompt: &str, options: &GenerationOptions) -> Result<String, BridgeError> {
     #[cfg(aborg_fm_bridge)]
     {
-        ffi::complete_impl(prompt, max_tokens).await
+        ffi::complete_impl(prompt, options).await
     }
     #[cfg(not(aborg_fm_bridge))]
     {
-        let _ = (prompt, max_tokens);
+        let _ = (prompt, options);
         Err(BridgeError::BridgeUnavailable)
     }
 }
@@ -298,15 +357,15 @@ pub async fn complete(prompt: &str, max_tokens: usize) -> Result<String, BridgeE
 pub async fn complete_structured(
     prompt: &str,
     schema_json: &str,
-    max_tokens: usize,
+    options: &GenerationOptions,
 ) -> Result<String, BridgeError> {
     #[cfg(aborg_fm_bridge)]
     {
-        ffi::complete_structured_impl(prompt, schema_json, max_tokens).await
+        ffi::complete_structured_impl(prompt, schema_json, options).await
     }
     #[cfg(not(aborg_fm_bridge))]
     {
-        let _ = (prompt, schema_json, max_tokens);
+        let _ = (prompt, schema_json, options);
         Err(BridgeError::BridgeUnavailable)
     }
 }
@@ -389,9 +448,20 @@ mod ffi {
 
         /// One-shot completion. Callback receives the response
         /// text as UTF-8.
+        ///
+        /// `temperature` is the sampling temperature passed to
+        /// `GenerationOptions.temperature` when `use_temperature
+        /// != 0`. When `use_temperature == 0`, the bridge omits
+        /// the field so Apple's default sampling stays in
+        /// effect. Two-field encoding instead of a `NaN` sentinel
+        /// keeps the contract typed (clippy/rust hates `NaN`
+        /// equality and the Swift side parses booleans more
+        /// naturally than `NaN` bit-patterns).
         fn aborg_fm_complete(
             prompt: *const c_char,
             max_tokens: usize,
+            temperature: f64,
+            use_temperature: i32,
             ctx: *mut c_void,
             callback: extern "C" fn(*mut c_void, *const c_char, usize, i32),
         );
@@ -412,6 +482,8 @@ mod ffi {
             prompt: *const c_char,
             schema_json: *const c_char,
             max_tokens: usize,
+            temperature: f64,
+            use_temperature: i32,
             ctx: *mut c_void,
             callback: extern "C" fn(*mut c_void, *const c_char, usize, i32),
         );
@@ -485,18 +557,39 @@ mod ffi {
         Ok(json.locales)
     }
 
+    /// Split a [`super::GenerationOptions`] into the
+    /// `(temperature, use_temperature)` FFI pair. `None` → `(0.0, 0)`;
+    /// `Some(t)` → `(t, 1)`. The Swift side reads `use_temperature`
+    /// first and ignores the `temperature` payload when it's 0.
+    const fn split_temperature(opts: &super::GenerationOptions) -> (f64, i32) {
+        match opts.temperature {
+            Some(t) => (t, 1),
+            None => (0.0, 0),
+        }
+    }
+
     pub(super) async fn complete_impl(
         prompt: &str,
-        max_tokens: usize,
+        options: &super::GenerationOptions,
     ) -> Result<String, BridgeError> {
         let c_prompt =
             CString::new(prompt).map_err(|e| BridgeError::NulInInput(format!("prompt: {e}")))?;
         let (tx, rx) = oneshot::channel::<FfiResult>();
         let ctx = Box::into_raw(Box::new(tx)).cast::<c_void>();
+        let (temperature, use_temperature) = split_temperature(options);
         // SAFETY: ctx pairs with on_result; CString outlives
         // the call into Swift (we hold it until the await
         // returns). Swift fires the callback exactly once.
-        unsafe { aborg_fm_complete(c_prompt.as_ptr(), max_tokens, ctx, on_result) };
+        unsafe {
+            aborg_fm_complete(
+                c_prompt.as_ptr(),
+                options.max_tokens,
+                temperature,
+                use_temperature,
+                ctx,
+                on_result,
+            );
+        }
         // CStr is preserved by c_prompt living until rx.await
         // resolves; Swift copies the bytes synchronously
         // before kicking off its Task.
@@ -514,7 +607,7 @@ mod ffi {
     pub(super) async fn complete_structured_impl(
         prompt: &str,
         schema_json: &str,
-        max_tokens: usize,
+        options: &super::GenerationOptions,
     ) -> Result<String, BridgeError> {
         let c_prompt =
             CString::new(prompt).map_err(|e| BridgeError::NulInInput(format!("prompt: {e}")))?;
@@ -522,6 +615,7 @@ mod ffi {
             .map_err(|e| BridgeError::NulInInput(format!("schema_json: {e}")))?;
         let (tx, rx) = oneshot::channel::<FfiResult>();
         let ctx = Box::into_raw(Box::new(tx)).cast::<c_void>();
+        let (temperature, use_temperature) = split_temperature(options);
         // SAFETY: ctx pairs with on_result; both CStrings outlive
         // the call into Swift (held until the await returns) and
         // Swift copies them synchronously before kicking off its
@@ -530,7 +624,9 @@ mod ffi {
             aborg_fm_complete_structured(
                 c_prompt.as_ptr(),
                 c_schema.as_ptr(),
-                max_tokens,
+                options.max_tokens,
+                temperature,
+                use_temperature,
                 ctx,
                 on_result,
             );
@@ -601,7 +697,7 @@ mod tests {
     /// successful generation or a typed unavailability error.
     #[tokio::test]
     async fn complete_returns_typed_error_when_unavailable() {
-        let r = complete("Say hi.", 32).await;
+        let r = complete("Say hi.", &GenerationOptions::new(32)).await;
         match r {
             Ok(_text) => {}
             Err(
@@ -626,7 +722,7 @@ mod tests {
             "properties": { "greeting": { "type": "string" } },
             "required": ["greeting"]
         }"#;
-        let r = complete_structured("Say hi as JSON.", schema, 64).await;
+        let r = complete_structured("Say hi as JSON.", schema, &GenerationOptions::new(64)).await;
         match r {
             Ok(_text) => {}
             Err(
@@ -640,5 +736,28 @@ mod tests {
             ) => {}
             Err(other) => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn generation_options_new_omits_temperature() {
+        let o = GenerationOptions::new(256);
+        assert_eq!(o.max_tokens, 256);
+        assert_eq!(o.temperature, None);
+    }
+
+    #[test]
+    fn generation_options_with_temperature_sets_some() {
+        let o = GenerationOptions::with_temperature(256, 0.0);
+        assert_eq!(o.max_tokens, 256);
+        // Use float-equality with explicit precision since clippy
+        // doesn't object on 0.0 specifically; 0.0 is bit-exact.
+        assert!(o.temperature.is_some_and(|t| t == 0.0));
+    }
+
+    #[test]
+    fn generation_options_default_is_no_temperature() {
+        let o = GenerationOptions::default();
+        assert!(o.max_tokens > 0, "default should have some token budget");
+        assert_eq!(o.temperature, None);
     }
 }
