@@ -6,6 +6,7 @@ use ab_core::tunables::SecurityTunables;
 use ab_db::{EphemeralDb, LibraryDb};
 use ab_pipeline::cleanup::CleanupRegistry;
 use ab_pipeline::{Dag, Scheduler};
+use globset::GlobSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::rate_limit::RateLimiter;
@@ -55,6 +56,12 @@ pub struct ApiStateInner {
     /// Initialised inline by [`ApiState::new`] so the existing
     /// constructor signature is unchanged.
     pub pairing_consume_limiter: Arc<RateLimiter>,
+    /// Compiled watch-folder exclusion globs from
+    /// `PipelineTunables.scan_excludes` (B.4, tracker #119). The
+    /// `library_scan` handler passes this through to
+    /// `ab_scan::scan_with_excludes`. Compiled once at boot;
+    /// empty `GlobSet` disables exclusions (suitable for tests).
+    pub scan_excludes: GlobSet,
 }
 
 impl ApiState {
@@ -76,6 +83,7 @@ impl ApiState {
         cleanup: CleanupRegistry,
         cancel: CancellationToken,
         security: SecurityTunables,
+        scan_excludes: GlobSet,
     ) -> Self {
         Self {
             inner: Arc::new(ApiStateInner {
@@ -88,6 +96,7 @@ impl ApiState {
                 security,
                 started_at: std::time::Instant::now(),
                 pairing_consume_limiter: Arc::new(RateLimiter::default()),
+                scan_excludes,
             }),
         }
     }

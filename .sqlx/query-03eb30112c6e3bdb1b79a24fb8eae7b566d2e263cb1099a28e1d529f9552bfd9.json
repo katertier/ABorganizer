@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT rating AS \"v?: i64\" FROM books WHERE book_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "v?: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "03eb30112c6e3bdb1b79a24fb8eae7b566d2e263cb1099a28e1d529f9552bfd9"
+}

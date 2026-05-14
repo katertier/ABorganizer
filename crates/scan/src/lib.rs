@@ -29,8 +29,9 @@
 //!   primitives reserved; wire-up is in Theme 6.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use walkdir::WalkDir;
 
 use ab_core::{BookId, Error, Result};
@@ -39,6 +40,59 @@ use ab_db::LibraryDb;
 /// Audio file extensions recognised by the scanner. Matched
 /// case-insensitively.
 pub const AUDIO_EXTENSIONS: &[&str] = &["m4b", "m4a", "mp3", "flac", "opus", "ogg", "aax"];
+
+/// Compile `PipelineTunables.scan_excludes` patterns into a matcher.
+///
+/// Suitable for [`scan_with_excludes`] / [`scan`] (B.4, tracker
+/// #119). Patterns that fail to compile are logged + dropped from
+/// the active set — a single broken entry doesn't disable
+/// exclusions for the rest. Returns an empty `GlobSet` when
+/// `patterns` is empty (`is_match` always returns `false`). The
+/// caller can defer compilation to boot time and pass the same
+/// `GlobSet` to every scan.
+#[must_use]
+pub fn compile_excludes(patterns: &[String]) -> GlobSet {
+    let mut builder = GlobSetBuilder::new();
+    for raw in patterns {
+        match Glob::new(raw) {
+            Ok(glob) => {
+                builder.add(glob);
+            }
+            Err(e) => tracing::warn!(
+                pattern = %raw,
+                error = %e,
+                "scan.exclude_pattern_invalid"
+            ),
+        }
+    }
+    builder.build().unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "scan.exclude_globset_build_failed");
+        GlobSet::empty()
+    })
+}
+
+/// True iff any component of `path` matches `globset` — file
+/// basename OR any directory component. Globset patterns like
+/// `*.tmp` match basenames; bare names like `temp` or `sample`
+/// match directory components.
+///
+/// Matching by component (not whole path) keeps patterns short
+/// and intent-clear: an operator who excludes `temp` doesn't
+/// have to write `**/temp/**`.
+fn path_matches_excludes(path: &Path, globset: &GlobSet) -> bool {
+    if globset.is_empty() {
+        return false;
+    }
+    for component in path.components() {
+        let Component::Normal(os) = component else {
+            continue;
+        };
+        if globset.is_match(os) {
+            return true;
+        }
+    }
+    false
+}
 
 /// First N bytes of a file fed into the file-hash. Tiny payload (one
 /// disk page), enough to disambiguate non-content-identical files
@@ -69,12 +123,35 @@ pub struct ScanReport {
 /// path or by `file_hash` — don't double-insert; a moved file gets
 /// its `file_path` updated in place.
 ///
+/// Convenience wrapper around [`scan_with_excludes`] with an
+/// empty exclude set — kept for tests + simple callers.
+///
 /// # Errors
 ///
 /// Returns [`Error::Io`] on FS errors,
 /// [`Error::Database`] on SQL failures,
 /// [`Error::PathOutsideAllowed`] if `root` doesn't exist.
 pub async fn scan(root: &Path, db: &LibraryDb) -> Result<ScanReport> {
+    scan_with_excludes(root, db, &GlobSet::empty()).await
+}
+
+/// `scan()` with watch-folder exclusion globs applied during the
+/// walk (B.4). Build the `GlobSet` once at boot via
+/// [`compile_excludes`] and pass on every scan.
+///
+/// Excluded paths short-circuit before any `is_audio_file` test
+/// and never enter `book_files`. Matches by file basename OR any
+/// path component — `*.tmp` skips the file, `temp` skips every
+/// path with `temp` in any directory level.
+///
+/// # Errors
+///
+/// Same error surface as [`scan`].
+pub async fn scan_with_excludes(
+    root: &Path,
+    db: &LibraryDb,
+    excludes: &GlobSet,
+) -> Result<ScanReport> {
     if !root.exists() {
         return Err(Error::PathOutsideAllowed(root.to_path_buf()));
     }
@@ -84,7 +161,7 @@ pub async fn scan(root: &Path, db: &LibraryDb) -> Result<ScanReport> {
     let mut report = ScanReport::default();
 
     // Phase 1: walk, count, collect audio files grouped by parent.
-    let groups = walk_audio_files(&canonical_root, &mut report);
+    let groups = walk_audio_files(&canonical_root, &mut report, excludes);
 
     // Phase 2: per group, decide single-file vs multi-file then upsert.
     for (parent_dir, audio_files) in groups {
@@ -108,9 +185,15 @@ pub async fn scan(root: &Path, db: &LibraryDb) -> Result<ScanReport> {
 /// directory. Mutates `report` in place to count
 /// non-audio + walked counters. Each group is the list of
 /// (path, metadata) pairs.
+///
+/// B.4: `excludes` is consulted before the `is_audio_file` test;
+/// a path whose basename or any directory component matches a
+/// pattern is skipped entirely (no `total_walked` / `non_audio`
+/// increment, no tracing — the operator chose to ignore it).
 fn walk_audio_files(
     root: &Path,
     report: &mut ScanReport,
+    excludes: &GlobSet,
 ) -> BTreeMap<PathBuf, Vec<(PathBuf, std::fs::Metadata)>> {
     let mut groups: BTreeMap<PathBuf, Vec<(PathBuf, std::fs::Metadata)>> = BTreeMap::new();
     for entry in WalkDir::new(root).follow_links(false) {
@@ -124,8 +207,12 @@ fn walk_audio_files(
         if !entry.file_type().is_file() {
             continue;
         }
-        report.total_walked += 1;
         let path = entry.path();
+        if path_matches_excludes(path, excludes) {
+            tracing::trace!(file = %path.display(), "scan.exclude_match");
+            continue;
+        }
+        report.total_walked += 1;
         if !is_audio_file(path) {
             report.non_audio_count += 1;
             tracing::debug!(file = %path.display(), "scan.non_audio_skipped");
@@ -282,7 +369,7 @@ pub fn compute_file_hash(path: &Path) -> std::io::Result<String> {
     hasher.update(&size.to_le_bytes());
     hasher.update(&mtime_secs.to_le_bytes());
     hasher.update(&head);
-    Ok(hasher.finalize().to_hex().to_string())
+    Ok(String::from(hasher.finalize().to_hex().as_str()))
 }
 
 // ── Upsert path ──────────────────────────────────────────────────
@@ -316,7 +403,7 @@ async fn upsert_book_file(
     row: &NewBookFileRow<'_>,
     book_id_hint: Option<BookId>,
 ) -> Result<UpsertOutcome> {
-    let file_path_str = row.file_path.to_string_lossy().to_string();
+    let file_path_str: String = row.file_path.to_string_lossy().into_owned();
     let file_size = i64::try_from(row.metadata.len()).unwrap_or(i64::MAX);
     let modified_at = row
         .metadata
@@ -556,5 +643,89 @@ mod tests {
             compute_file_hash(&a).unwrap(),
             compute_file_hash(&b).unwrap()
         );
+    }
+
+    // ---- B.4 — watch-folder exclusion globs ----
+
+    #[test]
+    fn compile_excludes_drops_bad_patterns() {
+        // `[` is an unterminated character class — globset rejects it.
+        // Valid neighbours stay in the set.
+        let set = compile_excludes(&[
+            "*.tmp".into(),
+            "[".into(),
+            ".DS_Store".into(),
+        ]);
+        assert_eq!(set.len(), 2, "two valid patterns survived");
+    }
+
+    #[test]
+    fn path_matches_excludes_by_basename_or_component() {
+        let set = compile_excludes(&[
+            "*.tmp".into(),
+            ".DS_Store".into(),
+            "temp".into(),
+        ]);
+        // Basename glob.
+        assert!(path_matches_excludes(
+            &PathBuf::from("/a/b/in-progress.tmp"),
+            &set
+        ));
+        // Exact basename match.
+        assert!(path_matches_excludes(
+            &PathBuf::from("/a/b/.DS_Store"),
+            &set
+        ));
+        // Directory-component match anywhere in the path.
+        assert!(path_matches_excludes(
+            &PathBuf::from("/library/temp/book.m4b"),
+            &set
+        ));
+        assert!(path_matches_excludes(
+            &PathBuf::from("/library/author/temp/book.m4b"),
+            &set
+        ));
+        // No match.
+        assert!(!path_matches_excludes(
+            &PathBuf::from("/library/author/book.m4b"),
+            &set
+        ));
+    }
+
+    #[test]
+    fn path_matches_excludes_empty_set_never_matches() {
+        let set = GlobSet::empty();
+        assert!(!path_matches_excludes(
+            &PathBuf::from("/anything.tmp"),
+            &set
+        ));
+    }
+
+    #[tokio::test]
+    async fn scan_with_excludes_skips_matching_files() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let db = fresh_db(tmp.path()).await;
+        let root = tmp.path().join("library");
+        fs::create_dir_all(&root).expect("mkdir");
+        // Three audio files: one normal, one excluded by extension
+        // (.part-style suffix simulated via `.crdownload`), one
+        // excluded by parent directory (`temp/`).
+        touch(&root, "book.m4b", b"audio bytes 0");
+        let temp_dir = root.join("temp");
+        fs::create_dir(&temp_dir).expect("mkdir temp");
+        touch(&temp_dir, "wip.m4b", b"audio bytes 1");
+        touch(&root, "download.crdownload", b"audio bytes 2");
+
+        let excludes = compile_excludes(&["*.crdownload".into(), "temp".into()]);
+        let report = scan_with_excludes(&root, &db, &excludes)
+            .await
+            .expect("scan");
+        assert_eq!(
+            report.new_book_ids.len(),
+            1,
+            "only the non-excluded audio file becomes a book"
+        );
+        // total_walked excludes the skipped files entirely.
+        assert_eq!(report.total_walked, 1);
     }
 }

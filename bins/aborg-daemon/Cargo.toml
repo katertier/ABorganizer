@@ -25,6 +25,7 @@ shelf         = []
 ab-core         = { workspace = true }
 ab-db           = { workspace = true }
 ab-pipeline     = { workspace = true }
+ab-scan         = { workspace = true }
 ab-api          = { workspace = true }
 ab-catalog      = { workspace = true }
 ab-fingerprint  = { workspace = true }

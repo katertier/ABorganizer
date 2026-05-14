@@ -1,12 +1,12 @@
 [package]
-name         = "ab-scan"
+name         = "ab-progress"
 version      = { workspace = true }
 edition      = { workspace = true }
 rust-version = { workspace = true }
 license      = { workspace = true }
 authors      = { workspace = true }
 repository   = { workspace = true }
-description  = "Directory walker + audio-file enumeration. Produces BookId rows in library.db; the rest of the pipeline operates on them."
+description  = "Reading state — status / rating / notes + media_progress cross-device sync. ADR-0033."
 
 [lints]
 workspace = true
@@ -14,16 +14,12 @@ workspace = true
 [dependencies]
 ab-core   = { workspace = true }
 ab-db     = { workspace = true }
-blake3    = { workspace = true }
-# B.4: scan watch-folder exclusion globs
-# (`PipelineTunables.scan_excludes`).
-globset   = { workspace = true }
 serde     = { workspace = true }
 sqlx      = { workspace = true }
 thiserror = { workspace = true }
 tracing   = { workspace = true }
-walkdir   = { workspace = true }
 
 [dev-dependencies]
+ab-core  = { workspace = true }
 tempfile = { workspace = true }
-tokio    = { workspace = true }
+tokio    = { workspace = true, features = ["macros", "rt-multi-thread"] }

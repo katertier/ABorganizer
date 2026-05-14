@@ -228,6 +228,24 @@ pub struct PipelineTunables {
     /// `ab_tag_write::USER_EDIT_SOURCE`) so user corrections
     /// stay sticky across the AI cycle.
     pub tag_write_final_enabled: bool,
+
+    /// Watch-folder exclusion globs applied during scan (B.4,
+    /// tracker #119). Each pattern is a `globset`-compatible
+    /// glob matched against either the file basename
+    /// (`*.tmp`, `.DS_Store`) or any directory component in the
+    /// file's path (`temp`, `sample`). A matching path is
+    /// skipped during scan + watchdog walks before any
+    /// `is_audio_file` test, so download-manager junk
+    /// (partials, system metadata, sample dirs) never
+    /// pollutes `book_files`.
+    ///
+    /// Defaults cover the empirically-common noise:
+    /// `*.tmp`, `*.part`, `*.crdownload`, `.DS_Store`, `Thumbs.db`,
+    /// `temp`, `sample`, `samples`. Operators can extend in
+    /// config.toml; pattern compilation errors at boot are
+    /// surfaced as a startup warning and the offending pattern
+    /// is silently dropped from the active set.
+    pub scan_excludes: Vec<String>,
 }
 
 impl Default for PipelineTunables {
@@ -240,6 +258,16 @@ impl Default for PipelineTunables {
             max_pending_per_stage: 10_000,
             tag_write_early_enabled: false,
             tag_write_final_enabled: false,
+            scan_excludes: vec![
+                "*.tmp".into(),
+                "*.part".into(),
+                "*.crdownload".into(),
+                ".DS_Store".into(),
+                "Thumbs.db".into(),
+                "temp".into(),
+                "sample".into(),
+                "samples".into(),
+            ],
         }
     }
 }
@@ -1002,12 +1030,17 @@ impl Default for CleanupTunables {
 /// ```toml
 /// [security]
 /// admin_token = "abc123..."  # 32+ random bytes hex-encoded
-/// library_roots = ["/Volumes/Audiobooks/Library"]
 /// ```
 ///
-/// Or via env: `AB_SECURITY_ADMIN_TOKEN=...`,
-/// `AB_SECURITY_LIBRARY_ROOTS=/path1:/path2` (figment's array
-/// env handling splits on the platform path separator).
+/// Or via env: `AB_SECURITY_ADMIN_TOKEN=...`.
+///
+/// **B.7 removal note:** the `library_roots` Vec field that
+/// previously seeded the DB-backed `library_roots` table was
+/// dropped in slice B.7 (tracker #119). The one-cycle bridge has
+/// served its purpose — operators manage roots through the
+/// `library_roots` REST surface (POST / GET / DELETE). Any stale
+/// `library_roots = [...]` setting in `config.toml` is now an
+/// `unknown_field` error under `#[serde(deny_unknown_fields)]`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SecurityTunables {
@@ -1017,13 +1050,6 @@ pub struct SecurityTunables {
     /// slice graduates to the per-user tokens table; this is
     /// the v0 hard-stop until that lands.
     pub admin_token: Option<String>,
-
-    /// Allowed library roots for `POST /library/scan`. The
-    /// handler canonicalises the requested path and verifies it
-    /// is at-or-under one of these. Empty list disables
-    /// scan-by-path (the future `POST /library/roots` will be
-    /// the only way to register).
-    pub library_roots: Vec<PathBuf>,
 }
 
 impl Tunables {

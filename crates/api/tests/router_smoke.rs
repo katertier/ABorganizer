@@ -108,6 +108,7 @@ async fn fresh_router() -> (Router, CancellationToken, TempDir) {
         CleanupRegistry::new(vec![]),
         cancel.clone(),
         SecurityTunables::default(),
+        globset::GlobSet::empty(),
     );
     let router = build_router(state);
     (router, cancel, tmp)
@@ -269,6 +270,31 @@ async fn books_restore_protected() {
 #[tokio::test]
 async fn books_audiologo_protected() {
     assert_protected("POST", "/books/1/audiologo").await;
+}
+
+#[tokio::test]
+async fn books_status_protected() {
+    assert_protected("PATCH", "/books/1/status").await;
+}
+
+#[tokio::test]
+async fn books_rating_protected() {
+    assert_protected("PATCH", "/books/1/rating").await;
+}
+
+#[tokio::test]
+async fn books_notes_protected() {
+    assert_protected("PATCH", "/books/1/notes").await;
+}
+
+#[tokio::test]
+async fn books_progress_protected() {
+    assert_protected("GET", "/books/1/progress").await;
+}
+
+#[tokio::test]
+async fn session_sync_protected() {
+    assert_protected("POST", "/session/1/sync").await;
 }
 
 #[tokio::test]

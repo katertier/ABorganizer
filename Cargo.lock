@@ -12,6 +12,7 @@ dependencies = [
  "ab-db",
  "ab-fingerprint",
  "ab-pipeline",
+ "ab-progress",
  "ab-query",
  "ab-scan",
  "ab-speech",
@@ -22,6 +23,7 @@ dependencies = [
  "async-trait",
  "axum",
  "chrono",
+ "globset",
  "serde",
  "serde_json",
  "sqlx",
@@ -196,6 +198,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ab-progress"
+version = "0.1.0"
+dependencies = [
+ "ab-core",
+ "ab-db",
+ "serde",
+ "sqlx",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ab-query"
 version = "0.1.0"
 dependencies = [
@@ -218,6 +234,7 @@ dependencies = [
  "ab-core",
  "ab-db",
  "blake3",
+ "globset",
  "serde",
  "sqlx",
  "tempfile",
@@ -400,6 +417,7 @@ dependencies = [
  "ab-foundation-models",
  "ab-llm-extractors",
  "ab-pipeline",
+ "ab-scan",
  "ab-seed",
  "ab-shelf",
  "ab-tag-read",
@@ -784,6 +802,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
 dependencies = [
  "generic-array",
+]
+
+[[package]]
+name = "bstr"
+version = "1.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63044e1ae8e69f3b5a92c736ca6269b8d12fa7efe39bf34ddb06d102cf0e2cab"
+dependencies = [
+ "memchr",
+ "serde",
 ]
 
 [[package]]
@@ -1337,6 +1365,19 @@ dependencies = [
  "r-efi 6.0.0",
  "wasip2",
  "wasip3",
+]
+
+[[package]]
+name = "globset"
+version = "0.4.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52dfc19153a48bde0cbd630453615c8151bce3a5adfac7a0aebfbf0a1e1f57e3"
+dependencies = [
+ "aho-corasick",
+ "bstr",
+ "log",
+ "regex-automata",
+ "regex-syntax",
 ]
 
 [[package]]

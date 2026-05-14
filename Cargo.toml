@@ -19,6 +19,7 @@ members = [
     "crates/webui-player",
     "crates/seed",
     "crates/scan",
+    "crates/progress",
     "crates/query",
     "crates/tag-read",
     "crates/tag-write",
@@ -27,7 +28,7 @@ members = [
     "bins/aborg-tools",
     "xtask",
 ]
-default-members = ["bins/aborg", "bins/aborg-daemon"]
+default-members = ["bins/aborg", "bins/aborg-daemon", "bins/aborg-tools"]
 
 # ── App branding ─────────────────────────────────────────────────────────
 # Single source of truth for every user-facing name + identifier. Crates
@@ -74,6 +75,10 @@ clap           = { version = "4.6", features = ["derive", "env", "string"] }
 fd-lock        = "4.0"
 figment        = { version = "0.10", features = ["toml", "env"] }
 futures        = "0.3"
+# Multi-glob set matcher for the scan watch-folder exclusion list
+# (B.4, tracker #119). Compiles each pattern once; the `is_match`
+# probe is faster than building a `glob::Pattern` per call.
+globset        = "0.4"
 # Stream adapters over Tokio channels. Used by the
 # foundation-models bridge to expose `complete_stream(...)
 # -> impl Stream` over an mpsc::UnboundedReceiver fed by the
@@ -154,6 +159,7 @@ ab-webui-config = { path = "crates/webui-config" }
 ab-webui-player = { path = "crates/webui-player" }
 ab-seed        = { path = "crates/seed" }
 ab-scan        = { path = "crates/scan" }
+ab-progress    = { path = "crates/progress" }
 ab-query       = { path = "crates/query" }
 ab-tag-read    = { path = "crates/tag-read" }
 ab-tag-write   = { path = "crates/tag-write" }

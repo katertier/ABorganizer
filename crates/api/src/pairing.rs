@@ -583,6 +583,7 @@ mod tests {
             CleanupRegistry::new(Vec::new()),
             cancel,
             SecurityTunables::default(),
+            globset::GlobSet::empty(),
         );
         (state, tmp)
     }

@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n            current_time_ms  AS \"current_time_ms!: i64\",\n            is_finished      AS \"is_finished!: i64\",\n            last_listened_at AS \"last_listened_at: i64\",\n            last_synced_from AS \"last_synced_from: String\",\n            last_synced_at   AS \"last_synced_at: i64\"\n         FROM media_progress WHERE book_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "current_time_ms!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "is_finished!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "last_listened_at: i64",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "last_synced_from: String",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "last_synced_at: i64",
+        "ordinal": 4,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "cf7e90acd286042598ee03e8950a84062455754709593bdf4d6dd1184927871c"
+}

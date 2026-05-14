@@ -391,9 +391,10 @@ async fn load_cached_segments(
     let Some(bytes) = row.content else {
         return Ok(None);
     };
-    let parsed: CachedTranscript = match serde_json::from_slice(&bytes) {
+    let parsed: CachedTranscript = match ab_core::cache::deserialize_cache_content(&bytes) {
         Ok(p) => p,
         Err(e) => {
+            // B.2a: covers JSON parse failures + oversized payloads.
             tracing::warn!(
                 book = %book_id,
                 cache_type,

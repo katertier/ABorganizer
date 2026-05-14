@@ -27,6 +27,7 @@ ab-fingerprint  = { workspace = true }
 # (ADR-0027) alongside every other per-book stage.
 ab-transcode    = { workspace = true }
 ab-pipeline     = { workspace = true }
+ab-progress     = { workspace = true }
 ab-query        = { workspace = true }
 ab-scan         = { workspace = true }
 ab-transcript   = { workspace = true }
@@ -39,6 +40,8 @@ argon2      = { workspace = true }
 async-trait = { workspace = true }
 axum        = { workspace = true }
 chrono      = { workspace = true }
+# B.4: ApiState carries the compiled scan_excludes GlobSet.
+globset     = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 sqlx        = { workspace = true }

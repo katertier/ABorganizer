@@ -64,6 +64,26 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/books/{book_id}/retry", post(books_retry_stage))
         .route("/books/{book_id}/audiologo", post(books_audiologo_cut))
         .route(
+            "/books/{book_id}/status",
+            axum::routing::patch(crate::progress::books_status_patch),
+        )
+        .route(
+            "/books/{book_id}/rating",
+            axum::routing::patch(crate::progress::books_rating_patch),
+        )
+        .route(
+            "/books/{book_id}/notes",
+            axum::routing::patch(crate::progress::books_notes_patch),
+        )
+        .route(
+            "/books/{book_id}/progress",
+            get(crate::progress::books_progress_get),
+        )
+        .route(
+            "/session/{book_id}/sync",
+            post(crate::progress::session_sync),
+        )
+        .route(
             "/audiologos/review",
             get(crate::audiologo_review::audiologos_review_list),
         )
@@ -328,15 +348,12 @@ struct ScanResponse {
 /// rejection (empty root list, nonexistent path, path outside
 /// the allow-list).
 ///
-/// **Source-of-truth migration (backlog item 3)**: this gate
-/// used to walk the `tunables.security.library_roots` Vec at
-/// every request. The roots now live in the `library_roots`
-/// table (DB-backed, managed via `GET/POST/DELETE
-/// /api/v1/library_roots`). The tunable still exists as a
-/// one-cycle bridge — `aborg-daemon::main` seeds the table from
-/// it on first boot when the table is empty. Operators that
-/// have already registered roots via POST no longer need the
-/// tunable.
+/// **Source of truth (post-B.7, tracker #119)**: roots live in
+/// the `library_roots` table (DB-backed, managed via
+/// `GET/POST/DELETE /api/v1/library_roots`). The previous
+/// `tunables.security.library_roots` Vec + one-cycle seed bridge
+/// have been removed; the REST surface is the only registration
+/// path.
 ///
 /// Surfaced as a free function so the `library_scan` handler
 /// stays under the `clippy::too_many_lines` cap.
@@ -387,7 +404,9 @@ async fn library_scan(
     Json(req): Json<ScanRequest>,
 ) -> Result<Json<ScanResponse>, ApiError> {
     let requested = validate_scan_path(&state, &req.path).await?;
-    let report = ab_scan::scan(&requested, &state.inner.library).await?;
+    let report =
+        ab_scan::scan_with_excludes(&requested, &state.inner.library, &state.inner.scan_excludes)
+            .await?;
 
     // Submit each newly-discovered book to the scheduler for
     // downstream pipeline work (tag-read in slice 1B; more stages

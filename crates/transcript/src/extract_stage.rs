@@ -137,9 +137,10 @@ async fn load_head_text(library: &LibraryDb, book_id: BookId) -> Result<Option<S
     let Some(bytes) = row.content else {
         return Ok(None);
     };
-    let parsed: CachedHead = match serde_json::from_slice(&bytes) {
+    let parsed: CachedHead = match ab_core::cache::deserialize_cache_content(&bytes) {
         Ok(p) => p,
         Err(e) => {
+            // B.2a: covers JSON parse failures + oversized payloads.
             tracing::warn!(book = %book_id, error = %e, "extractors.head_parse_failed");
             return Ok(None);
         }

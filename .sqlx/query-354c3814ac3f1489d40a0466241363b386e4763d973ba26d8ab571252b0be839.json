@@ -1,20 +1,20 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT COUNT(*) AS \"n!: i64\" FROM library_roots",
+  "query": "SELECT is_finished FROM media_progress WHERE book_id = ?",
   "describe": {
     "columns": [
       {
-        "name": "n!: i64",
+        "name": "is_finished",
         "ordinal": 0,
         "type_info": "Integer"
       }
     ],
     "parameters": {
-      "Right": 0
+      "Right": 1
     },
     "nullable": [
       false
     ]
   },
-  "hash": "876ada45698b2fd07f4b830f0c7e1795aa0bdcfc0aad6e90b1c9576e5d6be7b2"
+  "hash": "354c3814ac3f1489d40a0466241363b386e4763d973ba26d8ab571252b0be839"
 }
