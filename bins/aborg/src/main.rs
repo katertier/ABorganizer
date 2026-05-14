@@ -315,7 +315,9 @@ enum LibraryAction {
 enum BookAction {
     /// List books.
     List,
-    /// Show details of one book (not yet implemented).
+    /// Show details of one book — core row, files, per-stage
+    /// progress, audiologo status, chapter coverage. Diagnostic
+    /// surface for "why didn't this book extract X?" questions.
     Show { id: i64 },
     /// Force re-extraction of one or more stages for one book.
     ///
@@ -401,7 +403,7 @@ async fn main() -> Result<()> {
         },
         Command::Book { action } => match action {
             BookAction::List => books_list(&cli.daemon, cli.output).await?,
-            BookAction::Show { id } => tracing::info!(id, "book.show: not yet implemented"),
+            BookAction::Show { id } => book_show(&cli.daemon, id, cli.output).await?,
             BookAction::Retry { book_id, stage } => {
                 book_retry(&cli.daemon, book_id, &stage, cli.output).await?;
             } // (Note: BookAction::Retry above carries `stage:
@@ -724,6 +726,157 @@ async fn book_retry(
                 submitted_at = %body.submitted_at,
                 "retry summary"
             );
+        }
+    }
+    Ok(())
+}
+
+// ── `aborg book show <id>` ────────────────────────────────────────
+
+#[derive(Deserialize, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct BookFileDetail {
+    file_id: i64,
+    file_path: String,
+    duration_ms: Option<i64>,
+    file_size: Option<i64>,
+    is_active: bool,
+}
+
+#[derive(Deserialize, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct StageProgressRow {
+    stage: String,
+    status: String,
+    started_at: Option<i64>,
+    completed_at: Option<i64>,
+    failure_reason: Option<String>,
+}
+
+#[derive(Deserialize, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct ChapterSourceCount {
+    source: String,
+    count: i64,
+}
+
+#[derive(Deserialize, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "JSON response struct mirroring the API contract — each bool is an independent presence flag for a specific AI-derived field; a state machine doesn't fit the open-set semantics."
+)]
+struct BookDetailResponse {
+    book_id: i64,
+    title: String,
+    subtitle: Option<String>,
+    description: Option<String>,
+    language: Option<String>,
+    duration_ms: Option<i64>,
+    asin: Option<String>,
+    isbn: Option<String>,
+    release_date: Option<String>,
+    abridged: Option<bool>,
+    explicit: Option<bool>,
+    audiologo_status: String,
+    author: Option<String>,
+    narrators: Option<String>,
+    publisher: Option<String>,
+    series: Option<String>,
+    has_summary: bool,
+    has_story_arc: bool,
+    has_setting: bool,
+    has_characters: bool,
+    files: Vec<BookFileDetail>,
+    stages: Vec<StageProgressRow>,
+    chapters: Vec<ChapterSourceCount>,
+}
+
+/// `aborg book show <id> [--output human|json]` — thin shim over
+/// `GET /api/v1/books/{book_id}`. Diagnostic surface; mirrors the
+/// shape of the JSON response when `--output json`.
+async fn book_show(daemon: &str, id: i64, output: OutputFormat) -> Result<()> {
+    let url = format!("{daemon}/api/v1/books/{id}");
+    let resp = client()
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("book show failed: HTTP {status}: {body}");
+    }
+    let body: BookDetailResponse = resp.json().await.context("parse book detail")?;
+
+    match output {
+        OutputFormat::Json => {
+            tracing::info!(
+                "{}",
+                serde_json::to_string_pretty(&body).unwrap_or_default()
+            );
+        }
+        OutputFormat::Human => {
+            let author = body.author.as_deref().unwrap_or("");
+            let narrators = body.narrators.as_deref().unwrap_or("");
+            let publisher = body.publisher.as_deref().unwrap_or("");
+            let series = body.series.as_deref().unwrap_or("");
+            let language = body.language.as_deref().unwrap_or("");
+            let asin = body.asin.as_deref().unwrap_or("");
+            let isbn = body.isbn.as_deref().unwrap_or("");
+            let release = body.release_date.as_deref().unwrap_or("");
+            let subtitle = body.subtitle.as_deref().unwrap_or("");
+            let duration_min = body.duration_ms.map_or(0, |ms| ms / 60_000);
+            tracing::info!(
+                book_id = body.book_id,
+                title = %body.title,
+                subtitle = %subtitle,
+                author = %author,
+                narrators = %narrators,
+                publisher = %publisher,
+                series = %series,
+                language = %language,
+                asin = %asin,
+                isbn = %isbn,
+                release_date = %release,
+                duration_min,
+                abridged = body.abridged.unwrap_or(false),
+                explicit = body.explicit.unwrap_or(false),
+                audiologo_status = %body.audiologo_status,
+                has_summary = body.has_summary,
+                has_story_arc = body.has_story_arc,
+                has_setting = body.has_setting,
+                has_characters = body.has_characters,
+                "book.detail"
+            );
+            for f in &body.files {
+                tracing::info!(
+                    file_id = f.file_id,
+                    path = %f.file_path,
+                    duration_ms = f.duration_ms.unwrap_or(0),
+                    file_size = f.file_size.unwrap_or(0),
+                    is_active = f.is_active,
+                    "book.file"
+                );
+            }
+            for s in &body.stages {
+                let reason = s.failure_reason.as_deref().unwrap_or("");
+                tracing::info!(
+                    stage = %s.stage,
+                    status = %s.status,
+                    started_at = s.started_at.unwrap_or(0),
+                    completed_at = s.completed_at.unwrap_or(0),
+                    failure_reason = %reason,
+                    "book.stage"
+                );
+            }
+            for c in &body.chapters {
+                tracing::info!(
+                    source = %c.source,
+                    count = c.count,
+                    "book.chapters"
+                );
+            }
         }
     }
     Ok(())

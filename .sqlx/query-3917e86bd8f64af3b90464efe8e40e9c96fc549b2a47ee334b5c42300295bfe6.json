@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n              file_id      AS \"file_id!: i64\",\n              file_path,\n              duration_ms,\n              file_size,\n              is_active    AS \"is_active!: i64\"\n            FROM book_files\n            WHERE book_id = ?\n            ORDER BY file_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "file_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "file_path",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "duration_ms",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "file_size",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "is_active!: i64",
+        "ordinal": 4,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "3917e86bd8f64af3b90464efe8e40e9c96fc549b2a47ee334b5c42300295bfe6"
+}

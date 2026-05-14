@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT stage, status, started_at, completed_at, failure_reason\n            FROM pipeline_progress\n            WHERE book_id = ?\n            ORDER BY stage",
+  "describe": {
+    "columns": [
+      {
+        "name": "stage",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "status",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "started_at",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "completed_at",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "failure_reason",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "9ac43e7a83dd2859f1c85ff7bfa7f826153e18940f85806b837d99dd185ce45a"
+}
