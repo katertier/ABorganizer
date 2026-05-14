@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT token_id   AS \"token_id!: i64\",\n                  user_id    AS \"user_id!: i64\",\n                  scopes     AS \"scopes!: String\",\n                  expires_at AS \"expires_at?: i64\",\n                  revoked_at AS \"revoked_at?: i64\"\n             FROM tokens\n            WHERE token_hash = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "token_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "user_id!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "scopes!: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "expires_at?: i64",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "revoked_at?: i64",
+        "ordinal": 4,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "a0ee7b2ee93b80d2d5f441b128ac7f54a3eaab0f486d13824c0bf6f608848fd3"
+}

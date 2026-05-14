@@ -1,45 +1,57 @@
 //! Bearer-token authentication middleware.
 //!
-//! Slice-zero of the security story (REVIEW.md § 3.2 +
-//! MYREVIEW.md § 3.1). Until the per-user token table + pairing
-//! flow ship, the daemon supports a single `admin_token`
-//! configured via `tunables.security.admin_token`. Every API
-//! request except the explicit allow-list must carry
-//! `Authorization: Bearer <token>` matching that value.
+//! Backlog item 4a wires this up to the `tokens` table (blake3-
+//! hashed, per-user, revocable via `DELETE /api/v1/tokens/{id}`).
+//! Every request except the public allow-list must carry
+//! `Authorization: Bearer <token>` matching an active row.
+//!
+//! ## Resolution order
+//!
+//! 1. Hash the presented bearer with [`ab_core::auth::hash_api_token`]
+//!    and look it up via [`crate::tokens::lookup_by_raw_token`].
+//!    On hit, the request is authenticated and an
+//!    [`crate::tokens::AuthenticatedToken`] is stashed in the
+//!    request extensions (downstream handlers can read
+//!    `user_id` / `scopes` without re-hashing).
+//! 2. **Compat fallback**: if step 1 didn't match AND the
+//!    `tokens` table has no rows yet AND
+//!    `tunables.security.admin_token` is set AND the presented
+//!    bearer matches it constant-time → accept. This is the
+//!    one-cycle bridge that lets operators bootstrap their
+//!    first per-user token without needing to construct the
+//!    initial row via raw SQL.
+//!
+//! Once `tokens` has at least one row, the compat fallback
+//! stops engaging — the operator has rotated.
 //!
 //! ## Allow-list
 //!
-//! Two paths are intentionally unauthenticated, per `API.md`
-//! and the `ARCHITECTURE.md` § Health-checks note:
+//! Two paths bypass auth, per `API.md` and `ARCHITECTURE.md`
+//! § Health-checks:
 //!
 //! - `GET /health` — liveness probe (uptime / version readout).
-//! - `GET /version` — version sniff (used by the CLI to detect
+//! - `GET /version` — version sniff (CLI uses this to detect
 //!   protocol drift before pairing).
 //!
 //! Both are read-only and reveal only generic version metadata.
-//! When the bind address is non-loopback, operators can layer
-//! a reverse-proxy rate limit on these two endpoints; the
-//! daemon itself doesn't (the rest of the surface is
-//! authenticated, so a `DoS` via auth'd endpoints needs the
-//! token anyway).
 //!
 //! ## Default-deny on missing config
 //!
-//! If `tunables.security.admin_token` is `None`, the middleware
-//! rejects every request to a protected path with 401. The
-//! daemon's startup logs a `warn` line when this happens so
-//! operators see the gap. The previous behaviour (no auth
-//! middleware at all) made every endpoint open; the new default
-//! is to fail closed.
+//! When the tokens table is empty AND `admin_token` is unset,
+//! every protected request returns 401. The daemon's startup
+//! logs a `warn` line when both are missing so operators see
+//! the gap. The previous behaviour (no auth middleware at all)
+//! made every endpoint open; the new default fails closed.
 //!
 //! ## Constant-time comparison
 //!
-//! Token comparison uses a byte-by-byte XOR-then-OR fold so
-//! the timing of a wrong token doesn't leak the matching
-//! prefix length. A length-mismatch fast-path before the loop
-//! still leaks length, but that's a single bit per probe and
-//! the admin token is fixed-length per operator config — the
-//! attack budget is one prefix-length probe per token rotation.
+//! - Step 1 (token-table path): blake3 of the presented bearer
+//!   is constant-time-compared inside `verify_api_token`. Length
+//!   leak isn't a concern — the hash is always 64 hex chars.
+//! - Step 2 (compat fallback): byte-by-byte XOR-then-OR fold so
+//!   the timing of a wrong `admin_token` doesn't leak the matching
+//!   prefix length. Length-mismatch fast-path leaks length only,
+//!   and the `admin_token` is fixed-length per operator config.
 
 use axum::body::Body;
 use axum::extract::State;
@@ -89,28 +101,18 @@ fn extract_bearer(headers: &axum::http::HeaderMap) -> Option<&str> {
 /// Auth middleware applied to every protected route.
 ///
 /// Wired via `axum::middleware::from_fn_with_state(state.clone(),
-/// require_admin_token)` in `build_router`. The state extractor
-/// gives us access to the configured token without leaking it
-/// into request extensions.
-pub async fn require_admin_token(
+/// require_token)` in `build_router`. See module docs for the
+/// two-step resolution order (tokens table → `admin_token` compat
+/// fallback when tokens is empty).
+pub async fn require_token(
     State(state): State<ApiState>,
-    request: Request<Body>,
+    mut request: Request<Body>,
     next: Next,
 ) -> Response {
     let path = request.uri().path();
     if is_public(path) {
         return next.run(request).await;
     }
-
-    let Some(expected) = state.inner.security.admin_token.as_deref() else {
-        // Default-deny: no token configured ⇒ no requests.
-        tracing::warn!(
-            path = %path,
-            method = %request.method(),
-            "api.auth.reject_no_token_configured"
-        );
-        return unauthorized_response();
-    };
 
     let Some(presented) = extract_bearer(request.headers()) else {
         tracing::info!(
@@ -121,16 +123,71 @@ pub async fn require_admin_token(
         return unauthorized_response();
     };
 
-    if !constant_time_eq(presented.as_bytes(), expected.as_bytes()) {
-        tracing::info!(
-            path = %path,
-            method = %request.method(),
-            "api.auth.reject_bad_token"
-        );
-        return unauthorized_response();
+    // Step 1: token-table lookup. The lookup hashes the bearer
+    // with blake3 and filters revoked / expired in SQL.
+    match crate::tokens::lookup_by_raw_token(&state, presented).await {
+        Ok(Some(auth)) => {
+            // Stash for downstream handlers (scope-checked
+            // middleware lands with the player surface).
+            request.extensions_mut().insert(auth);
+            return next.run(request).await;
+        }
+        Ok(None) => {
+            // Fall through to compat fallback below.
+        }
+        Err(e) => {
+            tracing::error!(
+                path = %path,
+                error = %e,
+                "api.auth.lookup_failed"
+            );
+            return unauthorized_response();
+        }
     }
 
-    next.run(request).await
+    // Step 2: compat fallback. Only fires when (a) `admin_token` is
+    // set in tunables AND (b) the tokens table is empty (i.e.
+    // operator hasn't rotated yet). Once they POST /tokens once,
+    // this branch stops engaging.
+    if let Some(expected) = state.inner.security.admin_token.as_deref()
+        && tokens_table_is_empty(&state).await
+        && constant_time_eq(presented.as_bytes(), expected.as_bytes())
+    {
+        tracing::debug!(
+            path = %path,
+            method = %request.method(),
+            "api.auth.admin_token_compat_accepted"
+        );
+        return next.run(request).await;
+    }
+
+    tracing::info!(
+        path = %path,
+        method = %request.method(),
+        "api.auth.reject_bad_token"
+    );
+    unauthorized_response()
+}
+
+/// True iff `tokens` has no rows. Read fresh per request; the
+/// extra SELECT only fires on the compat-fallback branch (every
+/// rejected token-table lookup). Counts are cheap on an empty /
+/// near-empty table.
+async fn tokens_table_is_empty(state: &ApiState) -> bool {
+    let r: Result<i64, _> = sqlx::query_scalar("SELECT COUNT(*) FROM tokens")
+        .fetch_one(state.inner.library.pool())
+        .await;
+    match r {
+        Ok(0) => true,
+        Ok(_) => false,
+        Err(e) => {
+            tracing::warn!(error = %e, "api.auth.tokens_count_failed");
+            // Fail closed: if we can't count, don't engage the
+            // fallback (forces a real token-table lookup, which
+            // already failed).
+            false
+        }
+    }
 }
 
 fn unauthorized_response() -> Response {
