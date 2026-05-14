@@ -48,6 +48,7 @@
 
 #![allow(missing_docs)] // scaffold-stage
 
+pub(crate) mod abridged;
 pub mod cleanup;
 pub mod cover;
 pub mod stage;

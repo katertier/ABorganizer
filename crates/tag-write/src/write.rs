@@ -31,16 +31,17 @@
 //! |                  | on ID3 / `rtng` atom on MP4. Truthy → `"4"`,    |
 //! |                  | falsy → `"0"` (iTunes advisory integer scheme)  |
 //!
-//! The remaining 2 fields are deliberately unmapped:
+//! `Field::Abridged` lands via a format-specific dispatch in
+//! [`crate::abridged`] — no `ItemKey` exists for it, so it drops
+//! below the abstract `Tag` API to typed `Id3v2Tag` (TXXX:ABRIDGED)
+//! and `Ilst` freeform-atom (`----:com.apple.iTunes:ABRIDGED`)
+//! writers. The cost is a second file open for books with
+//! abridged winners; books without one skip the typed path
+//! entirely.
+//!
+//! The remaining unmapped field is:
 //!
 //! - `DurationSeconds` — derived from decode, not a tag frame.
-//! - `Abridged` — no canonical `ItemKey`. Custom-frame
-//!   handling (`TXXX:ABRIDGED` on ID3, `----:com.apple.iTunes:ABRIDGED`
-//!   on MP4) requires dropping below the abstract `Tag` API
-//!   to the format-specific `Id3v2Tag` / `Ilst` types.
-//!   Deferred to a hygiene slice — the field is rarely
-//!   populated in the wild + the complexity outsizes the
-//!   user-facing benefit for an MVP.
 //!
 //! ## Idempotence
 //!
@@ -87,12 +88,15 @@ pub struct WriteReport {
     /// How many winners matched what's already on disk (the
     /// dedup guard hit).
     pub fields_already_matched: usize,
-    /// How many winners had a `Field` that the slice's mapping
-    /// doesn't cover yet (`DurationSeconds`, `Abridged`) OR for
-    /// which the side-channel input wasn't available (e.g.
-    /// `CoverUrl` with `cover_bytes == None`, or `Explicit` with
-    /// an unclassifiable value). Logged so operators can track
-    /// "how much of the data is reaching the file" coverage.
+    /// How many winners had a `Field` that the writer can't
+    /// cover (today: `DurationSeconds`) OR for which the side-
+    /// channel input wasn't available (e.g. `CoverUrl` with
+    /// `cover_bytes == None`, or `Explicit` with an
+    /// unclassifiable value) OR for which the file format
+    /// doesn't support the custom tag (e.g. `Abridged` on a
+    /// `FLAC` file — only `ID3v2` and `MP4` map cleanly). Logged so
+    /// operators can track "how much of the data is reaching
+    /// the file" coverage.
     pub fields_unmapped: usize,
 }
 
@@ -129,6 +133,39 @@ pub fn write_winners(
     winners: &[FieldWinner],
     cover_bytes: Option<&[u8]>,
 ) -> Result<WriteReport> {
+    let mut report = WriteReport::default();
+
+    // ── Phase 1: format-specific custom-tag dispatch ────────
+    //
+    // `Field::Abridged` can't be expressed through lofty's
+    // abstract `Tag` API — it needs `Id3v2Tag::insert_user_text`
+    // (TXXX:ABRIDGED) or `Ilst` with `AtomIdent::Freeform`
+    // (`----:com.apple.iTunes:ABRIDGED`). The typed accessors
+    // only exist on format-specific file types ([`MpegFile`] /
+    // [`Mp4File`]), so this is a separate open via
+    // `crate::abridged::write_abridged`.
+    //
+    // Done BEFORE the generic phase so the subsequent
+    // `lofty::read_from_path` (Phase 2) picks up the new tag
+    // and preserves it through the generic save — keeping the
+    // write atomic from the report's perspective even though
+    // two opens happened.
+    apply_abridged_winners(path, winners, &mut report)?;
+
+    // ── Phase 2: generic abstract-Tag winners ───────────────
+    //
+    // Everything else (Title, Author, Series, Language, Genre,
+    // Publisher, Asin, Isbn, Subtitle, Description, ReleaseDate,
+    // Narrator, CoverUrl, Explicit) goes through `apply_winner`
+    // on the abstract `Tag`. Lofty translates `ItemKey` lookups
+    // to the right format-specific frame under the hood.
+    let any_non_abridged = winners.iter().any(|w| w.field != Field::Abridged);
+    if !any_non_abridged {
+        // Only Abridged in the winner set — Phase 1 already
+        // saved if needed; skip the generic open entirely.
+        return Ok(report);
+    }
+
     let mut tagged = lofty::read_from_path(path).map_err(|e| {
         Error::Io(std::io::Error::other(format!(
             "lofty open {}: {e}",
@@ -150,8 +187,12 @@ pub fn write_winners(
         "lofty primary_tag_mut returned None after insert_tag",
     ))?;
 
-    let mut report = WriteReport::default();
-    for winner in winners {
+    // Track how many Phase 1 changes already landed so we can
+    // detect whether Phase 2 added any NEW changes — that's
+    // what gates the generic save.
+    let phase1_changes = report.changes.len();
+
+    for winner in winners.iter().filter(|w| w.field != Field::Abridged) {
         match apply_winner(tag, winner, cover_bytes) {
             FieldWriteOutcome::Changed { before } => {
                 // For text-valued fields, `after` is the
@@ -173,7 +214,11 @@ pub fn write_winners(
         }
     }
 
-    if report.changes.is_empty() {
+    // Skip the generic save if Phase 2 added no changes (a Phase
+    // 1 abridged save may have happened — that's already on
+    // disk).
+    let phase2_added = report.changes.len() > phase1_changes;
+    if !phase2_added {
         return Ok(report);
     }
 
@@ -189,6 +234,43 @@ pub fn write_winners(
     Ok(report)
 }
 
+/// Apply every `Field::Abridged` winner in `winners`, updating
+/// `report`. Iterates because in principle the winners list
+/// could carry multiple Abridged rows (e.g. multi-source
+/// consensus); in practice it's at most one. The function still
+/// handles N>1 gracefully — last writer wins, every prior write
+/// counts as `Changed` against the previous on-disk state.
+fn apply_abridged_winners(
+    path: &Path,
+    winners: &[FieldWinner],
+    report: &mut WriteReport,
+) -> Result<()> {
+    for winner in winners.iter().filter(|w| w.field == Field::Abridged) {
+        let Some(value) = winner.value.as_deref() else {
+            // Same convention as `apply_winner` — `None` value
+            // is not "delete the tag" but "no mapping today".
+            report.fields_unmapped += 1;
+            continue;
+        };
+        if value.is_empty() {
+            report.fields_unmapped += 1;
+            continue;
+        }
+        match crate::abridged::write_abridged(path, value)? {
+            FieldWriteOutcome::Changed { before } => {
+                report.changes.push(FieldChange {
+                    field: Field::Abridged,
+                    before,
+                    after: value.to_owned(),
+                });
+            }
+            FieldWriteOutcome::Matched => report.fields_already_matched += 1,
+            FieldWriteOutcome::Unmapped => report.fields_unmapped += 1,
+        }
+    }
+    Ok(())
+}
+
 /// Per-field outcome — used by [`write_winners`] to bucket
 /// each winner. Private; the public surface is the aggregate
 /// [`WriteReport`].
@@ -197,7 +279,7 @@ pub fn write_winners(
 /// audit-log writer can record `(before, after)` without a
 /// second pass over the file.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum FieldWriteOutcome {
+pub(crate) enum FieldWriteOutcome {
     /// On-disk value was missing or differed; we wrote the
     /// winner. `before` is the pre-mutation value (or `None`
     /// if the tag was previously absent).
@@ -312,22 +394,33 @@ fn apply_winner(
         // string into that integer below.
         Field::Explicit => apply_explicit(tag, new_value),
 
-        // Remaining unmapped fields:
+        // Two distinct reasons for `Unmapped`:
         //
-        // - `DurationSeconds` — typically derived from the
-        //   audio decode, not a separate tag frame. The
+        // - `Field::Abridged`: handled by `apply_abridged_winners`
+        //   (Phase 1) before this loop runs — it requires
+        //   format-specific tag dispatch via `crate::abridged`.
+        //   Returning `Unmapped` here would double-count it;
+        //   the abstract loop filters it out at the call site,
+        //   so this branch is a defensive fall-through.
+        // - `Field::DurationSeconds`: typically derived from
+        //   the audio decode, not a separate tag frame. The
         //   `book_field_provenance.duration_seconds` row
         //   carries the consensus winner but a future
         //   "duration-as-tag" surface needs design work.
-        // - `Abridged` — no canonical `ItemKey`. Custom-frame
-        //   handling (`TXXX:ABRIDGED` on ID3, `----:com.apple.iTunes:ABRIDGED`
-        //   on MP4) requires dropping below the abstract `Tag`
-        //   API to the format-specific `Id3v2Tag` / `Ilst`
-        //   types. Deferred to a separate hygiene slice — the
-        //   field is rarely populated in the wild + the
-        //   complexity cost outsizes the user-facing benefit
-        //   for an MVP.
-        Field::DurationSeconds | Field::Abridged => FieldWriteOutcome::Unmapped,
+        //
+        // `match_same_arms` would collapse these but the two
+        // reasons are semantically distinct — keeping them
+        // apart aids the reader.
+        #[allow(
+            clippy::match_same_arms,
+            reason = "distinct semantic reasons for Unmapped"
+        )]
+        Field::Abridged => FieldWriteOutcome::Unmapped,
+        #[allow(
+            clippy::match_same_arms,
+            reason = "distinct semantic reasons for Unmapped"
+        )]
+        Field::DurationSeconds => FieldWriteOutcome::Unmapped,
     }
 }
 
@@ -475,9 +568,13 @@ mod tests {
 
     #[test]
     fn still_unmapped_fields_return_unmapped_outcome() {
-        // Two variants remain unmapped after slice C3b:
-        // - DurationSeconds: no tag frame
-        // - Abridged: needs lower-level custom-frame dispatch
+        // After slice #98 (abridged custom-tag dispatch), only
+        // `DurationSeconds` returns `Unmapped` from `apply_winner`.
+        // `Abridged` also returns `Unmapped` from this helper
+        // because the abstract-Tag path can't write it — but the
+        // public `write_winners` entry point routes it through
+        // `apply_abridged_winners` (Phase 1) before reaching this
+        // loop. See `apply_winner` doc comment for the contract.
         //
         // CoverUrl + Explicit have their own dedicated tests
         // below.
