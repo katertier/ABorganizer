@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE book_field_provenance\n              SET is_winner = 0\n            WHERE book_id = ? AND field = ? AND is_winner = 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "d0ccabbd5e5f7a3f58dff064642edd1bfcf6d41853a22efda9cc69038de6f69c"
+}
