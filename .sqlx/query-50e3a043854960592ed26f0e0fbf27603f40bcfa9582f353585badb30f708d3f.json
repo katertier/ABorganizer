@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE book_file_refs SET released_at = strftime('%s','now') WHERE holder_stage = ? AND holder_book_id = ? AND released_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "50e3a043854960592ed26f0e0fbf27603f40bcfa9582f353585badb30f708d3f"
+}

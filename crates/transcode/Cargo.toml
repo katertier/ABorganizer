@@ -12,6 +12,7 @@ description  = "Background-priority transcode-to-m4b stage with book_file_refs l
 workspace = true
 
 [dependencies]
+ab-audio      = { workspace = true }
 ab-core       = { workspace = true }
 ab-db         = { workspace = true }
 ab-pipeline   = { workspace = true }
@@ -22,5 +23,9 @@ tracing       = { workspace = true }
 
 [dev-dependencies]
 ab-core       = { workspace = true }
+# `afconvert` shell-out for the integration test seeds a real
+# m4a from a system-shipped .aiff so we can drive the stage end-
+# to-end without a committed audio fixture.
 tempfile      = { workspace = true }
+tokio         = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tokio-util    = { workspace = true }

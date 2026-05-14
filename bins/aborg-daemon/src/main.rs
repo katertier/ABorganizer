@@ -198,6 +198,15 @@ fn build_pipeline_stages(tunables: &Tunables) -> Vec<Arc<dyn Stage>> {
         )),
     ];
 
+    // `transcode-m4b` (ADR-0027) — Background-priority re-encode
+    // of every active non-m4b source for a book into the
+    // canonical m4b container. Runs in parallel with every other
+    // stage; `book_file_refs` keeps sources alive while AI
+    // consumers read them. The matching `PostTranscodeSourcesTarget`
+    // cleanup target (registered in `build_cleanup_registry`)
+    // reaps the source rows once refs settle.
+    stages.push(Arc::new(ab_transcode::TranscodeM4bStage::new()));
+
     // `tag-write-early` (ADR-0028, Phase A2) — opt-in via
     // `tunables.pipeline.tag_write_early_enabled`. Default
     // `false` because flipping it on re-tags every book whose
@@ -464,6 +473,12 @@ fn build_cleanup_registry(tunables: &Tunables) -> CleanupRegistry {
         Arc::new(ab_tag_write::MassEditHistoryRetentionTarget::from_tunables(
             &tunables.cleanup,
         )),
+        // Audio: source-file reaper for books that completed
+        // their m4b transcode (ADR-0027). Gated on
+        // `live_ref_count == 0` AND an active m4b row existing
+        // for the book. Permanent no-op for books with no
+        // transcode output.
+        Arc::new(ab_transcode::PostTranscodeSourcesTarget::new()),
     ];
     CleanupRegistry::new(targets)
 }

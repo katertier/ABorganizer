@@ -15,6 +15,7 @@ dependencies = [
  "ab-scan",
  "ab-speech",
  "ab-tag-read",
+ "ab-transcode",
  "ab-transcript",
  "argon2",
  "async-trait",
@@ -292,6 +293,7 @@ dependencies = [
 name = "ab-transcode"
 version = "0.1.0"
 dependencies = [
+ "ab-audio",
  "ab-core",
  "ab-db",
  "ab-pipeline",
@@ -379,6 +381,7 @@ dependencies = [
  "ab-shelf",
  "ab-tag-read",
  "ab-tag-write",
+ "ab-transcode",
  "ab-transcript",
  "ab-webui-config",
  "ab-webui-player",
