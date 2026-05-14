@@ -217,9 +217,17 @@ async fn sweep_eligible(
     if max_submissions == 0 {
         return Ok(0);
     }
+    // `deleted_at IS NULL` filters out soft-deleted books — they
+    // shouldn't have NEW pipeline work scheduled. Their
+    // `pipeline_progress` rows survive (the reaper deliberately
+    // preserves them) so a future restore endpoint can resume
+    // where the pipeline left off. An in-flight stage on a
+    // just-soft-deleted book completes its work — only new
+    // scheduling is gated here.
     let book_ids: Vec<i64> = sqlx::query_scalar!(
         r#"SELECT b.book_id AS "book_id!: i64" FROM books b
-           WHERE EXISTS (SELECT 1 FROM book_files f WHERE f.book_id = b.book_id)"#,
+           WHERE b.deleted_at IS NULL
+             AND EXISTS (SELECT 1 FROM book_files f WHERE f.book_id = b.book_id)"#,
     )
     .fetch_all(library.pool())
     .await

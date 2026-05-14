@@ -1109,15 +1109,19 @@ async fn book_patch(
     Ok(())
 }
 
-// ── `aborg book delete <id> --commit --force` ────────────────────
+// ── `aborg book delete <id> --commit [--force]` ──────────────────
 
-/// `aborg book delete <book_id> --commit --force` — hard delete
-/// over `DELETE /api/v1/books/{book_id}?force=true`.
+/// `aborg book delete <book_id> --commit [--force]` — soft- or
+/// hard-delete a book over `DELETE /api/v1/books/{book_id}`.
 ///
-/// Per ADR-0029 § "second tier", BOTH `--commit` AND `--force`
-/// are required client-side. Refusing here avoids a round-trip
-/// and matches the dry-run-default safety net the rest of
-/// `aborg` follows.
+/// Per ADR-0029:
+/// - `--commit` (alone) → **soft-delete** (reversible; row stays
+///   in the DB with `deleted_at` set; future restore endpoint
+///   can flip it back).
+/// - `--commit --force` → **hard-delete** (irreversible CASCADE).
+///
+/// `--force` alone is refused — mutation always requires
+/// `--commit` (the dry-run-default safety net).
 async fn book_delete(
     daemon: &str,
     book_id: i64,
@@ -1126,15 +1130,19 @@ async fn book_delete(
     output: OutputFormat,
 ) -> Result<()> {
     if !commit {
-        anyhow::bail!("refusing to delete without --commit (per ADR-0029 dry-run-default)");
-    }
-    if !force {
         anyhow::bail!(
-            "refusing to delete without --force (per ADR-0029 second-tier irreversible-ops rule). \
-             `aborg book delete <id> --commit --force` is the full incantation."
+            "refusing to delete without --commit (per ADR-0029 dry-run-default). \
+             `--commit` alone soft-deletes; add `--force` for an irreversible \
+             hard delete."
         );
     }
-    let url = format!("{daemon}/api/v1/books/{book_id}?force=true");
+    // `?force=true` only when the CLI was given `--force` too.
+    // Soft-delete is the default at both layers.
+    let url = if force {
+        format!("{daemon}/api/v1/books/{book_id}?force=true")
+    } else {
+        format!("{daemon}/api/v1/books/{book_id}")
+    };
     let resp = client()
         .delete(&url)
         .send()
@@ -1145,6 +1153,7 @@ async fn book_delete(
         let body = resp.text().await.unwrap_or_default();
         anyhow::bail!("book delete failed: HTTP {status}: {body}");
     }
+    let mode = if force { "hard" } else { "soft" };
     match output {
         OutputFormat::Json => {
             // 204 NoContent — emit a structured success body so
@@ -1154,12 +1163,13 @@ async fn book_delete(
                 serde_json::to_string_pretty(&serde_json::json!({
                     "book_id": book_id,
                     "deleted": true,
+                    "mode": mode,
                 }))
                 .unwrap_or_default()
             );
         }
         OutputFormat::Human => {
-            tracing::info!(book_id, "book.deleted");
+            tracing::info!(book_id, mode, "book.deleted");
         }
     }
     Ok(())

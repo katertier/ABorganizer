@@ -1,0 +1,37 @@
+-- Migration 024 — soft-delete column on books.
+--
+-- API.md has always documented `DELETE /books/{id}` as soft-delete
+-- by default (with `?force=true` for hard delete). Slice #93
+-- shipped the hard-delete half but required `?force=true` since
+-- the schema didn't yet support soft-delete. This migration adds
+-- the column; the same slice that lands the migration also flips
+-- the default behavior.
+--
+-- ## Semantics
+--
+-- - `deleted_at IS NULL` (the default) → book is active.
+-- - `deleted_at = <unix-secs>` → book is soft-deleted at that
+--   timestamp. Hidden from `GET /books` and `GET /books/{id}` by
+--   default; not picked up by the pipeline dispatcher; remains
+--   in the database (FKs intact) so a future `restore` endpoint
+--   can un-mark it.
+--
+-- ## What stays unchanged
+--
+-- The 58-ish other SELECT-from-books queries across the workspace
+-- (catalog / llm-extractors / transcript / audiologo / scan)
+-- are mostly PK-driven (called with a specific `book_id`). Those
+-- paths still work on a soft-deleted book; the soft-delete only
+-- gates SCHEDULING of new pipeline work via the dispatcher. An
+-- in-flight stage on a just-soft-deleted book completes its
+-- work — that's the right behavior (don't leave broken state).
+--
+-- ## Why no separate index
+--
+-- The dispatcher's queries already filter via the book's
+-- per-stage `pipeline_progress` join; adding a partial index on
+-- `deleted_at IS NULL` would shave µs at the cost of a second
+-- B-tree to maintain on every UPDATE. Defer until production
+-- data shows the table-scan is a real cost.
+
+ALTER TABLE books ADD COLUMN deleted_at INTEGER;
