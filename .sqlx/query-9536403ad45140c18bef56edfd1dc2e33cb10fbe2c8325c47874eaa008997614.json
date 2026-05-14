@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE pairing_codes SET consumed_token_id = ? WHERE code_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "9536403ad45140c18bef56edfd1dc2e33cb10fbe2c8325c47874eaa008997614"
+}

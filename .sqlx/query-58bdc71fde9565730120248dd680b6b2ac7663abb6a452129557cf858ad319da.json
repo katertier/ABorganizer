@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO pairing_codes\n             (code_hash, device_label, scopes_json, issued_at, expires_at)\n             VALUES (?, ?, ?, ?, ?)\n             RETURNING code_id AS \"code_id!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "code_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "58bdc71fde9565730120248dd680b6b2ac7663abb6a452129557cf858ad319da"
+}

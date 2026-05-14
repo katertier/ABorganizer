@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO tokens\n             (user_id, token_hash, nickname, scopes, issued_at, expires_at)\n             VALUES (1, ?, ?, ?, ?, ?)\n             RETURNING token_id AS \"token_id!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "token_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "10f183935a69c9bad1ec3852434935ab4fc545730be5ee89cd398da1eba74e4e"
+}

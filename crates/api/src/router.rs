@@ -35,6 +35,17 @@ pub fn build_router(state: ApiState) -> Router {
         )
         .route("/tokens/{token_id}", delete(crate::tokens::tokens_revoke))
         .route(
+            "/pairing/codes",
+            get(crate::pairing::pairing_codes_list).post(crate::pairing::pairing_codes_create),
+        )
+        .route(
+            "/pairing/codes/{code_id}",
+            delete(crate::pairing::pairing_codes_revoke),
+        )
+        // Public — by design. See crate::auth::PUBLIC_PATHS + the
+        // crate::pairing module docs for the brute-force analysis.
+        .route("/pairing/consume", post(crate::pairing::pairing_consume))
+        .route(
             "/library/pending_speech_installs",
             get(library_pending_speech_installs),
         )

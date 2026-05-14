@@ -16,6 +16,7 @@ dependencies = [
  "ab-speech",
  "ab-tag-read",
  "ab-transcript",
+ "argon2",
  "async-trait",
  "axum",
  "chrono",
