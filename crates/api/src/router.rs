@@ -56,7 +56,7 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/doctor/speech", get(doctor_speech))
         .route("/doctor/speech/install", post(doctor_speech_install))
         .route("/books", get(books_list))
-        .route("/books/{book_id}", get(books_get))
+        .route("/books/{book_id}", get(books_get).patch(books_patch))
         .route("/books/{book_id}/retry", post(books_retry_stage))
         .route("/books/{book_id}/audiologo", post(books_audiologo_cut))
         .route(
@@ -1118,6 +1118,258 @@ async fn books_get(
             })
             .collect(),
     }))
+}
+
+// ── PATCH /books/{book_id} ───────────────────────────────────────
+
+/// Body of `PATCH /api/v1/books/{book_id}`.
+///
+/// Every field is `Option<T>` — `None` (or absent) means "leave
+/// untouched"; `Some(value)` means "update this field to value".
+///
+/// **v1 scope (slice #89):** the simple-mapping fields whose
+/// values land in a single `books.<col>`. The join-driven fields
+/// (`author`, `narrator`, `publisher`, `series`, `genre`) and
+/// the set-typed `cover_url` need their own identity-resolve
+/// plumbing and ship as follow-up slices.
+#[derive(Deserialize)]
+struct BooksPatchRequest {
+    title: Option<String>,
+    subtitle: Option<String>,
+    description: Option<String>,
+    language: Option<String>,
+    release_date: Option<String>,
+    asin: Option<String>,
+    isbn: Option<String>,
+    abridged: Option<bool>,
+    explicit: Option<bool>,
+}
+
+/// Response from `PATCH /api/v1/books/{book_id}`.
+#[derive(Serialize)]
+struct BooksPatchResponse {
+    book_id: i64,
+    /// The `book_field_provenance.field` strings that were
+    /// updated by this request, in stable order. Empty when the
+    /// caller sent no field updates.
+    updated: Vec<String>,
+}
+
+/// `PATCH /api/v1/books/{book_id}` — write user-edit provenance.
+///
+/// For every field present in the body the handler:
+///
+/// 1. Demotes any existing `is_winner = 1` row for `(book_id,
+///    field)`.
+/// 2. Inserts a new `source = 'user_edit'`, `stage =
+///    'api-user-edit'`, `confidence = 1.0`, `is_winner = 1`
+///    row into `book_field_provenance`.
+/// 3. Updates the matching `books.<col>` so subsequent reads
+///    (including the next `tag-write-final` run) see the user's
+///    value immediately, not the next-cycle AI alternative.
+///
+/// All three steps run inside a single transaction; partial
+/// failure leaves the book in its prior state.
+///
+/// Per ADR-0028's user-edit rule, the
+/// `confidence = 1.0` floor means consensus's winner-pick
+/// naturally prefers the user-edit row over every AI candidate,
+/// and `TagWriteFinalStage`'s per-field skip
+/// (`ab_tag_write::skip_for_final_pass`) keeps the value sticky
+/// across the late tag-write pass.
+///
+/// Returns **404** when `book_id` doesn't exist; **400** when
+/// the body has no field updates (the partial-write semantics
+/// mean an empty body is almost certainly a caller mistake;
+/// surface it eagerly).
+#[allow(
+    clippy::too_many_lines,
+    reason = "per-field update flow expands linearly: 9 fields × (validate → record_user_edit → update column). Splitting via macro or per-field helper hides the SQL each field touches and forces a generic `value: &str` boundary that loses the bool/string type distinction. The current shape reads top-to-bottom field-by-field."
+)]
+async fn books_patch(
+    State(state): State<ApiState>,
+    Path(book_id): Path<i64>,
+    Json(req): Json<BooksPatchRequest>,
+) -> Result<Json<BooksPatchResponse>, ApiError> {
+    use crate::edits::record_user_edit;
+    use ab_core::Field;
+
+    // 0. Verify book exists. Cheap separate query so the 404
+    // doesn't get masked by a transaction-rollback chain.
+    let exists = sqlx::query!(
+        r#"SELECT EXISTS(SELECT 1 FROM books WHERE book_id = ?) AS "exists!: i64""#,
+        book_id,
+    )
+    .fetch_one(state.inner.library.pool())
+    .await
+    .map_err(|e| {
+        ApiError::Internal(ab_core::Error::Database(format!("books_patch exists: {e}")))
+    })?;
+    if exists.exists == 0 {
+        return Err(ApiError::NotFound(format!("book {book_id}")));
+    }
+
+    // 1. Refuse an empty body — almost certainly a caller bug.
+    let any_update = req.title.is_some()
+        || req.subtitle.is_some()
+        || req.description.is_some()
+        || req.language.is_some()
+        || req.release_date.is_some()
+        || req.asin.is_some()
+        || req.isbn.is_some()
+        || req.abridged.is_some()
+        || req.explicit.is_some();
+    if !any_update {
+        return Err(ApiError::BadRequest(
+            "no fields to update; supply at least one field".to_owned(),
+        ));
+    }
+
+    let mut tx = state.inner.library.pool().begin().await.map_err(|e| {
+        ApiError::Internal(ab_core::Error::Database(format!("books_patch begin: {e}")))
+    })?;
+
+    let mut updated: Vec<String> = Vec::new();
+
+    if let Some(v) = req.title.as_deref() {
+        record_user_edit(&mut tx, book_id, Field::Title, Some(v)).await?;
+        sqlx::query!("UPDATE books SET title = ? WHERE book_id = ?", v, book_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                ApiError::Internal(ab_core::Error::Database(format!("books_patch title: {e}")))
+            })?;
+        updated.push(Field::Title.as_str().to_owned());
+    }
+    if let Some(v) = req.subtitle.as_deref() {
+        record_user_edit(&mut tx, book_id, Field::Subtitle, Some(v)).await?;
+        sqlx::query!(
+            "UPDATE books SET subtitle = ? WHERE book_id = ?",
+            v,
+            book_id
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            ApiError::Internal(ab_core::Error::Database(format!(
+                "books_patch subtitle: {e}"
+            )))
+        })?;
+        updated.push(Field::Subtitle.as_str().to_owned());
+    }
+    if let Some(v) = req.description.as_deref() {
+        record_user_edit(&mut tx, book_id, Field::Description, Some(v)).await?;
+        sqlx::query!(
+            "UPDATE books SET description = ? WHERE book_id = ?",
+            v,
+            book_id
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            ApiError::Internal(ab_core::Error::Database(format!(
+                "books_patch description: {e}"
+            )))
+        })?;
+        updated.push(Field::Description.as_str().to_owned());
+    }
+    if let Some(v) = req.language.as_deref() {
+        record_user_edit(&mut tx, book_id, Field::Language, Some(v)).await?;
+        sqlx::query!(
+            "UPDATE books SET language = ? WHERE book_id = ?",
+            v,
+            book_id
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            ApiError::Internal(ab_core::Error::Database(format!(
+                "books_patch language: {e}"
+            )))
+        })?;
+        updated.push(Field::Language.as_str().to_owned());
+    }
+    if let Some(v) = req.release_date.as_deref() {
+        record_user_edit(&mut tx, book_id, Field::ReleaseDate, Some(v)).await?;
+        sqlx::query!(
+            "UPDATE books SET release_date = ? WHERE book_id = ?",
+            v,
+            book_id
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            ApiError::Internal(ab_core::Error::Database(format!(
+                "books_patch release_date: {e}"
+            )))
+        })?;
+        updated.push(Field::ReleaseDate.as_str().to_owned());
+    }
+    if let Some(v) = req.asin.as_deref() {
+        record_user_edit(&mut tx, book_id, Field::Asin, Some(v)).await?;
+        sqlx::query!("UPDATE books SET asin = ? WHERE book_id = ?", v, book_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                ApiError::Internal(ab_core::Error::Database(format!("books_patch asin: {e}")))
+            })?;
+        updated.push(Field::Asin.as_str().to_owned());
+    }
+    if let Some(v) = req.isbn.as_deref() {
+        record_user_edit(&mut tx, book_id, Field::Isbn, Some(v)).await?;
+        sqlx::query!("UPDATE books SET isbn = ? WHERE book_id = ?", v, book_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                ApiError::Internal(ab_core::Error::Database(format!("books_patch isbn: {e}")))
+            })?;
+        updated.push(Field::Isbn.as_str().to_owned());
+    }
+    if let Some(v) = req.abridged {
+        // Bool → "0" / "1" for the provenance string column; the
+        // books column is INTEGER and stores the i64 form
+        // directly.
+        let v_str = if v { "1" } else { "0" };
+        let v_int: i64 = i64::from(v);
+        record_user_edit(&mut tx, book_id, Field::Abridged, Some(v_str)).await?;
+        sqlx::query!(
+            "UPDATE books SET abridged = ? WHERE book_id = ?",
+            v_int,
+            book_id
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            ApiError::Internal(ab_core::Error::Database(format!(
+                "books_patch abridged: {e}"
+            )))
+        })?;
+        updated.push(Field::Abridged.as_str().to_owned());
+    }
+    if let Some(v) = req.explicit {
+        let v_str = if v { "1" } else { "0" };
+        let v_int: i64 = i64::from(v);
+        record_user_edit(&mut tx, book_id, Field::Explicit, Some(v_str)).await?;
+        sqlx::query!(
+            "UPDATE books SET explicit = ? WHERE book_id = ?",
+            v_int,
+            book_id
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            ApiError::Internal(ab_core::Error::Database(format!(
+                "books_patch explicit: {e}"
+            )))
+        })?;
+        updated.push(Field::Explicit.as_str().to_owned());
+    }
+
+    tx.commit().await.map_err(|e| {
+        ApiError::Internal(ab_core::Error::Database(format!("books_patch commit: {e}")))
+    })?;
+
+    Ok(Json(BooksPatchResponse { book_id, updated }))
 }
 
 // ── /doctor/speech ───────────────────────────────────────────────

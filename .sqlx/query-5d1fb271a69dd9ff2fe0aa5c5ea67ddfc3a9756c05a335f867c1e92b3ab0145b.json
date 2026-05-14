@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE books SET language = ? WHERE book_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "5d1fb271a69dd9ff2fe0aa5c5ea67ddfc3a9756c05a335f867c1e92b3ab0145b"
+}

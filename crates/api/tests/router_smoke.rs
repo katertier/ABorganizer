@@ -247,6 +247,11 @@ async fn books_get_protected() {
 }
 
 #[tokio::test]
+async fn books_patch_protected() {
+    assert_protected("PATCH", "/books/1").await;
+}
+
+#[tokio::test]
 async fn books_retry_protected() {
     assert_protected("POST", "/books/1/retry").await;
 }
