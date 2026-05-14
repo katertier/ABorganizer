@@ -270,6 +270,220 @@ async fn stream_file_wrong_book_id_is_not_found() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+// ── Range support (slice C1b-range) ─────────────────────────
+
+#[tokio::test]
+async fn stream_file_range_bounded_returns_206_with_content_range() {
+    let (router, library, token, tmp) = fresh_router().await;
+    let book_id = seed_book(&library).await;
+    let path = tmp.path().join("range.m4b");
+    let body: Vec<u8> = (0..200u8).collect(); // 200 distinct bytes
+    tokio::fs::write(&path, &body).await.expect("write");
+    let file_id = seed_file(&library, book_id, path.to_str().expect("utf8")).await;
+
+    let req = Request::builder()
+        .uri(format!("/api/items/{book_id}/file/{file_id}"))
+        .method("GET")
+        .header(axum::http::header::AUTHORIZATION, auth_header(&token))
+        .header(axum::http::header::RANGE, "bytes=10-49")
+        .body(Body::empty())
+        .expect("req");
+    let resp = router.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+    let cr = resp
+        .headers()
+        .get(axum::http::header::CONTENT_RANGE)
+        .expect("Content-Range present")
+        .to_str()
+        .expect("utf8");
+    // total = 12345 from seed_file(), NOT the actual on-disk
+    // length (200) — the row's file_size is the canonical
+    // source. Asserting on the row-value forces the handler to
+    // honor what `book_files` says (matches the duration
+    // contract elsewhere in the shelf).
+    assert_eq!(cr, "bytes 10-49/12345");
+    let cl = resp
+        .headers()
+        .get(axum::http::header::CONTENT_LENGTH)
+        .expect("Content-Length")
+        .to_str()
+        .expect("utf8");
+    assert_eq!(cl, "40");
+    let bytes = to_bytes(resp.into_body(), 1024).await.expect("body");
+    assert_eq!(bytes.as_ref(), &body[10..50]);
+}
+
+#[tokio::test]
+async fn stream_file_range_suffix_returns_last_n_bytes() {
+    let (router, library, token, tmp) = fresh_router().await;
+    let book_id = seed_book(&library).await;
+    let path = tmp.path().join("suffix.m4b");
+    let body: Vec<u8> = (0..200u8).collect();
+    tokio::fs::write(&path, &body).await.expect("write");
+    // Use a row WITHOUT a baked-in `file_size` so the handler
+    // falls back to stat-on-disk (200 bytes) — exercises the
+    // metadata fallback path.
+    sqlx::query(
+        "INSERT INTO book_files (book_id, file_path, format, is_active) \
+         VALUES (?, ?, 'm4b', 1)",
+    )
+    .bind(book_id)
+    .bind(path.to_str().expect("utf8"))
+    .execute(library.pool())
+    .await
+    .expect("seed file no-size");
+    let file_id: i64 = sqlx::query_scalar("SELECT file_id FROM book_files WHERE file_path = ?")
+        .bind(path.to_str().expect("utf8"))
+        .fetch_one(library.pool())
+        .await
+        .expect("file_id");
+
+    let req = Request::builder()
+        .uri(format!("/api/items/{book_id}/file/{file_id}"))
+        .method("GET")
+        .header(axum::http::header::AUTHORIZATION, auth_header(&token))
+        .header(axum::http::header::RANGE, "bytes=-25")
+        .body(Body::empty())
+        .expect("req");
+    let resp = router.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+    let cr = resp
+        .headers()
+        .get(axum::http::header::CONTENT_RANGE)
+        .expect("Content-Range")
+        .to_str()
+        .expect("utf8");
+    assert_eq!(cr, "bytes 175-199/200");
+    let bytes = to_bytes(resp.into_body(), 1024).await.expect("body");
+    assert_eq!(bytes.as_ref(), &body[175..200]);
+}
+
+#[tokio::test]
+async fn stream_file_range_open_end_runs_to_eof() {
+    let (router, library, token, tmp) = fresh_router().await;
+    let book_id = seed_book(&library).await;
+    let path = tmp.path().join("open.m4b");
+    let body: Vec<u8> = (0..200u8).collect();
+    tokio::fs::write(&path, &body).await.expect("write");
+    sqlx::query(
+        "INSERT INTO book_files (book_id, file_path, format, is_active) \
+         VALUES (?, ?, 'm4b', 1)",
+    )
+    .bind(book_id)
+    .bind(path.to_str().expect("utf8"))
+    .execute(library.pool())
+    .await
+    .expect("seed");
+    let file_id: i64 = sqlx::query_scalar("SELECT file_id FROM book_files WHERE file_path = ?")
+        .bind(path.to_str().expect("utf8"))
+        .fetch_one(library.pool())
+        .await
+        .expect("file_id");
+
+    let req = Request::builder()
+        .uri(format!("/api/items/{book_id}/file/{file_id}"))
+        .method("GET")
+        .header(axum::http::header::AUTHORIZATION, auth_header(&token))
+        .header(axum::http::header::RANGE, "bytes=100-")
+        .body(Body::empty())
+        .expect("req");
+    let resp = router.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+    let cr = resp
+        .headers()
+        .get(axum::http::header::CONTENT_RANGE)
+        .expect("Content-Range")
+        .to_str()
+        .expect("utf8");
+    assert_eq!(cr, "bytes 100-199/200");
+    let bytes = to_bytes(resp.into_body(), 1024).await.expect("body");
+    assert_eq!(bytes.as_ref(), &body[100..200]);
+}
+
+#[tokio::test]
+async fn stream_file_unsatisfiable_range_returns_416_with_content_range_star() {
+    let (router, library, token, tmp) = fresh_router().await;
+    let book_id = seed_book(&library).await;
+    let path = tmp.path().join("oob.m4b");
+    tokio::fs::write(&path, b"abc").await.expect("write");
+    let file_id = seed_file(&library, book_id, path.to_str().expect("utf8")).await;
+
+    // file_size in the row = 12345; ask for byte 99999 → 416.
+    let req = Request::builder()
+        .uri(format!("/api/items/{book_id}/file/{file_id}"))
+        .method("GET")
+        .header(axum::http::header::AUTHORIZATION, auth_header(&token))
+        .header(axum::http::header::RANGE, "bytes=99999-")
+        .body(Body::empty())
+        .expect("req");
+    let resp = router.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+    let cr = resp
+        .headers()
+        .get(axum::http::header::CONTENT_RANGE)
+        .expect("Content-Range present on 416")
+        .to_str()
+        .expect("utf8");
+    assert_eq!(cr, "bytes */12345", "RFC 7233 § 4.4");
+}
+
+#[tokio::test]
+async fn stream_file_multi_range_returns_416() {
+    let (router, library, token, tmp) = fresh_router().await;
+    let book_id = seed_book(&library).await;
+    let path = tmp.path().join("multi.m4b");
+    tokio::fs::write(&path, b"abcdef").await.expect("write");
+    let file_id = seed_file(&library, book_id, path.to_str().expect("utf8")).await;
+
+    let req = Request::builder()
+        .uri(format!("/api/items/{book_id}/file/{file_id}"))
+        .method("GET")
+        .header(axum::http::header::AUTHORIZATION, auth_header(&token))
+        .header(axum::http::header::RANGE, "bytes=0-99,500-599")
+        .body(Body::empty())
+        .expect("req");
+    let resp = router.oneshot(req).await.expect("oneshot");
+    assert_eq!(
+        resp.status(),
+        StatusCode::RANGE_NOT_SATISFIABLE,
+        "MVP rejects multi-range"
+    );
+}
+
+#[tokio::test]
+async fn stream_file_no_range_header_still_returns_200_full_file() {
+    let (router, library, token, tmp) = fresh_router().await;
+    let book_id = seed_book(&library).await;
+    let path = tmp.path().join("nornage.m4b");
+    let body = b"baseline-no-range".to_vec();
+    tokio::fs::write(&path, &body).await.expect("write");
+    sqlx::query(
+        "INSERT INTO book_files (book_id, file_path, format, is_active) \
+         VALUES (?, ?, 'm4b', 1)",
+    )
+    .bind(book_id)
+    .bind(path.to_str().expect("utf8"))
+    .execute(library.pool())
+    .await
+    .expect("seed");
+    let file_id: i64 = sqlx::query_scalar("SELECT file_id FROM book_files WHERE file_path = ?")
+        .bind(path.to_str().expect("utf8"))
+        .fetch_one(library.pool())
+        .await
+        .expect("file_id");
+
+    let req = Request::builder()
+        .uri(format!("/api/items/{book_id}/file/{file_id}"))
+        .method("GET")
+        .header(axum::http::header::AUTHORIZATION, auth_header(&token))
+        .body(Body::empty())
+        .expect("req");
+    let resp = router.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::OK, "absent Range → 200");
+    let returned = to_bytes(resp.into_body(), 1024).await.expect("body");
+    assert_eq!(returned.as_ref(), body.as_slice());
+}
+
 #[tokio::test]
 async fn stream_file_unknown_ino_is_not_found() {
     let (router, library, token, _tmp) = fresh_router().await;
