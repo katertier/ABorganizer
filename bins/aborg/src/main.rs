@@ -421,6 +421,18 @@ enum BookAction {
         #[arg(long)]
         force: bool,
     },
+    /// Un-soft-delete a book. Idempotent — restoring an
+    /// already-active book is a no-op (no error). Slice #103.
+    Restore {
+        /// Book ID — matches `books.book_id`.
+        book_id: i64,
+        /// Required by ADR-0029. Restore is a mutating
+        /// operation; without `--commit` the CLI refuses.
+        /// No `--force` tier — restore is the gentle undo
+        /// of a soft-delete; nothing irreversible to gate.
+        #[arg(long)]
+        commit: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -521,6 +533,9 @@ async fn main() -> Result<()> {
                 force,
             } => {
                 book_delete(&cli.daemon, book_id, commit, force, cli.output).await?;
+            }
+            BookAction::Restore { book_id, commit } => {
+                book_restore(&cli.daemon, book_id, commit, cli.output).await?;
             }
         },
         Command::Daemon { action: _ } => {
@@ -1170,6 +1185,62 @@ async fn book_delete(
         }
         OutputFormat::Human => {
             tracing::info!(book_id, mode, "book.deleted");
+        }
+    }
+    Ok(())
+}
+
+// ── `aborg book restore <id> --commit` ───────────────────────────
+
+/// `aborg book restore <book_id> --commit` — un-soft-delete a
+/// book over `POST /api/v1/books/{book_id}/restore`.
+///
+/// Refuses without `--commit` (mutating operation; matches the
+/// dry-run-default convention). No `--force` tier — restore is
+/// the gentle undo of a soft-delete; nothing irreversible to
+/// gate.
+async fn book_restore(
+    daemon: &str,
+    book_id: i64,
+    commit: bool,
+    output: OutputFormat,
+) -> Result<()> {
+    if !commit {
+        anyhow::bail!(
+            "refusing to restore without --commit (per ADR-0029 dry-run-default). \
+             `aborg book restore <id> --commit` is the full incantation."
+        );
+    }
+    let url = format!("{daemon}/api/v1/books/{book_id}/restore");
+    let resp = client()
+        .post(&url)
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("book restore failed: HTTP {status}: {body}");
+    }
+    // 200 with body { book_id, restored: bool }
+    let parsed: serde_json::Value = resp.json().await.context("parse restore response")?;
+    let restored = parsed
+        .get("restored")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    match output {
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&parsed).unwrap_or_default()
+            );
+        }
+        OutputFormat::Human => {
+            if restored {
+                tracing::info!(book_id, "book.restored");
+            } else {
+                tracing::info!(book_id, "book.restore_noop (book was already active)");
+            }
         }
     }
     Ok(())

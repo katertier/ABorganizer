@@ -334,3 +334,137 @@ async fn get_detail_returns_soft_deleted_with_timestamp() {
     );
     cancel.cancel();
 }
+
+// ── Restore (slice #103) ─────────────────────────────────────────
+
+#[tokio::test]
+async fn restore_flips_deleted_at_back_to_null() {
+    use axum::body::to_bytes;
+    let (router, state, cancel, _tmp) = fresh_setup().await;
+    let book_id = fixture_book(&state.inner.library, "restore-test").await;
+
+    // Soft-delete first.
+    let _ = auth_request(&router, &state, "DELETE", &format!("/books/{book_id}")).await;
+    assert!(
+        read_deleted_at(&state.inner.library, book_id)
+            .await
+            .is_some(),
+        "precondition: book should be soft-deleted"
+    );
+
+    // Restore.
+    let resp = auth_request(
+        &router,
+        &state,
+        "POST",
+        &format!("/books/{book_id}/restore"),
+    )
+    .await;
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    let body = to_bytes(resp.into_body(), 1 << 20).await.expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("parse json");
+    assert_eq!(
+        json["book_id"].as_i64(),
+        Some(book_id),
+        "response book_id mismatch"
+    );
+    assert_eq!(
+        json["restored"].as_bool(),
+        Some(true),
+        "restoring a soft-deleted book should report restored=true"
+    );
+
+    assert_eq!(
+        read_deleted_at(&state.inner.library, book_id).await,
+        None,
+        "deleted_at should be NULL after restore"
+    );
+    cancel.cancel();
+}
+
+#[tokio::test]
+async fn restore_on_active_book_is_noop() {
+    use axum::body::to_bytes;
+    let (router, state, cancel, _tmp) = fresh_setup().await;
+    let book_id = fixture_book(&state.inner.library, "restore-noop-test").await;
+
+    // Don't soft-delete first — book is already active.
+    let resp = auth_request(
+        &router,
+        &state,
+        "POST",
+        &format!("/books/{book_id}/restore"),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        axum::http::StatusCode::OK,
+        "restoring an already-active book should still 200 (idempotent)"
+    );
+    let body = to_bytes(resp.into_body(), 1 << 20).await.expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("parse json");
+    assert_eq!(
+        json["restored"].as_bool(),
+        Some(false),
+        "active-book restore should report restored=false (no-op)"
+    );
+    cancel.cancel();
+}
+
+#[tokio::test]
+async fn restore_returns_404_for_missing_book() {
+    let (router, state, cancel, _tmp) = fresh_setup().await;
+    let resp = auth_request(&router, &state, "POST", "/books/99999/restore").await;
+    assert_eq!(
+        resp.status(),
+        axum::http::StatusCode::NOT_FOUND,
+        "restore on nonexistent book should 404"
+    );
+    cancel.cancel();
+}
+
+#[tokio::test]
+async fn restore_re_includes_book_in_default_list() {
+    use axum::body::to_bytes;
+    let (router, state, cancel, _tmp) = fresh_setup().await;
+    let book_id = fixture_book(&state.inner.library, "restore-list-test").await;
+
+    // Soft-delete → hidden from default list.
+    let _ = auth_request(&router, &state, "DELETE", &format!("/books/{book_id}")).await;
+    let resp = auth_request(&router, &state, "GET", "/books").await;
+    let body = to_bytes(resp.into_body(), 1 << 20).await.expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("parse json");
+    let ids: Vec<i64> = json["books"]
+        .as_array()
+        .expect("books array")
+        .iter()
+        .map(|b| b["book_id"].as_i64().expect("book_id is i64"))
+        .collect();
+    assert!(
+        !ids.contains(&book_id),
+        "precondition: soft-deleted book should be hidden, got {ids:?}"
+    );
+
+    // Restore → re-included in default list.
+    let _ = auth_request(
+        &router,
+        &state,
+        "POST",
+        &format!("/books/{book_id}/restore"),
+    )
+    .await;
+    let resp = auth_request(&router, &state, "GET", "/books").await;
+    let body = to_bytes(resp.into_body(), 1 << 20).await.expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("parse json");
+    let ids: Vec<i64> = json["books"]
+        .as_array()
+        .expect("books array")
+        .iter()
+        .map(|b| b["book_id"].as_i64().expect("book_id is i64"))
+        .collect();
+    assert!(
+        ids.contains(&book_id),
+        "restored book should re-appear in default list, got {ids:?}"
+    );
+    cancel.cancel();
+}

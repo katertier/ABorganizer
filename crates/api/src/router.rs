@@ -60,6 +60,7 @@ pub fn build_router(state: ApiState) -> Router {
             "/books/{book_id}",
             get(books_get).patch(books_patch).delete(books_delete),
         )
+        .route("/books/{book_id}/restore", post(books_restore))
         .route("/books/{book_id}/retry", post(books_retry_stage))
         .route("/books/{book_id}/audiologo", post(books_audiologo_cut))
         .route(
@@ -1497,6 +1498,86 @@ async fn books_delete(
     }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ── POST /books/{book_id}/restore ────────────────────────────────
+
+/// Response shape for `POST /api/v1/books/{book_id}/restore`.
+/// Returns the `book_id` plus a `restored` flag so the caller
+/// can distinguish "we actually flipped `deleted_at` back to NULL"
+/// from "this book was already active" without parsing the
+/// `deleted_at` field separately.
+#[derive(Serialize)]
+struct BooksRestoreResponse {
+    book_id: i64,
+    /// `true` if `deleted_at` was non-NULL before the call (and
+    /// is NULL after). `false` if the book was already active
+    /// — the call is a no-op in that case (idempotent).
+    restored: bool,
+}
+
+/// `POST /api/v1/books/{book_id}/restore` — un-soft-delete a
+/// book by flipping `books.deleted_at` back to NULL.
+///
+/// Slice #102 added soft-delete (`DELETE /books/{id}` default).
+/// This is its symmetric undo. The row stays the same; the
+/// `deleted_at` column flips from a unix-timestamp to NULL,
+/// which un-hides the book from `GET /books` and re-allows
+/// the pipeline dispatcher to schedule new work for it.
+///
+/// **Idempotent**: restoring an already-active book returns
+/// 200 with `restored: false` and no further state change.
+/// Operators don't need to check the book's state before
+/// calling.
+///
+/// # Errors
+///
+/// - [`ApiError::NotFound`] when `book_id` doesn't exist
+///   (neither active nor soft-deleted).
+/// - [`ApiError::Internal`] on DB failure.
+async fn books_restore(
+    State(state): State<ApiState>,
+    Path(book_id): Path<i64>,
+) -> Result<Json<BooksRestoreResponse>, ApiError> {
+    let pool = state.inner.library.pool();
+
+    // Read the current state before mutating. Distinguishes the
+    // three cases:
+    //   - row missing → 404
+    //   - row exists, deleted_at IS NULL → no-op (restored=false)
+    //   - row exists, deleted_at IS NOT NULL → flip + restored=true
+    let row = sqlx::query!(r#"SELECT deleted_at FROM books WHERE book_id = ?"#, book_id,)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| {
+            ApiError::Internal(ab_core::Error::Database(format!(
+                "books_restore lookup: {e}"
+            )))
+        })?
+        .ok_or_else(|| ApiError::NotFound(format!("book {book_id}")))?;
+
+    let was_deleted = row.deleted_at.is_some();
+    if was_deleted {
+        sqlx::query!(
+            "UPDATE books SET deleted_at = NULL WHERE book_id = ?",
+            book_id,
+        )
+        .execute(pool)
+        .await
+        .map_err(|e| {
+            ApiError::Internal(ab_core::Error::Database(format!(
+                "books_restore update: {e}"
+            )))
+        })?;
+        tracing::info!(book_id, "api.books.restored");
+    } else {
+        tracing::info!(book_id, "api.books.restore_noop");
+    }
+
+    Ok(Json(BooksRestoreResponse {
+        book_id,
+        restored: was_deleted,
+    }))
 }
 
 // ── /doctor/speech ───────────────────────────────────────────────

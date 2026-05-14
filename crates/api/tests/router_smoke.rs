@@ -262,6 +262,11 @@ async fn books_retry_protected() {
 }
 
 #[tokio::test]
+async fn books_restore_protected() {
+    assert_protected("POST", "/books/1/restore").await;
+}
+
+#[tokio::test]
 async fn books_audiologo_protected() {
     assert_protected("POST", "/books/1/audiologo").await;
 }
