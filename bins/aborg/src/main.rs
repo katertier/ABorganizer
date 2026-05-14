@@ -101,19 +101,26 @@ enum Command {
     },
     /// Cleanup subsystem (ADR-0025). Categories: disk, db, queue.
     ///
-    /// Without `--apply` the daemon dry-runs every registered
-    /// target in the category and prints what it would free.
-    /// `--apply` switches to delete mode; `--force` ignores the
-    /// per-target age gate.
+    /// Dry-run by default per ADR-0029 § "Mutating commands
+    /// default to dry-run". `--commit` is the single opt-out
+    /// flag that switches to delete mode; `--force` is the
+    /// second tier that bypasses per-target age gating, and
+    /// requires `--commit` to actually delete.
     Clean {
         /// One of `disk`, `db`, `queue`.
         category: String,
-        /// Actually delete (default = dry-run).
+        /// Actually delete (default = dry-run). Per ADR-0029,
+        /// this is the canonical "yes, mutate" flag across
+        /// every mutating `aborg` command. The legacy `--apply`
+        /// spelling was renamed to `--commit` in slice #87.
         #[arg(long)]
-        apply: bool,
+        commit: bool,
         /// Skip per-target age gating (per-target docs spell out
         /// what this means; pairing codes: invalidates every
-        /// unconsumed code regardless of `expires_at`).
+        /// unconsumed code regardless of `expires_at`). Per
+        /// ADR-0029 § "second tier", `--force` only relaxes
+        /// safety checks; combine with `--commit` to actually
+        /// delete.
         #[arg(long)]
         force: bool,
     },
@@ -491,10 +498,10 @@ async fn main() -> Result<()> {
         },
         Command::Clean {
             category,
-            apply,
+            commit,
             force,
         } => {
-            clean(&cli.daemon, &category, apply, force, cli.output).await?;
+            clean(&cli.daemon, &category, commit, force, cli.output).await?;
         }
         Command::Health => health(&cli.daemon, cli.output).await?,
     }
@@ -874,7 +881,7 @@ struct CleanReportRow {
 #[derive(Deserialize, Debug, Serialize)]
 struct CleanRunResponse {
     category: String,
-    apply: bool,
+    commit: bool,
     force: bool,
     age_seconds: i64,
     targets: Vec<CleanReportRow>,
@@ -883,17 +890,18 @@ struct CleanRunResponse {
 #[derive(Serialize, Debug)]
 struct CleanRunRequest<'a> {
     category: &'a str,
-    apply: bool,
+    commit: bool,
     force: bool,
 }
 
-/// `aborg clean <category> [--apply] [--force]` — thin shim over
-/// `POST /api/v1/clean/run`. Dry-run by default; `--apply` deletes;
-/// `--force` ignores per-target age gates. ADR-0025.
+/// `aborg clean <category> [--commit] [--force]` — thin shim over
+/// `POST /api/v1/clean/run`. Dry-run by default per ADR-0029;
+/// `--commit` deletes; `--force` ignores per-target age gates.
+/// ADR-0025.
 async fn clean(
     daemon: &str,
     category: &str,
-    apply: bool,
+    commit: bool,
     force: bool,
     output: OutputFormat,
 ) -> Result<()> {
@@ -902,7 +910,7 @@ async fn clean(
         .post(&url)
         .json(&CleanRunRequest {
             category,
-            apply,
+            commit,
             force,
         })
         .send()
@@ -922,14 +930,14 @@ async fn clean(
             );
         }
         OutputFormat::Human => {
-            let mode = if body.apply { "applied" } else { "dry-run" };
+            let mode = if body.commit { "committed" } else { "dry-run" };
             let force_note = if body.force { " (forced)" } else { "" };
             let age_days = body.age_seconds / 86_400;
             println!(
                 "clean {} {} {}{} — age cut-off {} d, {} target(s)",
                 body.category,
                 mode,
-                if body.apply { "→" } else { "↦" },
+                if body.commit { "→" } else { "↦" },
                 force_note,
                 age_days,
                 body.targets.len(),
@@ -948,8 +956,8 @@ async fn clean(
                 "  {:<24} {:>6} items {:>10} bytes",
                 "TOTAL", total_items, total_bytes
             );
-            if !body.apply && (total_items > 0 || total_bytes > 0) {
-                println!("\nrun with --apply to delete.");
+            if !body.commit && (total_items > 0 || total_bytes > 0) {
+                println!("\nrun with --commit to delete.");
             }
         }
     }

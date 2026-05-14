@@ -195,15 +195,25 @@ async fn clean_usage(
 }
 
 /// Body of `POST /api/v1/clean/run`.
+///
+/// Per ADR-0029 § "Exactly one opt-out flag": `commit` is the
+/// verb-shaped opt-in to actually delete. Default `false` keeps
+/// mutating commands dry-run by default; the CLI surface
+/// (`aborg clean … --commit`) is the operator-facing form.
 #[derive(Deserialize)]
 struct CleanRunRequest {
     /// One of `disk`, `db`, `queue`. Required.
     category: String,
-    /// `true` → actually delete; `false` → dry-run.
+    /// `true` → actually delete; `false` (default) → dry-run.
+    /// Renamed from `apply` in slice #87 to align with ADR-0029's
+    /// single-opt-out-flag rule.
     #[serde(default)]
-    apply: bool,
+    commit: bool,
     /// `true` → ignore the age gate for every target (per-target
-    /// semantics in their docstrings).
+    /// semantics in their docstrings). Per ADR-0029 § "second
+    /// tier", `force` only relaxes safety checks; it does not
+    /// enable mutation on its own — `commit` is the actual
+    /// "yes, delete" verb.
     #[serde(default)]
     force: bool,
 }
@@ -211,15 +221,15 @@ struct CleanRunRequest {
 #[derive(Serialize)]
 struct CleanRunResponse {
     category: String,
-    apply: bool,
+    commit: bool,
     force: bool,
     age_seconds: i64,
     targets: Vec<CleanReportRow>,
 }
 
 /// `POST /api/v1/clean/run` — operator-triggered cleanup for one
-/// category. `apply=true` switches each target into delete mode;
-/// `apply=false` is identical to `GET /clean/usage?category=…`.
+/// category. `commit=true` switches each target into delete mode;
+/// `commit=false` is identical to `GET /clean/usage?category=…`.
 async fn clean_run(
     State(state): State<ApiState>,
     Json(req): Json<CleanRunRequest>,
@@ -232,10 +242,13 @@ async fn clean_run(
     })?;
     let tunables = ab_core::tunables::CleanupTunables::default();
     let age_seconds = ab_core::cleanup::compute_age_seconds(&tunables, u64::MAX, u64::MAX);
+    // `Policy::apply` is the internal name on the cleanup struct
+    // and stays as-is — that's the low-level field the targets
+    // read. The API + CLI surface uses `commit` per ADR-0029.
     let policy = ab_core::cleanup::Policy {
         age_seconds,
         force: req.force,
-        apply: req.apply,
+        apply: req.commit,
     };
     let cleanup_ctx = ab_pipeline::cleanup::CleanupCtx {
         library: state.inner.library.clone(),
@@ -246,7 +259,7 @@ async fn clean_run(
             .await?;
     Ok(Json(CleanRunResponse {
         category: category.to_string(),
-        apply: req.apply,
+        commit: req.commit,
         force: req.force,
         age_seconds,
         targets: reports.into_iter().map(Into::into).collect(),
