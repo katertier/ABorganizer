@@ -557,7 +557,8 @@ async fn library_scan(daemon: &str, path: &std::path::Path, output: OutputFormat
 
     match output {
         OutputFormat::Json => {
-            tracing::info!(
+            // Clean stdout JSON — `| jq` pipeline support.
+            println!(
                 "{}",
                 serde_json::to_string_pretty(&report).unwrap_or_default()
             );
@@ -696,7 +697,10 @@ async fn book_retry(
     let body: RetryResponse = resp.json().await.context("parse retry response")?;
     match output {
         OutputFormat::Json => {
-            tracing::info!(
+            // Clean stdout JSON so `--output json | jq` works.
+            // `tracing::info!` would wrap this in a tracing-formatter
+            // prefix and break the pipeline.
+            println!(
                 "{}",
                 serde_json::to_string_pretty(&body).unwrap_or_default()
             );
@@ -811,7 +815,10 @@ async fn book_show(daemon: &str, id: i64, output: OutputFormat) -> Result<()> {
 
     match output {
         OutputFormat::Json => {
-            tracing::info!(
+            // Clean stdout JSON so `--output json | jq` works.
+            // `tracing::info!` would wrap this in a tracing-formatter
+            // prefix and break the pipeline.
+            println!(
                 "{}",
                 serde_json::to_string_pretty(&body).unwrap_or_default()
             );
@@ -898,7 +905,10 @@ async fn books_list(daemon: &str, output: OutputFormat) -> Result<()> {
 
     match output {
         OutputFormat::Json => {
-            tracing::info!(
+            // Clean stdout JSON so `--output json | jq` works.
+            // `tracing::info!` would wrap this in a tracing-formatter
+            // prefix and break the pipeline.
+            println!(
                 "{}",
                 serde_json::to_string_pretty(&body).unwrap_or_default()
             );
@@ -956,7 +966,10 @@ async fn library_duplicates(daemon: &str, output: OutputFormat) -> Result<()> {
     let body: DuplicatesResponse = resp.json().await.context("parse duplicates response")?;
     match output {
         OutputFormat::Json => {
-            tracing::info!(
+            // Clean stdout JSON so `--output json | jq` works.
+            // `tracing::info!` would wrap this in a tracing-formatter
+            // prefix and break the pipeline.
+            println!(
                 "{}",
                 serde_json::to_string_pretty(&body).unwrap_or_default()
             );
@@ -1003,7 +1016,10 @@ async fn health(daemon: &str, output: OutputFormat) -> Result<()> {
     let body: HealthResponse = resp.json().await.context("parse health response")?;
     match output {
         OutputFormat::Json => {
-            tracing::info!(
+            // Clean stdout JSON so `--output json | jq` works.
+            // `tracing::info!` would wrap this in a tracing-formatter
+            // prefix and break the pipeline.
+            println!(
                 "{}",
                 serde_json::to_string_pretty(&body).unwrap_or_default()
             );
@@ -1718,7 +1734,8 @@ async fn audiologo_cut(
     let response: AudiologoCutResponse = resp.json().await.context("parse cut response")?;
     match output {
         OutputFormat::Json => {
-            tracing::info!(
+            // Clean stdout JSON — `| jq` pipeline support.
+            println!(
                 "{}",
                 serde_json::to_string_pretty(&response).unwrap_or_default()
             );
@@ -1827,8 +1844,9 @@ async fn audiologos_review(daemon: &str, output: OutputFormat) -> Result<()> {
 
     match output {
         OutputFormat::Json => {
+            // Clean stdout JSON — `| jq` pipeline support.
             let s = serde_json::to_string_pretty(&rows).context("encode json")?;
-            tracing::info!(message = %s, "audiologos.review.json");
+            println!("{s}");
         }
         OutputFormat::Human => {
             if rows.is_empty() {
@@ -1876,8 +1894,9 @@ async fn audiologos_approve(
     let body: ApproveResponse = resp.json().await.context("parse approve response")?;
     match output {
         OutputFormat::Json => {
+            // Clean stdout JSON — `| jq` pipeline support.
             let s = serde_json::to_string_pretty(&body).context("encode")?;
-            tracing::info!(message = %s, "audiologos.approve.json");
+            println!("{s}");
         }
         OutputFormat::Human => {
             tracing::info!(
@@ -1913,8 +1932,9 @@ async fn audiologos_reject(
     let body: RejectResponse = resp.json().await.context("parse reject response")?;
     match output {
         OutputFormat::Json => {
+            // Clean stdout JSON — `| jq` pipeline support.
             let s = serde_json::to_string_pretty(&body).context("encode")?;
-            tracing::info!(message = %s, "audiologos.reject.json");
+            println!("{s}");
         }
         OutputFormat::Human => {
             tracing::info!(row_id = body.row_id, "audiologos.reject.done");
