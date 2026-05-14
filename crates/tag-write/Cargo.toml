@@ -20,7 +20,13 @@ async-trait   = { workspace = true }
 # through `lofty::tag::Tag::save_to`-style APIs; the typed
 # `ItemKey` mapping is symmetric with what tag-read pulls.
 lofty         = { workspace = true }
+# Cover-art fetch (C3a). Streamed download with a hard size
+# cap so a misbehaving CDN can't OOM the daemon. `futures` is
+# the StreamExt source for `bytes_stream().next()`.
+futures       = { workspace = true }
+reqwest       = { workspace = true }
 sqlx          = { workspace = true }
+thiserror     = { workspace = true }
 tokio         = { workspace = true }
 tracing       = { workspace = true }
 # Provenance-audit (`mass_edit_history`) needs a per-run batch
@@ -30,4 +36,6 @@ uuid          = { workspace = true }
 
 [dev-dependencies]
 tempfile      = { workspace = true }
+# Tiny in-process HTTP server for cover-fetcher tests.
+tokio         = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
 tokio-util    = { workspace = true }

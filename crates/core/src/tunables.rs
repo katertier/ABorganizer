@@ -385,6 +385,15 @@ pub struct HttpClientTunables {
     /// Per-request timeout for the seed-data signed manifest fetch
     /// (seconds). Small JSON payload; short timeout fine.
     pub seed_timeout_secs: u64,
+    /// Per-request timeout for cover-art image fetches (seconds).
+    /// Covers come from Audible / Audnexus CDNs; default is on
+    /// the high side because some CDN edges are slow.
+    pub cover_fetch_timeout_secs: u64,
+    /// Hard cap on cover-art payload size in bytes. Audible
+    /// covers are typically ~300 KB; the cap is generous to
+    /// allow for higher-res masters but defends against a
+    /// hostile / misconfigured CDN feeding us a 200 MB image.
+    pub cover_max_bytes: u64,
 }
 
 impl Default for HttpClientTunables {
@@ -393,6 +402,9 @@ impl Default for HttpClientTunables {
             audnexus_timeout_secs: 15,
             audible_timeout_secs: 20,
             seed_timeout_secs: 10,
+            // Cover fetch defaults: 30 s window + 5 MB cap.
+            cover_fetch_timeout_secs: 30,
+            cover_max_bytes: 5 * 1024 * 1024,
         }
     }
 }

@@ -71,14 +71,65 @@ const TAG_WRITE_FINAL_REQUIRES: &[StageId] = &[StageId::new("tag-read")];
 /// [`crate::write`]'s coverage table) using the `is_winner = 1`
 /// row for each field. Skips when every winner is itself from
 /// `source = 'tag_file'` (no point writing tags we just read).
-#[derive(Debug, Default)]
-pub struct TagWriteEarlyStage;
+///
+/// Carries a [`crate::CoverClient`] so the per-book run can
+/// fetch the cover-art payload once (when a `CoverUrl` winner
+/// exists) and reuse the bytes across every active
+/// `book_files` row.
+#[derive(Debug, Clone)]
+pub struct TagWriteEarlyStage {
+    cover: crate::CoverClient,
+}
 
 impl TagWriteEarlyStage {
-    /// Construct.
+    /// Construct from the workspace's HTTP-client tunables. The
+    /// `CoverClient` build can fail on a corrupt TLS stack;
+    /// callers may use [`Self::new`] for the default-tunables
+    /// path which falls back to a permissive client.
+    ///
+    /// # Errors
+    ///
+    /// Surfaces [`crate::CoverFetchError::ClientBuild`] from
+    /// the underlying `reqwest::Client::build`.
+    pub fn from_tunables(
+        tunables: &ab_core::tunables::HttpClientTunables,
+    ) -> std::result::Result<Self, crate::CoverFetchError> {
+        Ok(Self {
+            cover: crate::CoverClient::new(tunables)?,
+        })
+    }
+
+    /// Construct with the default HTTP-client tunables. Returns
+    /// a `Self` even on `CoverClient` build failure — the
+    /// cover-fetch path then surfaces every URL as a transient
+    /// `Request` error at run-time, which the stage logs +
+    /// continues past. Choice rationale: cover-art is best-effort,
+    /// not a daemon-startup blocker.
     #[must_use]
-    pub const fn new() -> Self {
-        Self
+    pub fn new() -> Self {
+        let defaults = ab_core::tunables::HttpClientTunables::default();
+        match crate::CoverClient::new(&defaults) {
+            Ok(cover) => Self { cover },
+            Err(e) => {
+                tracing::warn!(error = %e, "tag-write.cover_client_build_failed_using_fallback");
+                // Best-effort fallback: build with an even more
+                // permissive client builder that always succeeds
+                // (no custom timeouts). We can't propagate the
+                // error without breaking the `Default` contract,
+                // and a daemon that won't boot because cover-art
+                // is misconfigured isn't acceptable.
+                let http = reqwest::Client::new();
+                Self {
+                    cover: crate::cover::CoverClient::with_parts(http, defaults.cover_max_bytes),
+                }
+            }
+        }
+    }
+}
+
+impl Default for TagWriteEarlyStage {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -92,6 +143,10 @@ impl Stage for TagWriteEarlyStage {
         TAG_WRITE_EARLY_REQUIRES
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "per-book linear flow: load winners → skip checks → cover fetch → per-file loop → summary log. Splitting hurts readability — the steps are sequential and the early-returns make the function easy to follow top-to-bottom."
+    )]
     async fn run(&self, ctx: &StageContext, book_id: BookId) -> Result<StageOutcome> {
         let winners = select_winners_for_book(ctx.library.pool(), book_id.0).await?;
         if winners.is_empty() {
@@ -136,6 +191,30 @@ impl Stage for TagWriteEarlyStage {
         // future final-stage author find the constant.
         let _ = USER_EDIT_SOURCE;
 
+        // Cover-art fetch: do it once before the per-file
+        // loop so multi-file books share a single HTTP
+        // round-trip. Failures here are best-effort — log +
+        // skip the cover field; the other winners still write.
+        let cover_bytes: Option<Vec<u8>> = match winners
+            .iter()
+            .find(|w| w.field == ab_core::Field::CoverUrl)
+            .and_then(|w| w.value.as_deref())
+        {
+            Some(url) => match self.cover.fetch(url).await {
+                Ok(bytes) => Some(bytes),
+                Err(e) => {
+                    tracing::warn!(
+                        book = %book_id,
+                        url = %url,
+                        error = %e,
+                        "tag-write.early.cover_fetch_failed"
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
+
         // One batch_id per Stage::run invocation. Per the
         // `mass_edit_history` schema comment, batch_id "links
         // edits made in one operation" — every per-file
@@ -146,7 +225,16 @@ impl Stage for TagWriteEarlyStage {
         let mut total_unmapped: usize = 0;
         let mut any_changed = false;
         for (file_id, file_path) in files {
-            match write_one_file(ctx, book_id, file_id, &file_path, &winners).await {
+            match write_one_file(
+                ctx,
+                book_id,
+                file_id,
+                &file_path,
+                &winners,
+                cover_bytes.as_deref(),
+            )
+            .await
+            {
                 Ok(report) => {
                     total_changes += report.fields_changed();
                     total_matched += report.fields_already_matched;
@@ -307,12 +395,17 @@ async fn load_active_file_paths(
 /// Per-file write: acquire ref, write tags, release ref. The
 /// ref guard is explicit because `Drop` can't be async; both
 /// success and error paths release before returning.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "ctx + book_id + file_id + path + winners + cover_bytes is the natural minimum for a per-file write; collapsing into a struct would just move the same shape into a wrapper."
+)]
 async fn write_one_file(
     ctx: &StageContext,
     book_id: BookId,
     file_id: FileId,
     file_path: &str,
     winners: &[FieldWinner],
+    cover_bytes: Option<&[u8]>,
 ) -> Result<WriteReport> {
     let handle = book_file_refs::acquire(
         ctx.library.pool(),
@@ -328,8 +421,13 @@ async fn write_one_file(
     // stall every other in-flight stage on the same worker.
     let path_owned = file_path.to_owned();
     let winners_owned: Vec<FieldWinner> = winners.to_vec();
+    let cover_owned: Option<Vec<u8>> = cover_bytes.map(<[u8]>::to_vec);
     let result = tokio::task::spawn_blocking(move || {
-        write_winners(std::path::Path::new(&path_owned), &winners_owned)
+        write_winners(
+            std::path::Path::new(&path_owned),
+            &winners_owned,
+            cover_owned.as_deref(),
+        )
     })
     .await
     .map_err(|e| Error::Io(std::io::Error::other(format!("tag-write-early join: {e}"))))?;
