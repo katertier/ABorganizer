@@ -462,10 +462,19 @@ async fn library_scan(
         // drains during the daemon's working hours; the parallel
         // `book_file_refs` lifecycle keeps sources alive for
         // concurrent AI reads.
-        (
-            ab_transcode::stage::STAGE_ID,
-            ab_pipeline::Priority::Background,
-        ),
+        //
+        // `tag-write-early` and `tag-write-final` (ADR-0028) are
+        // **deliberately absent** from this list. Both have
+        // non-empty `requires()` chains terminating at stages
+        // already submitted here (Early on `tag-read`; Final on
+        // `consensus` + every AI extractor + `transcode-m4b`).
+        // The scheduler's `dispatch_ready_dependents` fires them
+        // automatically once their last dependency completes
+        // per book; a redundant scan-time submit would just
+        // execute them with empty winner sets and Skip. For
+        // already-imported books where the auto-dispatch window
+        // has passed, `aborg book retry --stage tag-write-final`
+        // (ADR-0023) is the manual trigger.
     ];
     for book_id in &report.new_book_ids {
         for (stage, priority) in stage_priorities {

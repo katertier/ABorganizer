@@ -239,6 +239,34 @@ fn build_pipeline_stages(tunables: &Tunables) -> Vec<Arc<dyn Stage>> {
         info!("daemon.pipeline.tag_write_early_disabled");
     }
 
+    // `tag-write-final` (ADR-0028 § `TagWriteFinal`) — Background
+    // priority, opt-in via `tunables.pipeline.tag_write_final_enabled`.
+    // Same fallback shape as Early: `from_tunables` fails closed
+    // only on a broken TLS stack; degrade to the permissive
+    // default constructor so the daemon boots.
+    //
+    // The Final stage's `requires()` lists every AI extractor plus
+    // `transcode-m4b`, so registering it makes the DAG build
+    // verify those stages are still in the workspace at startup —
+    // a stage rename surfaces here before any book runs through.
+    if tunables.pipeline.tag_write_final_enabled {
+        let final_stage =
+            match ab_tag_write::TagWriteFinalStage::from_tunables(&tunables.http_client) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "daemon.tag_write_final.cover_client_build_failed_using_default"
+                    );
+                    ab_tag_write::TagWriteFinalStage::new()
+                }
+            };
+        stages.push(Arc::new(final_stage));
+        info!("daemon.pipeline.tag_write_final_enabled");
+    } else {
+        info!("daemon.pipeline.tag_write_final_disabled");
+    }
+
     stages
 }
 

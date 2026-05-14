@@ -215,6 +215,19 @@ pub struct PipelineTunables {
     /// before/after pairs land in `mass_edit_history` so a
     /// future undo surface can roll them back if needed.
     pub tag_write_early_enabled: bool,
+
+    /// Opt-in switch for `tag-write-final` (ADR-0028).
+    ///
+    /// `false` (default) for the same reason as
+    /// [`Self::tag_write_early_enabled`]: turning it on re-tags
+    /// every book whose late winners (AI summary, story-arc,
+    /// characters, setting) differ from on-disk. Operators
+    /// flip both together once they've vetted the early-stage
+    /// rewrites. Once on, the late pass skips per-field when
+    /// the winner's source is `'user_edit'` (see
+    /// `ab_tag_write::USER_EDIT_SOURCE`) so user corrections
+    /// stay sticky across the AI cycle.
+    pub tag_write_final_enabled: bool,
 }
 
 impl Default for PipelineTunables {
@@ -226,6 +239,7 @@ impl Default for PipelineTunables {
             audio_workers: 4,
             max_pending_per_stage: 10_000,
             tag_write_early_enabled: false,
+            tag_write_final_enabled: false,
         }
     }
 }
