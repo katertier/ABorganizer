@@ -70,6 +70,15 @@ pub struct ItemMedia {
     pub duration: f64,
     #[serde(rename = "audioFiles")]
     pub audio_files: Vec<AudioFile>,
+    /// Server-relative URL for the embedded cover-art image,
+    /// e.g. `"/api/items/42/cover"`. Populated only when the
+    /// book has at least one active `book_files` row (the
+    /// cover endpoint itself returns 404 when no picture is
+    /// embedded; clients that follow the link gracefully
+    /// degrade). Omitted when the book has no active files
+    /// at all.
+    #[serde(rename = "coverPath", skip_serializing_if = "Option::is_none")]
+    pub cover_path: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -236,6 +245,14 @@ pub async fn get_item(
             .map(str::to_owned),
     };
 
+    // `coverPath` is the relative URL ABS clients hit on this
+    // daemon's port. We surface it only when the book has at
+    // least one active file (the cover-read path goes through
+    // the first file's embedded `Picture`); books with no
+    // files have nothing to point at.
+    let cover_path = (!audio_files.is_empty())
+        .then(|| format!("/api/items/{book_id}/cover", book_id = book.book_id));
+
     Ok(Json(LibraryItem {
         id: book.book_id.to_string(),
         library_id: LIBRARY_ID,
@@ -244,6 +261,7 @@ pub async fn get_item(
             metadata,
             duration: ms_to_secs(book.duration_ms),
             audio_files,
+            cover_path,
         },
     }))
 }

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT file_path AS \"file_path!: String\"\n             FROM book_files\n            WHERE book_id = ? AND is_active = 1\n            ORDER BY file_id\n            LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "file_path!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e8220295e2080ecb528c8235134be13b6fb3891550b02067cfd4ccd43628373f"
+}

@@ -31,6 +31,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
 
+pub mod cover;
 pub mod error;
 pub mod files;
 #[cfg(test)]
@@ -63,6 +64,7 @@ pub fn build_router(state: ShelfState) -> Router {
         // routes carried the same bug — fixed in this slice.
         .route("/api/items/:id", get(items::get_item))
         .route("/api/items/:id/file/:ino", get(files::stream_file))
+        .route("/api/items/:id/cover", get(cover::get_cover))
         .with_state(state)
 }
 

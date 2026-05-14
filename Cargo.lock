@@ -230,6 +230,7 @@ dependencies = [
  "ab-core",
  "ab-db",
  "axum",
+ "lofty",
  "mime_guess",
  "serde",
  "serde_json",

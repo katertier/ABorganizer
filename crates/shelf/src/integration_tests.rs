@@ -238,3 +238,52 @@ async fn stream_file_unknown_ino_is_not_found() {
     let (status, _body) = get(&router, &format!("/api/items/{book_id}/file/99999")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+// ── /api/items/:id/cover (slice C3c) ────────────────────────
+
+#[tokio::test]
+async fn cover_returns_not_found_when_book_has_no_files() {
+    let (router, library, _tmp) = fresh_router().await;
+    sqlx::query("INSERT INTO books (book_id, title) VALUES (1, 'Coverless')")
+        .execute(library.pool())
+        .await
+        .expect("seed");
+    let (status, _body) = get(&router, "/api/items/1/cover").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn cover_bad_id_is_bad_request() {
+    let (router, _lib, _tmp) = fresh_router().await;
+    let (status, _body) = get(&router, "/api/items/notanumber/cover").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn item_response_omits_cover_path_when_no_files() {
+    let (router, library, _tmp) = fresh_router().await;
+    sqlx::query("INSERT INTO books (book_id, title) VALUES (1, 'Naked')")
+        .execute(library.pool())
+        .await
+        .expect("seed");
+    let (status, body) = get(&router, "/api/items/1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body["media"].get("coverPath").is_none(),
+        "coverPath should be omitted when book has no active files"
+    );
+}
+
+#[tokio::test]
+async fn item_response_includes_cover_path_when_book_has_files() {
+    let (router, library, _tmp) = fresh_router().await;
+    let book_id = seed_book(&library).await;
+    let _file_id = seed_file(&library, book_id, "/tmp/x.m4b").await;
+    let (status, body) = get(&router, &format!("/api/items/{book_id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["media"]["coverPath"],
+        format!("/api/items/{book_id}/cover"),
+        "coverPath should point at the cover endpoint"
+    );
+}
