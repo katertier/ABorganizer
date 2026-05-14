@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT last_synced_at AS \"v?: i64\" FROM media_progress WHERE book_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "v?: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "db46fc9d36bfd48d390a3fe7e2f5e301198ce3d11e9dc8459d63e8e1cdb89e9e"
+}

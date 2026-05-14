@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE media_progress SET is_finished = 0 WHERE book_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "e973366c3298deffa2d435dab444c59af22e6fb0ac8c70a9f9a44d7c305588b2"
+}

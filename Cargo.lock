@@ -12,6 +12,7 @@ dependencies = [
  "ab-db",
  "ab-fingerprint",
  "ab-pipeline",
+ "ab-progress",
  "ab-scan",
  "ab-speech",
  "ab-tag-read",
@@ -191,6 +192,20 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "ab-progress"
+version = "0.1.0"
+dependencies = [
+ "ab-core",
+ "ab-db",
+ "serde",
+ "sqlx",
+ "tempfile",
+ "thiserror",
+ "tokio",
  "tracing",
 ]
 
