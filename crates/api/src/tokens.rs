@@ -351,6 +351,7 @@ mod tests {
             cancel,
             SecurityTunables::default(),
             globset::GlobSet::empty(),
+            ab_background::BackgroundRegistry::new(vec![]),
         );
         (state, tmp)
     }

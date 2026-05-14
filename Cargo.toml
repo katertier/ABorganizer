@@ -20,6 +20,7 @@ members = [
     "crates/seed",
     "crates/scan",
     "crates/progress",
+    "crates/background",
     "crates/tag-read",
     "crates/tag-write",
     "bins/aborg",
@@ -159,6 +160,7 @@ ab-webui-player = { path = "crates/webui-player" }
 ab-seed        = { path = "crates/seed" }
 ab-scan        = { path = "crates/scan" }
 ab-progress    = { path = "crates/progress" }
+ab-background  = { path = "crates/background" }
 ab-tag-read    = { path = "crates/tag-read" }
 ab-tag-write   = { path = "crates/tag-write" }
 

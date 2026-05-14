@@ -14,6 +14,7 @@ workspace = true
 [dependencies]
 ab-core         = { workspace = true }
 ab-db           = { workspace = true }
+ab-background   = { workspace = true }
 # `ab-tag-read` + `ab-catalog` added in slice C5.4 so router.rs
 # can reference the typed `STAGE_ID` consts directly. No compile-
 # graph change — both crates were already pulled transitively via

@@ -381,6 +381,23 @@ async fn main() -> Result<()> {
         cleanup.clone(),
         &cancel,
     );
+
+    // Background-task registry (ADR-0035). Foundation only: ships
+    // a `heartbeat` no-op task as smoke proof; real periodic tasks
+    // (library-rescan #125, refresh-stale-audnexus, etc.) register
+    // here as their owning slices land.
+    let background_registry =
+        ab_background::BackgroundRegistry::new(vec![Arc::new(ab_background::HeartbeatTask {
+            interval: std::time::Duration::from_secs(300),
+        })]);
+    spawn_background_loop(
+        &library,
+        &ephemeral,
+        &tunables,
+        background_registry.clone(),
+        &cancel,
+    );
+
     // B.4: compile watch-folder exclusion globs at boot so every
     // scan + watchdog pass reuses the same matcher. Pattern
     // compilation errors are warned-and-dropped inside
@@ -395,6 +412,7 @@ async fn main() -> Result<()> {
         cancel.clone(),
         tunables.security.clone(),
         scan_excludes,
+        background_registry,
     );
 
     // Build the unified Router for the API port (api + webuis).
@@ -489,6 +507,31 @@ fn spawn_cleanup_loop(
         disk_free: disk_usage::disk_free_for(storage_root),
     };
     tokio::spawn(run_cleanup_loop(ctx, cancel.clone()));
+}
+
+/// Spawn the background-task scheduling loop (ADR-0035).
+///
+/// Each registered [`ab_background::BackgroundTask`] fires on its
+/// own cadence at `Priority::Idle`. The loop ticks every
+/// `tunables.background.tick_secs`; setting that to 0 disables it
+/// (manual triggers via API still work).
+fn spawn_background_loop(
+    library: &LibraryDb,
+    ephemeral: &EphemeralDb,
+    tunables: &Tunables,
+    registry: ab_background::BackgroundRegistry,
+    cancel: &CancellationToken,
+) {
+    let loop_ctx = ab_background::BackgroundLoopCtx {
+        ctx: ab_background::TaskCtx {
+            library: library.clone(),
+            ephemeral: ephemeral.clone(),
+            cancel: cancel.clone(),
+        },
+        registry,
+        tick_interval: std::time::Duration::from_secs(tunables.background.tick_secs),
+    };
+    tokio::spawn(ab_background::run_background_loop(loop_ctx, cancel.clone()));
 }
 
 /// Build the cleanup target registry. Each new target gets a line
