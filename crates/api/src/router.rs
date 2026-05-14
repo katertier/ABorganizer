@@ -457,6 +457,15 @@ async fn library_scan(
             ab_transcript::full_stage::STAGE_ID,
             ab_pipeline::Priority::Idle,
         ),
+        // Transcode-to-m4b (ADR-0027). Background priority so it
+        // doesn't preempt the import-time AI cluster but still
+        // drains during the daemon's working hours; the parallel
+        // `book_file_refs` lifecycle keeps sources alive for
+        // concurrent AI reads.
+        (
+            ab_transcode::stage::STAGE_ID,
+            ab_pipeline::Priority::Background,
+        ),
     ];
     for book_id in &report.new_book_ids {
         for (stage, priority) in stage_priorities {

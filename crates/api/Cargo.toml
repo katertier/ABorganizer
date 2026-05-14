@@ -22,6 +22,10 @@ ab-tag-read     = { workspace = true }
 ab-catalog      = { workspace = true }
 ab-audiologo    = { workspace = true }
 ab-fingerprint  = { workspace = true }
+# Scheduler submission list references `ab_transcode::stage::STAGE_ID`
+# so `POST /library/scan` submits new books to transcode-m4b
+# (ADR-0027) alongside every other per-book stage.
+ab-transcode    = { workspace = true }
 ab-pipeline     = { workspace = true }
 ab-scan         = { workspace = true }
 ab-transcript   = { workspace = true }

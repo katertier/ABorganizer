@@ -31,6 +31,7 @@ ab-fingerprint  = { workspace = true }
 ab-shelf        = { workspace = true }
 ab-tag-read     = { workspace = true }
 ab-tag-write    = { workspace = true }
+ab-transcode    = { workspace = true }
 ab-transcript   = { workspace = true }
 ab-foundation-models = { workspace = true }
 ab-llm-extractors = { workspace = true }
