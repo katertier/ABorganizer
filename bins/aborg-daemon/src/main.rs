@@ -216,7 +216,24 @@ fn build_pipeline_stages(tunables: &Tunables) -> Vec<Arc<dyn Stage>> {
     // mutation logs to `mass_edit_history` with a per-run
     // batch_id (see PR #47).
     if tunables.pipeline.tag_write_early_enabled {
-        stages.push(Arc::new(ab_tag_write::TagWriteEarlyStage::new()));
+        // C3a: pass HTTP-client tunables through so the stage
+        // can configure cover-art fetches with the project's
+        // chosen timeout + byte cap. `from_tunables` fails
+        // closed only on a broken TLS stack — degrade to the
+        // permissive default constructor so the daemon stays
+        // bootable in that pathological case.
+        let early_stage =
+            match ab_tag_write::TagWriteEarlyStage::from_tunables(&tunables.http_client) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "daemon.tag_write_early.cover_client_build_failed_using_default"
+                    );
+                    ab_tag_write::TagWriteEarlyStage::new()
+                }
+            };
+        stages.push(Arc::new(early_stage));
         info!("daemon.pipeline.tag_write_early_enabled");
     } else {
         info!("daemon.pipeline.tag_write_early_disabled");

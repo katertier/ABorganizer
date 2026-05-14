@@ -6,8 +6,9 @@
 //!
 //! ## Field coverage
 //!
-//! 12 of 16 `book_field_provenance` fields map to a canonical
-//! lofty key. Symmetric with [`ab_tag_read`]'s read path:
+//! 13 of 16 `book_field_provenance` fields map to a canonical
+//! lofty key (slice C3a added `CoverUrl`). Symmetric with
+//! [`ab_tag_read`]'s read path:
 //!
 //! | `Field`          | lofty mapping                                     |
 //! |------------------|---------------------------------------------------|
@@ -24,14 +25,15 @@
 //! | `Narrator`       | `ItemKey::Composer` (audiobook conv: TCOM)       |
 //! | `Asin`           | `ItemKey::CatalogNumber`                         |
 //! | `Isbn`           | `ItemKey::Isrc`                                  |
+//! | `CoverUrl`       | `Tag::push_picture` (front cover, MIME sniffed   |
+//! |                  | from fetched bytes via [`crate::cover`])         |
 //!
-//! The remaining 4 fields are deliberately unmapped:
+//! The remaining 3 fields are deliberately unmapped:
 //!
 //! - `DurationSeconds` — derived from decode, not a tag frame.
-//! - `CoverUrl` — cover art is a `Picture` blob; needs a
-//!   fetch-then-embed slice.
 //! - `Abridged` / `Explicit` — no canonical standard tag;
-//!   custom-key handling slated for a follow-up.
+//!   custom-key handling slated for slice C3b (`TXXX:ABRIDGED`
+//!   on ID3, `rtng` atom on MP4 per iTunes convention).
 //!
 //! ## Idempotence
 //!
@@ -43,6 +45,7 @@
 use ab_core::{Error, Field, Result};
 use lofty::config::WriteOptions;
 use lofty::file::{AudioFile, TaggedFileExt};
+use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::tag::{Accessor, ItemKey, Tag};
 use std::path::Path;
 
@@ -78,9 +81,11 @@ pub struct WriteReport {
     /// dedup guard hit).
     pub fields_already_matched: usize,
     /// How many winners had a `Field` that the slice's mapping
-    /// doesn't cover yet (`CoverUrl`, `DurationSeconds`,
-    /// `Abridged`, `Explicit`). Logged so operators can track
-    /// "how much of the data is reaching the file" coverage.
+    /// doesn't cover yet (`DurationSeconds`, `Abridged`,
+    /// `Explicit`) OR for which the side-channel input wasn't
+    /// available (e.g. `CoverUrl` with `cover_bytes == None`).
+    /// Logged so operators can track "how much of the data is
+    /// reaching the file" coverage.
     pub fields_unmapped: usize,
 }
 
@@ -96,6 +101,14 @@ impl WriteReport {
 /// Open `path` with lofty, set every supported winner that
 /// differs from the current value, and save back.
 ///
+/// `cover_bytes` is the pre-fetched cover-art payload (when
+/// any). The stage calls [`crate::cover::CoverClient::fetch`]
+/// once before this loop so multi-file books reuse the same
+/// HTTP fetch. `None` means "no cover URL winner / fetch
+/// failed / fetch disabled" — `Field::CoverUrl` then falls
+/// through to `Unmapped`. C3a wires this in; C3b/C3c land the
+/// remaining custom-tag fields + the shelf cover endpoint.
+///
 /// Returns a [`WriteReport`] with the per-field outcome counts.
 /// `fields_changed == 0` means the file was not rewritten —
 /// `save_to_path` is skipped entirely.
@@ -104,7 +117,11 @@ impl WriteReport {
 ///
 /// - [`Error::Io`] if the file can't be opened / parsed by lofty
 ///   or if the save fails.
-pub fn write_winners(path: &Path, winners: &[FieldWinner]) -> Result<WriteReport> {
+pub fn write_winners(
+    path: &Path,
+    winners: &[FieldWinner],
+    cover_bytes: Option<&[u8]>,
+) -> Result<WriteReport> {
     let mut tagged = lofty::read_from_path(path).map_err(|e| {
         Error::Io(std::io::Error::other(format!(
             "lofty open {}: {e}",
@@ -128,11 +145,15 @@ pub fn write_winners(path: &Path, winners: &[FieldWinner]) -> Result<WriteReport
 
     let mut report = WriteReport::default();
     for winner in winners {
-        match apply_winner(tag, winner) {
+        match apply_winner(tag, winner, cover_bytes) {
             FieldWriteOutcome::Changed { before } => {
-                // `after` is guaranteed non-empty by the
-                // `apply_winner` short-circuit on None / empty
-                // values — those branches return Unmapped.
+                // For text-valued fields, `after` is the
+                // winner's stringified value. For
+                // `Field::CoverUrl` the on-disk artefact is
+                // the picture blob; we record the source URL
+                // so the audit log carries something human-
+                // readable rather than embedding base64
+                // bytes.
                 let after = winner.value.clone().unwrap_or_default();
                 report.changes.push(FieldChange {
                     field: winner.field,
@@ -188,7 +209,17 @@ enum FieldWriteOutcome {
 /// `Unmapped` — we don't write empty strings nor remove the
 /// tag in this slice (ADR-0028 didn't pick a "winner=NULL means
 /// remove" interpretation).
-fn apply_winner(tag: &mut Tag, winner: &FieldWinner) -> FieldWriteOutcome {
+///
+/// `cover_bytes` is consulted only on the `Field::CoverUrl`
+/// branch; every other field ignores it. When `CoverUrl`
+/// arrives but `cover_bytes` is `None` (no successful HTTP
+/// fetch upstream), the field falls through to `Unmapped` so
+/// the audit log reflects "we tried but didn't write."
+fn apply_winner(
+    tag: &mut Tag,
+    winner: &FieldWinner,
+    cover_bytes: Option<&[u8]>,
+) -> FieldWriteOutcome {
     let Some(new_value) = winner.value.as_deref() else {
         return FieldWriteOutcome::Unmapped;
     };
@@ -262,6 +293,8 @@ fn apply_winner(tag: &mut Tag, winner: &FieldWinner) -> FieldWriteOutcome {
         // through this key.
         Field::Narrator => set_item_if_changed(tag, ItemKey::Composer, new_value),
 
+        Field::CoverUrl => apply_cover(tag, cover_bytes),
+
         // Remaining unmapped fields:
         //
         // - `DurationSeconds` — typically derived from the
@@ -269,15 +302,99 @@ fn apply_winner(tag: &mut Tag, winner: &FieldWinner) -> FieldWriteOutcome {
         //   `book_field_provenance.duration_seconds` row
         //   carries the consensus winner but a future
         //   "duration-as-tag" surface needs design work.
-        // - `CoverUrl` — cover art is a `Picture` blob, not
-        //   a string; needs a fetch-then-embed slice.
         // - `Abridged` / `Explicit` — no canonical standard
-        //   tag; usually custom keys per encoder. Skipped
-        //   until the convention question is decided.
-        Field::DurationSeconds | Field::CoverUrl | Field::Abridged | Field::Explicit => {
-            FieldWriteOutcome::Unmapped
-        }
+        //   tag; usually custom keys per encoder. Slated for
+        //   slice C3b (`TXXX:ABRIDGED` on ID3, `rtng` atom on
+        //   MP4 per iTunes convention).
+        Field::DurationSeconds | Field::Abridged | Field::Explicit => FieldWriteOutcome::Unmapped,
     }
+}
+
+/// Embed a fetched cover blob as the file's front-cover
+/// [`Picture`].
+///
+/// Detects the image's MIME type from its first few bytes (PNG
+/// magic, JPEG SOI, GIF / `WebP` / AVIF signatures) and
+/// constructs a [`PictureType::CoverFront`] picture via
+/// `Picture::new_unchecked` — the call is "unchecked" because
+/// lofty's standard `Picture::from_reader` requires a typed
+/// `Cursor` and our caller already has a `&[u8]`; the MIME
+/// sniff below restores the validation lofty would have done.
+///
+/// **Dedup**: when a cover with the same byte content is
+/// already on the tag, returns `Matched`. Byte-equal is the
+/// strictest guard; a future revision could compare hashes if
+/// large images make the equality check expensive.
+fn apply_cover(tag: &mut Tag, cover_bytes: Option<&[u8]>) -> FieldWriteOutcome {
+    let Some(bytes) = cover_bytes else {
+        return FieldWriteOutcome::Unmapped;
+    };
+    if bytes.is_empty() {
+        return FieldWriteOutcome::Unmapped;
+    }
+    let Some(mime) = sniff_image_mime(bytes) else {
+        // We refuse to embed bytes we can't classify — the
+        // file's tag would then reference an opaque blob.
+        return FieldWriteOutcome::Unmapped;
+    };
+
+    // Dedup: if any existing picture has identical bytes, skip.
+    // We don't restrict to `CoverFront` because some files
+    // carry cover art under other type codes (icon, other) and
+    // we'd rather not duplicate.
+    let existing = tag.pictures();
+    if existing.iter().any(|p| p.data() == bytes) {
+        return FieldWriteOutcome::Matched;
+    }
+
+    // lofty 0.24's `Picture` is constructed via a builder
+    // (`Picture::unchecked` for raw bytes that bypass the
+    // MIME-from-content sniff; we've already done our own sniff
+    // above and the test fixtures exercise both paths).
+    let picture = Picture::unchecked(bytes.to_vec())
+        .pic_type(PictureType::CoverFront)
+        .mime_type(mime)
+        .description("Cover")
+        .build();
+
+    // Lofty's set_picture replaces the picture at the given
+    // index; for a fresh tag the index doesn't exist yet, so
+    // use `push_picture` which always appends. The audit log
+    // records "we wrote a cover" rather than the bytes.
+    tag.push_picture(picture);
+    FieldWriteOutcome::Changed { before: None }
+}
+
+/// Best-effort image MIME-type sniff from leading bytes. Covers
+/// PNG / JPEG / GIF / `WebP` / AVIF / BMP — the formats Audnexus
+/// / Audible CDNs serve. Unknown payloads return `None` so the
+/// caller refuses to embed them.
+fn sniff_image_mime(bytes: &[u8]) -> Option<MimeType> {
+    if bytes.len() >= 8 && &bytes[0..8] == b"\x89PNG\r\n\x1a\n" {
+        return Some(MimeType::Png);
+    }
+    if bytes.len() >= 3 && &bytes[0..3] == b"\xFF\xD8\xFF" {
+        return Some(MimeType::Jpeg);
+    }
+    if bytes.len() >= 6 && (&bytes[0..6] == b"GIF87a" || &bytes[0..6] == b"GIF89a") {
+        return Some(MimeType::Gif);
+    }
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        // Lofty's `MimeType` enum doesn't yet carry a `Webp`
+        // variant; tag formats that accept arbitrary MIME
+        // strings can still take WebP, but the `MimeType`
+        // round-trip would lose the precision. Treat WebP
+        // as `Unknown("image/webp")` so callers see the
+        // round-trip explicitly.
+        return Some(MimeType::Unknown("image/webp".to_owned()));
+    }
+    if bytes.len() >= 12 && &bytes[4..12] == b"ftypavif" {
+        return Some(MimeType::Unknown("image/avif".to_owned()));
+    }
+    if bytes.len() >= 2 && &bytes[0..2] == b"BM" {
+        return Some(MimeType::Bmp);
+    }
+    None
 }
 
 /// `ItemKey`-based set with a dedup guard. Captures the
@@ -298,29 +415,25 @@ mod tests {
     use ab_core::Field;
 
     #[test]
-    fn unmapped_fields_return_unmapped_outcome() {
-        // The 4 still-unmapped variants from the table in the
-        // module doc all return Unmapped today; pin so the
-        // field-set doesn't drift without a docstring update.
-        // (Slice 1 listed 8 unmapped; slice 2 added Subtitle,
-        // Description, ReleaseDate, Narrator — now 4.)
-        let v: Vec<(Field, FieldWriteOutcome)> = [
-            Field::DurationSeconds,
-            Field::CoverUrl,
-            Field::Abridged,
-            Field::Explicit,
-        ]
-        .iter()
-        .map(|f| {
-            let mut tag = Tag::new(lofty::tag::TagType::Id3v2);
-            let w = FieldWinner {
-                field: *f,
-                value: Some("anything".to_owned()),
-                source: "any".to_owned(),
-            };
-            (*f, apply_winner(&mut tag, &w))
-        })
-        .collect();
+    fn still_unmapped_fields_return_unmapped_outcome() {
+        // Three variants remain unmapped after slice C3a
+        // (DurationSeconds — no tag frame; Abridged + Explicit
+        // — deferred to C3b's custom-key handling). The
+        // CoverUrl branch is now covered by separate tests
+        // below.
+        let v: Vec<(Field, FieldWriteOutcome)> =
+            [Field::DurationSeconds, Field::Abridged, Field::Explicit]
+                .iter()
+                .map(|f| {
+                    let mut tag = Tag::new(lofty::tag::TagType::Id3v2);
+                    let w = FieldWinner {
+                        field: *f,
+                        value: Some("anything".to_owned()),
+                        source: "any".to_owned(),
+                    };
+                    (*f, apply_winner(&mut tag, &w, None))
+                })
+                .collect();
         for (field, outcome) in v {
             assert_eq!(
                 outcome,
@@ -331,6 +444,92 @@ mod tests {
     }
 
     #[test]
+    fn cover_url_without_bytes_is_unmapped() {
+        // The stage's `run()` is responsible for fetching
+        // the bytes BEFORE calling `write_winners`; if the
+        // fetch failed, `cover_bytes` is `None` and the
+        // CoverUrl winner falls through to Unmapped.
+        let mut tag = Tag::new(lofty::tag::TagType::Id3v2);
+        let w = FieldWinner {
+            field: Field::CoverUrl,
+            value: Some("https://example.invalid/cover.jpg".to_owned()),
+            source: "audnexus-enrich".to_owned(),
+        };
+        assert_eq!(
+            apply_winner(&mut tag, &w, None),
+            FieldWriteOutcome::Unmapped,
+            "no bytes → Unmapped"
+        );
+    }
+
+    #[test]
+    fn cover_url_with_bytes_embeds_a_front_cover_picture() {
+        // Minimal-but-valid PNG magic + IHDR. Lofty's tag
+        // doesn't validate the image past the bytes-equal
+        // dedup; the MIME sniff is what enforces format.
+        let png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR_rest_ignored".to_vec();
+        let mut tag = Tag::new(lofty::tag::TagType::Id3v2);
+        let w = FieldWinner {
+            field: Field::CoverUrl,
+            value: Some("https://example.invalid/cover.png".to_owned()),
+            source: "audnexus-enrich".to_owned(),
+        };
+        let outcome = apply_winner(&mut tag, &w, Some(&png));
+        assert!(
+            matches!(outcome, FieldWriteOutcome::Changed { before: None }),
+            "got {outcome:?}"
+        );
+        let pictures = tag.pictures();
+        assert_eq!(pictures.len(), 1, "exactly one picture appended");
+        assert_eq!(pictures[0].pic_type(), PictureType::CoverFront);
+        assert_eq!(pictures[0].data(), &png[..]);
+        assert_eq!(pictures[0].mime_type(), Some(&MimeType::Png));
+    }
+
+    #[test]
+    fn cover_url_dedups_when_existing_picture_matches() {
+        let jpeg = b"\xFF\xD8\xFF\xE0\x00\x10JFIF".to_vec();
+        let mut tag = Tag::new(lofty::tag::TagType::Id3v2);
+        tag.push_picture(
+            Picture::unchecked(jpeg.clone())
+                .pic_type(PictureType::CoverFront)
+                .mime_type(MimeType::Jpeg)
+                .build(),
+        );
+        let w = FieldWinner {
+            field: Field::CoverUrl,
+            value: Some("https://example.invalid/cover.jpg".to_owned()),
+            source: "audnexus-enrich".to_owned(),
+        };
+        let outcome = apply_winner(&mut tag, &w, Some(&jpeg));
+        assert_eq!(
+            outcome,
+            FieldWriteOutcome::Matched,
+            "byte-equal existing → Matched"
+        );
+        assert_eq!(tag.pictures().len(), 1, "no duplicate appended");
+    }
+
+    #[test]
+    fn cover_url_with_unsniffable_bytes_is_unmapped() {
+        // Random bytes don't match any known image signature.
+        // Refuse to embed — we'd otherwise put an opaque blob
+        // in the tag with a guessed MIME type.
+        let garbage = b"not an image".to_vec();
+        let mut tag = Tag::new(lofty::tag::TagType::Id3v2);
+        let w = FieldWinner {
+            field: Field::CoverUrl,
+            value: Some("https://example.invalid/cover".to_owned()),
+            source: "audnexus-enrich".to_owned(),
+        };
+        assert_eq!(
+            apply_winner(&mut tag, &w, Some(&garbage)),
+            FieldWriteOutcome::Unmapped,
+            "unsniffable → Unmapped (refuse to embed unknown bytes)"
+        );
+    }
+
+    #[test]
     fn missing_or_empty_value_is_unmapped() {
         let mut tag = Tag::new(lofty::tag::TagType::Id3v2);
         let none = FieldWinner {
@@ -338,13 +537,19 @@ mod tests {
             value: None,
             source: "any".to_owned(),
         };
-        assert_eq!(apply_winner(&mut tag, &none), FieldWriteOutcome::Unmapped);
+        assert_eq!(
+            apply_winner(&mut tag, &none, None),
+            FieldWriteOutcome::Unmapped
+        );
         let empty = FieldWinner {
             field: Field::Title,
             value: Some(String::new()),
             source: "any".to_owned(),
         };
-        assert_eq!(apply_winner(&mut tag, &empty), FieldWriteOutcome::Unmapped);
+        assert_eq!(
+            apply_winner(&mut tag, &empty, None),
+            FieldWriteOutcome::Unmapped
+        );
     }
 
     #[test]
@@ -370,7 +575,7 @@ mod tests {
             // so we expect `Changed { before: None }`.
             assert!(
                 matches!(
-                    apply_winner(&mut tag, &w),
+                    apply_winner(&mut tag, &w, None),
                     FieldWriteOutcome::Changed { before: None }
                 ),
                 "{field:?} should write with before=None"
@@ -392,7 +597,10 @@ mod tests {
             value: Some("Audible".to_owned()),
             source: "audnexus".to_owned(),
         };
-        assert_eq!(apply_winner(&mut tag, &same), FieldWriteOutcome::Matched);
+        assert_eq!(
+            apply_winner(&mut tag, &same, None),
+            FieldWriteOutcome::Matched
+        );
     }
 
     #[test]
@@ -406,7 +614,7 @@ mod tests {
         };
         // Different from current "Audible" → before captures
         // the prior value for the audit log.
-        let outcome = apply_winner(&mut tag, &different);
+        let outcome = apply_winner(&mut tag, &different, None);
         assert!(
             matches!(
                 outcome,
@@ -415,5 +623,21 @@ mod tests {
             "expected Changed {{ before = Some(\"Audible\") }}, got {outcome:?}",
         );
         assert_eq!(tag.get_string(ItemKey::Publisher), Some("Penguin Audio"));
+    }
+
+    #[test]
+    fn sniff_image_mime_classifies_common_formats() {
+        assert_eq!(
+            sniff_image_mime(b"\x89PNG\r\n\x1a\n\x00\x00\x00\r"),
+            Some(MimeType::Png)
+        );
+        assert_eq!(
+            sniff_image_mime(b"\xFF\xD8\xFFsuffix"),
+            Some(MimeType::Jpeg)
+        );
+        assert_eq!(sniff_image_mime(b"GIF89a..."), Some(MimeType::Gif));
+        assert_eq!(sniff_image_mime(b"BMpixels..."), Some(MimeType::Bmp));
+        assert_eq!(sniff_image_mime(b"too short"), None);
+        assert_eq!(sniff_image_mime(b"nothing recognizable"), None);
     }
 }
