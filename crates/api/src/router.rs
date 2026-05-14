@@ -56,7 +56,10 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/doctor/speech", get(doctor_speech))
         .route("/doctor/speech/install", post(doctor_speech_install))
         .route("/books", get(books_list))
-        .route("/books/{book_id}", get(books_get).patch(books_patch))
+        .route(
+            "/books/{book_id}",
+            get(books_get).patch(books_patch).delete(books_delete),
+        )
         .route("/books/{book_id}/retry", post(books_retry_stage))
         .route("/books/{book_id}/audiologo", post(books_audiologo_cut))
         .route(
@@ -1370,6 +1373,87 @@ async fn books_patch(
     })?;
 
     Ok(Json(BooksPatchResponse { book_id, updated }))
+}
+
+// ── DELETE /books/{book_id} ──────────────────────────────────────
+
+/// Query parameters for `DELETE /api/v1/books/{book_id}`.
+#[derive(Deserialize)]
+struct BooksDeleteQuery {
+    /// Per ADR-0029 § "Truly-irreversible operations", `force`
+    /// is the second-tier opt-in for the unrecoverable variant
+    /// (here: hard delete that cascades through every per-book
+    /// FK). v1 ONLY supports `force=true`; soft-delete defers
+    /// to a follow-up slice that adds a `books.deleted_at`
+    /// column + filters every read query.
+    #[serde(default)]
+    force: bool,
+}
+
+/// `DELETE /api/v1/books/{book_id}` — hard delete with cascade.
+///
+/// API.md's plan is soft-delete (default) + `?force=true` for
+/// hard delete. v1 ships only the hard-delete half. Without
+/// `?force=true` returns **400 `BadRequest`** with an explicit
+/// message pointing at the deferred soft-delete plan; this
+/// fails-loud rather than silently soft-deleting via missing
+/// schema.
+///
+/// With `?force=true`:
+/// - **204 `NoContent`** on success. Every `ON DELETE CASCADE`
+///   FK on `books.book_id` clears in the same transaction
+///   (`book_field_provenance`, `book_files`, `chapters`,
+///   `book_narrator`, `book_series`, `book_tags`, `characters`).
+///   `mass_edit_history` rows survive with orphaned `target_id`
+///   — that's the audit-trail-preservation design.
+/// - **404 `NotFound`** when `book_id` doesn't exist.
+///
+/// On-disk files in `book_files.file_path` are NOT removed
+/// here — that's a separate cleanup concern (future
+/// `OrphanBookFilesTarget` per the cleanup-future-targets
+/// memo). Operators who want to reclaim disk space after a
+/// delete must currently `rm` the files themselves or wait
+/// for the future cleanup target.
+async fn books_delete(
+    State(state): State<ApiState>,
+    Path(book_id): Path<i64>,
+    axum::extract::Query(q): axum::extract::Query<BooksDeleteQuery>,
+) -> Result<StatusCode, ApiError> {
+    if !q.force {
+        return Err(ApiError::BadRequest(
+            "DELETE /books/{id} requires `?force=true` in v1 (soft-delete \
+             is the future default per API.md; not yet implemented)"
+                .to_owned(),
+        ));
+    }
+
+    let pool = state.inner.library.pool();
+
+    // Cheap existence check up front so 404 doesn't surface as
+    // "0 rows affected by DELETE" — distinguishes a missing
+    // book from a concurrent delete race.
+    let exists = sqlx::query!(
+        r#"SELECT EXISTS(SELECT 1 FROM books WHERE book_id = ?) AS "exists!: i64""#,
+        book_id,
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| {
+        ApiError::Internal(ab_core::Error::Database(format!(
+            "books_delete exists: {e}"
+        )))
+    })?;
+    if exists.exists == 0 {
+        return Err(ApiError::NotFound(format!("book {book_id}")));
+    }
+
+    sqlx::query!("DELETE FROM books WHERE book_id = ?", book_id)
+        .execute(pool)
+        .await
+        .map_err(|e| ApiError::Internal(ab_core::Error::Database(format!("books_delete: {e}"))))?;
+
+    tracing::info!(book_id, "api.books.deleted_force");
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ── /doctor/speech ───────────────────────────────────────────────
