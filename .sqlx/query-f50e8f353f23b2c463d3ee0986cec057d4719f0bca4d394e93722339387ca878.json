@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n            last_run_at          AS \"last_run_at: i64\",\n            last_status          AS \"last_status: String\",\n            last_summary         AS \"last_summary: String\",\n            consecutive_failures AS \"consecutive_failures!: i64\"\n         FROM background_task_state WHERE task_name = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "last_run_at: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "last_status: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "last_summary: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "consecutive_failures!: i64",
+        "ordinal": 3,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "f50e8f353f23b2c463d3ee0986cec057d4719f0bca4d394e93722339387ca878"
+}

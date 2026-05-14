@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use ab_background::BackgroundRegistry;
 use ab_core::tunables::SecurityTunables;
 use ab_db::{EphemeralDb, LibraryDb};
 use ab_pipeline::cleanup::CleanupRegistry;
@@ -62,6 +63,11 @@ pub struct ApiStateInner {
     /// `ab_scan::scan_with_excludes`. Compiled once at boot;
     /// empty `GlobSet` disables exclusions (suitable for tests).
     pub scan_excludes: GlobSet,
+    /// Background-task registry (ADR-0035). Shared with the
+    /// daemon's scheduling loop so the API surface
+    /// (`/background/tasks` + manual triggers) and the
+    /// autonomous tick agree on the registered set.
+    pub background: BackgroundRegistry,
 }
 
 impl ApiState {
@@ -84,6 +90,7 @@ impl ApiState {
         cancel: CancellationToken,
         security: SecurityTunables,
         scan_excludes: GlobSet,
+        background: BackgroundRegistry,
     ) -> Self {
         Self {
             inner: Arc::new(ApiStateInner {
@@ -97,6 +104,7 @@ impl ApiState {
                 started_at: std::time::Instant::now(),
                 pairing_consume_limiter: Arc::new(RateLimiter::default()),
                 scan_excludes,
+                background,
             }),
         }
     }

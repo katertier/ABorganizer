@@ -14,6 +14,10 @@ use crate::error::ApiError;
 use crate::state::ApiState;
 
 /// Build the native API router. Mount at `/api/v1`.
+#[allow(
+    clippy::too_many_lines,
+    reason = "single linear route table; splitting only obscures the URI list"
+)]
 pub fn build_router(state: ApiState) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -97,6 +101,14 @@ pub fn build_router(state: ApiState) -> Router {
         )
         .route("/clean/usage", get(clean_usage))
         .route("/clean/run", post(clean_run))
+        .route(
+            "/background/tasks",
+            get(crate::background::background_tasks_list),
+        )
+        .route(
+            "/background/tasks/{name}/run",
+            post(crate::background::background_task_run),
+        )
         .route("/names/{kind}/{id}/alias", post(crate::names::names_alias))
         .route("/names/{kind}/{id}/exalt", post(crate::names::names_exalt))
         .route("/names/pending", get(crate::names::names_pending_list))
