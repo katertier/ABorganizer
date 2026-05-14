@@ -1002,12 +1002,17 @@ impl Default for CleanupTunables {
 /// ```toml
 /// [security]
 /// admin_token = "abc123..."  # 32+ random bytes hex-encoded
-/// library_roots = ["/Volumes/Audiobooks/Library"]
 /// ```
 ///
-/// Or via env: `AB_SECURITY_ADMIN_TOKEN=...`,
-/// `AB_SECURITY_LIBRARY_ROOTS=/path1:/path2` (figment's array
-/// env handling splits on the platform path separator).
+/// Or via env: `AB_SECURITY_ADMIN_TOKEN=...`.
+///
+/// **B.7 removal note:** the `library_roots` Vec field that
+/// previously seeded the DB-backed `library_roots` table was
+/// dropped in slice B.7 (tracker #119). The one-cycle bridge has
+/// served its purpose — operators manage roots through the
+/// `library_roots` REST surface (POST / GET / DELETE). Any stale
+/// `library_roots = [...]` setting in `config.toml` is now an
+/// `unknown_field` error under `#[serde(deny_unknown_fields)]`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SecurityTunables {
@@ -1017,13 +1022,6 @@ pub struct SecurityTunables {
     /// slice graduates to the per-user tokens table; this is
     /// the v0 hard-stop until that lands.
     pub admin_token: Option<String>,
-
-    /// Allowed library roots for `POST /library/scan`. The
-    /// handler canonicalises the requested path and verifies it
-    /// is at-or-under one of these. Empty list disables
-    /// scan-by-path (the future `POST /library/roots` will be
-    /// the only way to register).
-    pub library_roots: Vec<PathBuf>,
 }
 
 impl Tunables {

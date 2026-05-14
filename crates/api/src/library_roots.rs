@@ -22,9 +22,12 @@
 //! endpoints in place every surface (CLI `aborg roots`, future
 //! web UI, voice control) manages roots through one path.
 //!
-//! Migration semantics: the tunable still seeds the table on
-//! first boot when the table is empty (see daemon main). That's
-//! a one-cycle bridge; the next cycle deprecates the tunable.
+//! **B.7 closure note:** the one-cycle bridge that seeded this
+//! table from the deprecated `tunables.security.library_roots`
+//! Vec is removed (tracker #119). Operators register roots via
+//! the REST surface; a stale `library_roots = [...]` setting in
+//! `config.toml` is now rejected as an `unknown_field` by
+//! `SecurityTunables`.
 
 use std::path::{Path, PathBuf};
 
@@ -333,86 +336,6 @@ pub async fn path_is_under_any_root(
     Ok(false)
 }
 
-/// Seed-on-empty wrapper.
-///
-/// Inserts each path from `paths` IFF the `library_roots` table
-/// is currently empty. One-cycle bridge for the deprecated
-/// `tunables.security.library_roots` — see the migration header
-/// for the deprecation plan.
-///
-/// Returns the number of rows inserted. `Ok(0)` when the table
-/// already has entries (no-op) or when every input path was
-/// invalid (each invalid path logs a warning and continues).
-///
-/// # Errors
-///
-/// Database failures bubble. Per-path validation failures log
-/// and skip — this is a best-effort migration, not a user-facing
-/// API call.
-pub async fn seed_if_empty(state: &ApiState, paths: &[PathBuf]) -> Result<usize, ApiError> {
-    if paths.is_empty() {
-        return Ok(0);
-    }
-    let already: i64 = sqlx::query_scalar!("SELECT COUNT(*) AS \"n!: i64\" FROM library_roots",)
-        .fetch_one(state.inner.library.pool())
-        .await
-        .map_err(|e| Error::Database(format!("library_roots seed count: {e}")))?;
-    if already > 0 {
-        return Ok(0);
-    }
-    seed_from_tunables(state, paths).await
-}
-
-/// Seed the `library_roots` table from a Vec of operator-supplied
-/// paths. Called by [`seed_if_empty`] (which adds the empty-table
-/// guard). Public so test code can drive the seed step directly.
-///
-/// Each path is canonicalised + directory-checked the same way
-/// as the POST handler. Invalid paths log a warning and skip;
-/// one bad entry doesn't abort the whole seed.
-///
-/// # Errors
-///
-/// Returns the first DB error encountered. Validation errors
-/// (path missing etc.) log + continue, since this is a
-/// best-effort migration not a user-facing API call.
-pub async fn seed_from_tunables(state: &ApiState, paths: &[PathBuf]) -> Result<usize, ApiError> {
-    let mut inserted = 0_usize;
-    let now = unix_now_secs();
-    for raw in paths {
-        let s = raw.to_string_lossy().to_string();
-        match canonicalise_directory(&s) {
-            Ok(canonical) => {
-                let canonical_str = canonical.to_string_lossy().to_string();
-                let result = sqlx::query!(
-                    "INSERT OR IGNORE INTO library_roots (path, label, created_at)
-                     VALUES (?, NULL, ?)",
-                    canonical_str,
-                    now,
-                )
-                .execute(state.inner.library.pool())
-                .await
-                .map_err(|e| Error::Database(format!("library_roots seed insert: {e}")))?;
-                if result.rows_affected() > 0 {
-                    inserted += 1;
-                    tracing::info!(
-                        path = %canonical_str,
-                        "api.library_roots.seeded_from_tunables"
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    path = %s,
-                    error = %e,
-                    "api.library_roots.seed_skip_invalid"
-                );
-            }
-        }
-    }
-    Ok(inserted)
-}
-
 fn unix_now_secs() -> i64 {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -667,19 +590,6 @@ mod tests {
         assert!(!under_other, "sibling dir must NOT match");
     }
 
-    #[tokio::test]
-    async fn seed_from_tunables_inserts_valid_and_skips_invalid() {
-        let (state, tmp) = fresh_state().await;
-        let good = tmp.path().join("Good");
-        std::fs::create_dir(&good).expect("mkdir");
-        let bad = PathBuf::from("/nonexistent/path/9999");
-
-        let n = seed_from_tunables(&state, &[good.clone(), bad])
-            .await
-            .expect("seed");
-        assert_eq!(n, 1, "exactly one valid path was inserted");
-
-        let Json(rows) = library_roots_list(State(state)).await.expect("list");
-        assert_eq!(rows.len(), 1);
-    }
+    // `seed_from_tunables_inserts_valid_and_skips_invalid` removed
+    // with the seed bridge in slice B.7 (tracker #119).
 }
