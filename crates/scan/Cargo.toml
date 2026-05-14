@@ -15,6 +15,9 @@ workspace = true
 ab-core   = { workspace = true }
 ab-db     = { workspace = true }
 blake3    = { workspace = true }
+# B.4: scan watch-folder exclusion globs
+# (`PipelineTunables.scan_excludes`).
+globset   = { workspace = true }
 serde     = { workspace = true }
 sqlx      = { workspace = true }
 thiserror = { workspace = true }

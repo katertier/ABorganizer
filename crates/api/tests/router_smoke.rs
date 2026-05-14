@@ -108,6 +108,7 @@ async fn fresh_router() -> (Router, CancellationToken, TempDir) {
         CleanupRegistry::new(vec![]),
         cancel.clone(),
         SecurityTunables::default(),
+        globset::GlobSet::empty(),
     );
     let router = build_router(state);
     (router, cancel, tmp)
