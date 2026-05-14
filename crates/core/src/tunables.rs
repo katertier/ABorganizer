@@ -872,6 +872,27 @@ pub struct CleanupTunables {
     /// stack: the smallest matching `age_days` across all hit
     /// tiers wins (most-aggressive cleanup).
     pub pressure: Vec<PressureTier>,
+    /// Retention window in days for the **latest** row per
+    /// `(target_kind, target_id, field)` tuple in
+    /// `mass_edit_history`. Once a row crosses this age and
+    /// it's still the most recent edit for its key, the
+    /// retention target marks it eligible for prune.
+    ///
+    /// Default `90`. Tuned to keep recent state long enough
+    /// for an operator to manually undo a mass-edit gone
+    /// wrong (the audit-trail's primary user-facing job),
+    /// without indefinitely growing the table.
+    pub mass_edit_history_latest_days: u64,
+    /// Retention window in days for **intermediate** rows in
+    /// `mass_edit_history` — every row that isn't the most
+    /// recent edit for its key. After this age they're
+    /// eligible for prune regardless of disk pressure.
+    ///
+    /// Default `30`. Tighter than `latest_days` because
+    /// intermediate rows aren't reachable by the undo flow
+    /// once a newer edit has shadowed them; they exist only
+    /// for forensic audit and a month is generous for that.
+    pub mass_edit_history_intermediate_days: u64,
 }
 
 /// One ratchet step in [`CleanupTunables::pressure`].
@@ -937,6 +958,8 @@ impl Default for CleanupTunables {
                     age_days: 3,
                 },
             ],
+            mass_edit_history_latest_days: 90,
+            mass_edit_history_intermediate_days: 30,
         }
     }
 }
