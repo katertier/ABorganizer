@@ -343,6 +343,53 @@ enum BookAction {
         #[arg(long, value_delimiter = ',', num_args = 1.., required = true)]
         stage: Vec<String>,
     },
+    /// Apply a user-edit to one or more fields of a book.
+    ///
+    /// Thin shim over `PATCH /api/v1/books/{book_id}` (slice #89,
+    /// ADR-0028 user-edit rule). Every flag is optional —
+    /// supply at least one or the daemon returns 400. Edits
+    /// land as `source='user_edit'` + `confidence=1.0` rows in
+    /// `book_field_provenance` and stay sticky through the late
+    /// tag-write pass.
+    ///
+    /// Join-driven fields (`author`, `narrator`, `publisher`,
+    /// `series`, `genre`, `cover_url`) defer to a follow-up
+    /// slice — they need identity-resolve plumbing on the
+    /// server. v1 covers the scalar fields.
+    ///
+    /// Examples:
+    ///
+    ///   aborg book patch 42 --title "Corrected Title"
+    ///   aborg book patch 42 --language en --explicit true
+    ///   aborg book patch 42 --description "Fixed plot summary"
+    Patch {
+        /// Book ID — matches `books.book_id`.
+        book_id: i64,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        subtitle: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        /// BCP-47 (e.g. `en`, `de`).
+        #[arg(long)]
+        language: Option<String>,
+        /// ISO 8601 date string (`YYYY-MM-DD`).
+        #[arg(long)]
+        release_date: Option<String>,
+        #[arg(long)]
+        asin: Option<String>,
+        #[arg(long)]
+        isbn: Option<String>,
+        /// Pass `true` or `false`. Omit to leave the field
+        /// untouched.
+        #[arg(long, value_name = "true|false")]
+        abridged: Option<bool>,
+        /// Pass `true` or `false`. Omit to leave the field
+        /// untouched.
+        #[arg(long, value_name = "true|false")]
+        explicit: Option<bool>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -406,8 +453,37 @@ async fn main() -> Result<()> {
             BookAction::Show { id } => book_show(&cli.daemon, id, cli.output).await?,
             BookAction::Retry { book_id, stage } => {
                 book_retry(&cli.daemon, book_id, &stage, cli.output).await?;
-            } // (Note: BookAction::Retry above carries `stage:
-              // Vec<String>` post-H.1.6.)
+            }
+            BookAction::Patch {
+                book_id,
+                title,
+                subtitle,
+                description,
+                language,
+                release_date,
+                asin,
+                isbn,
+                abridged,
+                explicit,
+            } => {
+                book_patch(
+                    &cli.daemon,
+                    book_id,
+                    BookPatchArgs {
+                        title,
+                        subtitle,
+                        description,
+                        language,
+                        release_date,
+                        asin,
+                        isbn,
+                        abridged,
+                        explicit,
+                    },
+                    cli.output,
+                )
+                .await?;
+            }
         },
         Command::Daemon { action: _ } => {
             tracing::warn!("daemon control not yet implemented in slice 1A");
@@ -882,6 +958,112 @@ async fn book_show(daemon: &str, id: i64, output: OutputFormat) -> Result<()> {
                     source = %c.source,
                     count = c.count,
                     "book.chapters"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+// ── `aborg book patch <id> …` ────────────────────────────────────
+
+/// Per-field arguments threaded into [`book_patch`]. Packed into
+/// one struct so the dispatcher arm doesn't need a 10-arg call.
+struct BookPatchArgs {
+    title: Option<String>,
+    subtitle: Option<String>,
+    description: Option<String>,
+    language: Option<String>,
+    release_date: Option<String>,
+    asin: Option<String>,
+    isbn: Option<String>,
+    abridged: Option<bool>,
+    explicit: Option<bool>,
+}
+
+#[derive(Serialize, Debug)]
+struct BookPatchRequest<'a> {
+    // `skip_serializing_if` keeps the wire body tidy (no `null`
+    // soup when most flags are absent). The server's
+    // deserializer treats absent and `null` the same way for
+    // `Option<T>`, so this is wire-shape polish, not semantics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subtitle: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    language: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    release_date: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    asin: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    isbn: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    abridged: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    explicit: Option<bool>,
+}
+
+#[derive(Deserialize, Debug, Serialize)]
+struct BookPatchResponse {
+    book_id: i64,
+    updated: Vec<String>,
+}
+
+/// `aborg book patch <book_id> [field-flags]` — thin shim over
+/// `PATCH /api/v1/books/{book_id}` (slice #89). Empty patch is
+/// rejected server-side with 400; surface that message directly
+/// rather than pre-validating client-side.
+async fn book_patch(
+    daemon: &str,
+    book_id: i64,
+    args: BookPatchArgs,
+    output: OutputFormat,
+) -> Result<()> {
+    let url = format!("{daemon}/api/v1/books/{book_id}");
+    let body = BookPatchRequest {
+        title: args.title.as_deref(),
+        subtitle: args.subtitle.as_deref(),
+        description: args.description.as_deref(),
+        language: args.language.as_deref(),
+        release_date: args.release_date.as_deref(),
+        asin: args.asin.as_deref(),
+        isbn: args.isbn.as_deref(),
+        abridged: args.abridged,
+        explicit: args.explicit,
+    };
+    let resp = client()
+        .patch(&url)
+        .json(&body)
+        .send()
+        .await
+        .with_context(|| format!("PATCH {url}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("book patch failed: HTTP {status}: {body}");
+    }
+    let body: BookPatchResponse = resp.json().await.context("parse patch response")?;
+    match output {
+        OutputFormat::Json => {
+            // Clean stdout JSON — `| jq` pipeline support.
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&body).unwrap_or_default()
+            );
+        }
+        OutputFormat::Human => {
+            if body.updated.is_empty() {
+                tracing::info!(book_id = body.book_id, "book.patched (no fields updated)");
+            } else {
+                let fields = body.updated.join(", ");
+                tracing::info!(
+                    book_id = body.book_id,
+                    updated = %fields,
+                    "book.patched"
                 );
             }
         }
