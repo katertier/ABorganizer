@@ -19,3 +19,8 @@ serde       = { workspace = true }
 tokio       = { workspace = true }
 tower-http  = { workspace = true }
 tracing     = { workspace = true }
+
+[dev-dependencies]
+# `tower::ServiceExt::oneshot` to exercise the router from tests.
+# Mirrors shelf's integration-test setup.
+tower = { workspace = true }
