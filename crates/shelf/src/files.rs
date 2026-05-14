@@ -4,14 +4,27 @@
 //! file (one per `book_files` row, indexed by `ino` = the
 //! stringified `file_id`).
 //!
-//! The MVP implementation streams the **whole file** as a single
-//! response. HTTP Range support (essential for client-side
-//! seeking on long audiobooks) is **deferred to a follow-up
-//! slice** (C1b): the player loads the whole file then seeks
-//! locally for the MVP, which works for short books and
-//! single-file tests but isn't viable for 10+ hour multi-file
-//! libraries. The `ReaderStream` pattern below is range-ready
-//! — we just don't parse the `Range:` header yet.
+//! ## Range support (slice C1b-range)
+//!
+//! Honors `Range: bytes=...` per RFC 7233 with these shapes:
+//!
+//! - `bytes=N-M` (bounded) — serve `[N, min(M, total-1)]`.
+//! - `bytes=N-` (open) — serve `[N, total-1]`.
+//! - `bytes=-N` (suffix) — serve the last `N` bytes
+//!   (`[total-N, total-1]`).
+//!
+//! Multi-range requests are rejected (416). The audiobook
+//! players we target (Plappa, `ShelfPlayer`) send single-range
+//! requests; multi-range is a rare desktop-browser pattern and
+//! returning multipart/byteranges has enough framing cost to
+//! defer until a real use case lands.
+//!
+//! Invalid / unsatisfiable ranges return **416 Range Not
+//! Satisfiable** with `Content-Range: bytes */<total>` so the
+//! client can re-issue inside bounds.
+//!
+//! Absent `Range:` header → unchanged behavior: 200 OK with
+//! the whole file streamed.
 //!
 //! Content-Type is derived from `book_files.format` via
 //! [`crate::items::mime_for_format`]'s logic, duplicated here as
@@ -23,9 +36,9 @@ use std::path::PathBuf;
 
 use axum::body::Body;
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
-use axum::response::IntoResponse;
+use axum::http::{HeaderMap, HeaderValue, Response, StatusCode, header};
 use tokio::fs::File;
+use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, SeekFrom};
 use tokio_util::io::ReaderStream;
 
 use crate::error::ShelfError;
@@ -38,16 +51,21 @@ use crate::state::ShelfState;
 /// belong together so an attacker can't probe arbitrary
 /// `book_files` rows by sending mismatched IDs.
 ///
+/// Honors `Range:` per the module-level docs. Absent header →
+/// 200 OK + full file (unchanged from C1).
+///
 /// # Errors
 ///
 /// - [`ShelfError::BadRequest`] — `id` or `ino` doesn't parse.
 /// - [`ShelfError::NotFound`] — no matching active `book_files`
 ///   row for the (`book_id`, `file_id`) pair.
-/// - [`ShelfError::FileSystem`] — file path didn't open.
+/// - [`ShelfError::FileSystem`] — file path didn't open, or
+///   metadata / seek failed.
 pub async fn stream_file(
     State(state): State<ShelfState>,
     Path((id, ino)): Path<(String, String)>,
-) -> Result<impl IntoResponse, ShelfError> {
+    request_headers: HeaderMap,
+) -> Result<Response<Body>, ShelfError> {
     let book_id: i64 = id
         .parse()
         .map_err(|_| ShelfError::BadRequest(format!("invalid item id: {id}")))?;
@@ -83,32 +101,186 @@ pub async fn stream_file(
         ShelfError::FileSystem(format!("open {}: {e}", path.display()))
     })?;
 
+    // Total size: trust the row's `file_size` when present,
+    // otherwise stat the file. Range responses MUST include
+    // a definite total; an open response (no Range) can elide
+    // Content-Length but we prefer to include it.
+    let total = if let Some(n) = row.file_size.filter(|n| *n > 0) {
+        u64::try_from(n).unwrap_or(0)
+    } else {
+        let meta = file
+            .metadata()
+            .await
+            .map_err(|e| ShelfError::FileSystem(format!("stat {}: {e}", path.display())))?;
+        meta.len()
+    };
+
     let mime = mime_for_path_extension(&path);
-    let mut headers = HeaderMap::new();
-    // `HeaderValue::from_str` here is fallible because `mime`
-    // is dynamic; the fallback static can't fail to parse so
-    // `from_static` keeps the panic-free contract.
     let content_type = HeaderValue::from_str(&mime)
         .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
-    headers.insert(header::CONTENT_TYPE, content_type);
-    // `Accept-Ranges: bytes` advertises range support; until C1b
-    // wires up Range handling we serve the whole file regardless
-    // of what the client asks for. Most ABS clients fall back to
-    // sequential GET when Range isn't honoured.
-    headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
-    if let Some(size) = row.file_size {
-        if size > 0 {
-            // `i64` decimal is always valid ASCII; `try_from`
-            // is documented to succeed on any digits-only string.
-            if let Ok(v) = HeaderValue::try_from(size.to_string()) {
-                headers.insert(header::CONTENT_LENGTH, v);
-            }
+
+    // Parse Range header, if any.
+    let range_header = request_headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok());
+
+    match range_header.map(|s| parse_range_header(s, total)) {
+        None => Ok(full_file_response(file, total, content_type)),
+        Some(RangeParse::Single(r)) => partial_response(file, r, total, content_type, &path).await,
+        Some(RangeParse::Invalid) => Ok(range_not_satisfiable_response(total, content_type)),
+    }
+}
+
+/// 200 OK + full-file body. Same shape as the pre-C1b-range
+/// behaviour — Accept-Ranges advertises range support, and
+/// Content-Length is set when total > 0.
+fn full_file_response(file: File, total: u64, content_type: HeaderValue) -> Response<Body> {
+    let mut response = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::ACCEPT_RANGES, "bytes");
+    if total > 0 {
+        response = response.header(header::CONTENT_LENGTH, total.to_string());
+    }
+    response
+        .body(Body::from_stream(ReaderStream::new(file)))
+        .unwrap_or_else(|_| Response::new(Body::from("response build error")))
+}
+
+/// 206 Partial Content for a resolved range. Seeks the file +
+/// wraps in a length-bounded reader so the body stream stops
+/// at the right byte.
+async fn partial_response(
+    mut file: File,
+    r: ResolvedRange,
+    total: u64,
+    content_type: HeaderValue,
+    path: &std::path::Path,
+) -> Result<Response<Body>, ShelfError> {
+    file.seek(SeekFrom::Start(r.start)).await.map_err(|e| {
+        ShelfError::FileSystem(format!("seek {} → {}: {e}", path.display(), r.start))
+    })?;
+    let len = r.end - r.start + 1;
+    let bounded = file.take(len);
+    let body = Body::from_stream(ReaderStream::new(bounded));
+    let content_range = format!("bytes {}-{}/{total}", r.start, r.end);
+    let response = Response::builder()
+        .status(StatusCode::PARTIAL_CONTENT)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CONTENT_LENGTH, len.to_string())
+        .header(header::CONTENT_RANGE, content_range)
+        .body(body)
+        .map_err(|e| {
+            ShelfError::FileSystem(format!("response build for {}: {e}", path.display()))
+        })?;
+    Ok(response)
+}
+
+/// 416 Range Not Satisfiable with `Content-Range: bytes */N`
+/// so the client can see the file's total size and re-issue
+/// inside bounds. Per RFC 7233 § 4.4.
+fn range_not_satisfiable_response(total: u64, content_type: HeaderValue) -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::RANGE_NOT_SATISFIABLE)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CONTENT_RANGE, format!("bytes */{total}"))
+        .header(header::CONTENT_LENGTH, "0")
+        .body(Body::empty())
+        .unwrap_or_else(|_| Response::new(Body::empty()))
+}
+
+/// Inclusive byte range to serve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResolvedRange {
+    start: u64,
+    end: u64,
+}
+
+/// Outcome of parsing a `Range:` header against a known total
+/// size. Three states: malformed/unsatisfiable, satisfiable
+/// single, or "not really a Range request" (which we treat as
+/// no header for the 200 path).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RangeParse {
+    /// Valid single byte range, clamped to `[0, total-1]`.
+    Single(ResolvedRange),
+    /// Header is present but malformed or unsatisfiable. The
+    /// handler returns 416.
+    Invalid,
+}
+
+/// Parse a `Range:` header against the file's total size.
+///
+/// Accepts the three RFC 7233 shapes for `bytes=`:
+/// - `bytes=N-M`
+/// - `bytes=N-` (open end)
+/// - `bytes=-N` (suffix)
+///
+/// Multi-range requests (e.g. `bytes=0-499,1000-1499`) are
+/// rejected as Invalid — see module docs for rationale.
+///
+/// Non-`bytes=` units (e.g. `seconds=`) are Invalid: per RFC
+/// 7233 § 3.1 the server MAY ignore unknown units, but
+/// returning 416 surfaces the misuse to the client.
+fn parse_range_header(value: &str, total: u64) -> RangeParse {
+    let Some(spec) = value.trim().strip_prefix("bytes=") else {
+        return RangeParse::Invalid;
+    };
+    // Multi-range rejected.
+    if spec.contains(',') {
+        return RangeParse::Invalid;
+    }
+    let spec = spec.trim();
+    let Some((start_str, end_str)) = spec.split_once('-') else {
+        return RangeParse::Invalid;
+    };
+    let start_str = start_str.trim();
+    let end_str = end_str.trim();
+
+    // Suffix: `bytes=-N`. Empty start, non-empty end = suffix length.
+    if start_str.is_empty() {
+        if end_str.is_empty() {
+            return RangeParse::Invalid;
         }
+        let Ok(suffix_len) = end_str.parse::<u64>() else {
+            return RangeParse::Invalid;
+        };
+        if suffix_len == 0 || total == 0 {
+            return RangeParse::Invalid;
+        }
+        let start = total.saturating_sub(suffix_len);
+        return RangeParse::Single(ResolvedRange {
+            start,
+            end: total - 1,
+        });
     }
 
-    let stream = ReaderStream::new(file);
-    let body = Body::from_stream(stream);
-    Ok((StatusCode::OK, headers, body))
+    let Ok(start) = start_str.parse::<u64>() else {
+        return RangeParse::Invalid;
+    };
+    if start >= total {
+        return RangeParse::Invalid;
+    }
+
+    // Open: `bytes=N-`.
+    if end_str.is_empty() {
+        return RangeParse::Single(ResolvedRange {
+            start,
+            end: total - 1,
+        });
+    }
+
+    // Bounded: `bytes=N-M`.
+    let Ok(end_raw) = end_str.parse::<u64>() else {
+        return RangeParse::Invalid;
+    };
+    if end_raw < start {
+        return RangeParse::Invalid;
+    }
+    let end = end_raw.min(total - 1);
+    RangeParse::Single(ResolvedRange { start, end })
 }
 
 /// MIME-type from a path's extension. Duplicates the dispatch
@@ -167,5 +339,108 @@ mod tests {
             m == "application/octet-stream" || m.contains('/'),
             "got {m}"
         );
+    }
+
+    // ── parse_range_header (slice C1b-range) ────────────────
+
+    #[test]
+    fn range_bounded_within_total() {
+        let r = parse_range_header("bytes=10-99", 1000);
+        assert_eq!(r, RangeParse::Single(ResolvedRange { start: 10, end: 99 }));
+    }
+
+    #[test]
+    fn range_bounded_end_clamped_to_total_minus_one() {
+        // Asking past EOF clamps to the last byte.
+        let r = parse_range_header("bytes=500-99999", 1000);
+        assert_eq!(
+            r,
+            RangeParse::Single(ResolvedRange {
+                start: 500,
+                end: 999,
+            })
+        );
+    }
+
+    #[test]
+    fn range_open_end_runs_to_eof() {
+        let r = parse_range_header("bytes=500-", 1000);
+        assert_eq!(
+            r,
+            RangeParse::Single(ResolvedRange {
+                start: 500,
+                end: 999,
+            })
+        );
+    }
+
+    #[test]
+    fn range_suffix_returns_last_n() {
+        let r = parse_range_header("bytes=-100", 1000);
+        assert_eq!(
+            r,
+            RangeParse::Single(ResolvedRange {
+                start: 900,
+                end: 999,
+            })
+        );
+    }
+
+    #[test]
+    fn range_suffix_larger_than_total_starts_at_zero() {
+        let r = parse_range_header("bytes=-99999", 1000);
+        assert_eq!(r, RangeParse::Single(ResolvedRange { start: 0, end: 999 }));
+    }
+
+    #[test]
+    fn range_start_at_eof_is_invalid() {
+        // RFC: a `start` >= total is unsatisfiable.
+        let r = parse_range_header("bytes=1000-", 1000);
+        assert_eq!(r, RangeParse::Invalid);
+    }
+
+    #[test]
+    fn range_inverted_is_invalid() {
+        let r = parse_range_header("bytes=500-100", 1000);
+        assert_eq!(r, RangeParse::Invalid);
+    }
+
+    #[test]
+    fn range_multi_is_invalid_in_mvp() {
+        // Multipart/byteranges is RFC-permitted but we defer
+        // until a real client surfaces the use case.
+        let r = parse_range_header("bytes=0-99,500-599", 1000);
+        assert_eq!(r, RangeParse::Invalid);
+    }
+
+    #[test]
+    fn range_non_bytes_unit_is_invalid() {
+        let r = parse_range_header("seconds=0-10", 1000);
+        assert_eq!(r, RangeParse::Invalid);
+    }
+
+    #[test]
+    fn range_garbage_is_invalid() {
+        assert_eq!(parse_range_header("hello", 1000), RangeParse::Invalid);
+        assert_eq!(parse_range_header("bytes=", 1000), RangeParse::Invalid);
+        assert_eq!(
+            parse_range_header("bytes=foo-bar", 1000),
+            RangeParse::Invalid
+        );
+        assert_eq!(parse_range_header("bytes=-", 1000), RangeParse::Invalid);
+        assert_eq!(parse_range_header("bytes=-0", 1000), RangeParse::Invalid);
+    }
+
+    #[test]
+    fn range_against_empty_file_is_invalid() {
+        // No bytes to serve, so every range is unsatisfiable.
+        assert_eq!(parse_range_header("bytes=0-", 0), RangeParse::Invalid);
+        assert_eq!(parse_range_header("bytes=-10", 0), RangeParse::Invalid);
+    }
+
+    #[test]
+    fn range_whitespace_tolerated() {
+        let r = parse_range_header("  bytes= 10 - 99 ", 1000);
+        assert_eq!(r, RangeParse::Single(ResolvedRange { start: 10, end: 99 }));
     }
 }
