@@ -88,4 +88,75 @@ mod tests {
             "non-audio file should yield Ok(None) (format not recognised)"
         );
     }
+
+    /// Generate a 0.5-second silent audio fixture at `path` via
+    /// ffmpeg. Returns `None` if ffmpeg isn't on PATH so the
+    /// calling test silent-skips. Same shape as the tag-write
+    /// crate's fixture helper — kept in-crate rather than shared
+    /// to avoid coupling test helpers across crates.
+    fn ffmpeg_silence(path: &Path, codec: &str) -> Option<()> {
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=44100:cl=mono",
+                "-t",
+                "0.5",
+                "-c:a",
+                codec,
+                "-b:a",
+                "64k",
+            ])
+            .arg(path)
+            .status()
+            .ok()?;
+        status.success().then_some(())
+    }
+
+    /// Real round-trip: a 0.5-second silent MP3 should report
+    /// roughly 500ms via the probe. The exact value depends on
+    /// the encoder's frame alignment (libmp3lame typically
+    /// reports 522ms for a 500ms input due to MP3 frame
+    /// granularity), so we assert a band rather than an exact
+    /// value.
+    ///
+    /// Silent-skip when ffmpeg isn't on PATH.
+    #[test]
+    fn mp3_duration_round_trip() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("silence.mp3");
+        if ffmpeg_silence(&path, "libmp3lame").is_none() {
+            return;
+        }
+
+        let result = probe_duration_ms(&path).expect("probe ok");
+        let ms = result.expect("duration available for valid MP3");
+        assert!(
+            (400..=700).contains(&ms),
+            "expected ~500ms (band 400..=700 for encoder frame alignment), got {ms}ms"
+        );
+    }
+
+    /// Real round-trip: a 0.5-second silent M4A. AAC encoders
+    /// align differently than MP3 (typically much closer to the
+    /// nominal value); same band-assertion shape catches drift.
+    #[test]
+    fn m4a_duration_round_trip() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("silence.m4a");
+        if ffmpeg_silence(&path, "aac").is_none() {
+            return;
+        }
+
+        let result = probe_duration_ms(&path).expect("probe ok");
+        let ms = result.expect("duration available for valid M4A");
+        assert!(
+            (400..=700).contains(&ms),
+            "expected ~500ms (band 400..=700 for encoder frame alignment), got {ms}ms"
+        );
+    }
 }
