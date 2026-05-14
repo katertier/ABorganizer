@@ -26,20 +26,20 @@ pub fn build_router(state: ApiState) -> Router {
                 .post(crate::library_roots::library_roots_create),
         )
         .route(
-            "/library_roots/:root_id",
+            "/library_roots/{root_id}",
             delete(crate::library_roots::library_roots_delete),
         )
         .route(
             "/tokens",
             get(crate::tokens::tokens_list).post(crate::tokens::tokens_create),
         )
-        .route("/tokens/:token_id", delete(crate::tokens::tokens_revoke))
+        .route("/tokens/{token_id}", delete(crate::tokens::tokens_revoke))
         .route(
             "/pairing/codes",
             get(crate::pairing::pairing_codes_list).post(crate::pairing::pairing_codes_create),
         )
         .route(
-            "/pairing/codes/:code_id",
+            "/pairing/codes/{code_id}",
             delete(crate::pairing::pairing_codes_revoke),
         )
         // Public — by design. See crate::auth::PUBLIC_PATHS + the
@@ -56,27 +56,27 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/doctor/speech", get(doctor_speech))
         .route("/doctor/speech/install", post(doctor_speech_install))
         .route("/books", get(books_list))
-        .route("/books/:book_id/retry", post(books_retry_stage))
-        .route("/books/:book_id/audiologo", post(books_audiologo_cut))
+        .route("/books/{book_id}/retry", post(books_retry_stage))
+        .route("/books/{book_id}/audiologo", post(books_audiologo_cut))
         .route(
             "/audiologos/review",
             get(crate::audiologo_review::audiologos_review_list),
         )
         .route(
-            "/audiologos/:row_id/approve",
+            "/audiologos/{row_id}/approve",
             post(crate::audiologo_review::audiologos_approve),
         )
         .route(
-            "/audiologos/:row_id/reject",
+            "/audiologos/{row_id}/reject",
             post(crate::audiologo_review::audiologos_reject),
         )
         .route("/clean/usage", get(clean_usage))
         .route("/clean/run", post(clean_run))
-        .route("/names/:kind/:id/alias", post(crate::names::names_alias))
-        .route("/names/:kind/:id/exalt", post(crate::names::names_exalt))
+        .route("/names/{kind}/{id}/alias", post(crate::names::names_alias))
+        .route("/names/{kind}/{id}/exalt", post(crate::names::names_exalt))
         .route("/names/pending", get(crate::names::names_pending_list))
         .route(
-            "/names/pending/:pending_id/resolve",
+            "/names/pending/{pending_id}/resolve",
             post(crate::names::names_pending_resolve),
         )
         .route("/report/gaps", get(crate::reports::report_gaps))

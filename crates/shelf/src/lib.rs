@@ -64,14 +64,14 @@ pub fn build_router(state: ShelfState) -> Router {
         .route("/api/info", get(info))
         .route("/healthcheck", get(healthcheck))
         .route("/api/libraries", get(libraries::list_libraries))
-        // axum 0.7 (matchit 0.7) uses `:param` syntax for
-        // captures. `{id}` would match the literal string,
-        // silently 404-ing every real request. Caught by the
-        // shelf integration tests; pre-existing api-crate
-        // routes carried the same bug — fixed in slice C1.
-        .route("/api/items/:id", get(items::get_item))
-        .route("/api/items/:id/file/:ino", get(files::stream_file))
-        .route("/api/items/:id/cover", get(cover::get_cover))
+        // axum 0.8 (matchit 0.8) uses `{param}` syntax for
+        // captures, replacing 0.7's `:param`. The xtask
+        // `route-tests` lint enforces every route still has
+        // test coverage and accepts both syntaxes so this
+        // migration doesn't churn the lint itself.
+        .route("/api/items/{id}", get(items::get_item))
+        .route("/api/items/{id}/file/{ino}", get(files::stream_file))
+        .route("/api/items/{id}/cover", get(cover::get_cover))
         // Auth layer (slice C1b). Applied after routes are
         // registered so it wraps each one. Public-path
         // allow-list is enforced inside the middleware itself.
