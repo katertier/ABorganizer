@@ -282,34 +282,10 @@ CREATE TABLE play_progress (
     PRIMARY KEY (user_id, book_id)
 ) STRICT;
 
-CREATE TABLE bookmarks (
-    bookmark_id    INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id        INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-    book_id        INTEGER NOT NULL REFERENCES books(book_id) ON DELETE CASCADE,
-    position_ms    INTEGER NOT NULL,
-    title          TEXT,
-    note           TEXT,
-    created_at     INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-) STRICT;
-CREATE INDEX idx_bookmarks_user_book ON bookmarks(user_id, book_id);
-
--- ── Playlists ──────────────────────────────────────────────────────
-CREATE TABLE playlists (
-    playlist_id    INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id        INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-    name           TEXT NOT NULL,
-    description    TEXT,
-    created_at     INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-    updated_at     INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-) STRICT;
-
-CREATE TABLE playlist_items (
-    playlist_id    INTEGER NOT NULL REFERENCES playlists(playlist_id) ON DELETE CASCADE,
-    book_id        INTEGER NOT NULL REFERENCES books(book_id) ON DELETE CASCADE,
-    position       INTEGER NOT NULL,
-    added_at       INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-    PRIMARY KEY (playlist_id, book_id)
-) STRICT;
+-- bookmarks + play_queue + audiologo_seed_export live in migration
+-- 025 (ADR-0046 player-state tables). The legacy user-scoped
+-- bookmarks + playlists shapes that previously sat here were
+-- replaced before any production data existed.
 
 -- ── AI cache (compressed transcript + dna tags) ────────────────────
 -- BLOB content with `compressed=1` is zstd; otherwise plain UTF-8.
