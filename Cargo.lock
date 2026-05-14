@@ -145,10 +145,12 @@ name = "ab-foundation-models"
 version = "0.1.0"
 dependencies = [
  "ab-core",
+ "futures",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
  "tracing",
 ]
 

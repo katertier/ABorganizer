@@ -73,6 +73,11 @@ clap           = { version = "4.6", features = ["derive", "env", "string"] }
 fd-lock        = "4.0"
 figment        = { version = "0.10", features = ["toml", "env"] }
 futures        = "0.3"
+# Stream adapters over Tokio channels. Used by the
+# foundation-models bridge to expose `complete_stream(...)
+# -> impl Stream` over an mpsc::UnboundedReceiver fed by the
+# Swift FFI streaming callback.
+tokio-stream   = "0.1"
 hex            = "0.4"
 # Pure-Rust audio tag + property reader. Used by the tag-read stage
 # for duration/bitrate/codec probing + ID3/MP4-atom tag extraction.

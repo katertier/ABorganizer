@@ -580,3 +580,150 @@ public func aborg_fm_complete_structured(
         }
     }
 }
+
+// MARK: - Streaming completion (AI-2)
+//
+// Apple's `LanguageModelSession.streamResponse(to:options:)`
+// returns an `AsyncSequence` of incremental snapshot strings.
+// Each yielded value is the FULL response so far (cumulative
+// snapshot), not the delta — so for delta-style chunks we
+// compute the suffix vs. the previous emission. That's the
+// contract the Rust side wants: one `Ok(chunk)` per token-y
+// fragment, then EOS.
+//
+// FFI contract (mirror of `extern fn aborg_fm_complete_stream`
+// in the Rust side):
+//
+//   - **Chunk**: callback fired with `(ptr, len > 0, code = 0)`
+//                for each new fragment.
+//   - **EOS**:   callback fired with `(ptr = nil, len = 0, code = 0)`.
+//   - **Error**: callback fired with `(ptr = nil, len = 0, code != 0)`
+//                — no further callbacks, no EOS.
+//
+// Always exactly one terminal callback (EOS or error). The
+// Rust side reclaims its boxed Sender on whichever terminal
+// arrives.
+
+@_cdecl("aborg_fm_complete_stream")
+public func aborg_fm_complete_stream(
+    _ prompt: UnsafePointer<CChar>?,
+    _ maxTokens: Int,
+    _ temperature: Double,
+    _ useTemperature: Int32,
+    _ ctx: UnsafeMutableRawPointer?,
+    _ callback: @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?, Int, Int32) -> Void
+) {
+    let promptStr = prompt.flatMap { String(validatingCString: $0) } ?? ""
+    let tempOpt: Double? = useTemperature != 0 ? temperature : nil
+    Task.detached {
+        do {
+            if #available(macOS 26.0, *) {
+                try await runCompleteStream(
+                    prompt: promptStr,
+                    maxTokens: maxTokens,
+                    temperature: tempOpt,
+                    onChunk: { chunk in
+                        let data = chunk.data(using: .utf8) ?? Data()
+                        data.withUnsafeBytes { rawBuf in
+                            let base = rawBuf.baseAddress?.assumingMemoryBound(to: CChar.self)
+                            callback(ctx, base, data.count, kFmOk)
+                        }
+                    }
+                )
+            } else {
+                throw AborgFmError.frameworkUnavailable
+            }
+            // EOS terminal.
+            callback(ctx, nil, 0, kFmOk)
+        } catch {
+            logError("aborg_fm_complete_stream", error)
+            callback(ctx, nil, 0, errorCode(for: error))
+        }
+    }
+}
+
+@available(macOS 26.0, *)
+private func runCompleteStream(
+    prompt: String,
+    maxTokens: Int,
+    temperature: Double?,
+    onChunk: (String) -> Void
+) async throws {
+    #if canImport(FoundationModels)
+    let model = SystemLanguageModel.default
+    switch model.availability {
+    case .available:
+        break
+    case .unavailable(let reason):
+        switch reason {
+        case .appleIntelligenceNotEnabled:
+            throw AborgFmError.appleIntelligenceDisabled
+        case .deviceNotEligible:
+            throw AborgFmError.deviceNotEligible
+        case .modelNotReady:
+            throw AborgFmError.modelUnavailable("modelNotReady")
+        @unknown default:
+            throw AborgFmError.modelUnavailable("unknown")
+        }
+    @unknown default:
+        throw AborgFmError.modelUnavailable("availability_unknown")
+    }
+    if prompt.isEmpty {
+        throw AborgFmError.promptEmpty
+    }
+    // Guardrails: same `.default`-only constraint as
+    // `runComplete()`; see the long comment there for the
+    // rationale + the reason we won't take the entro314 hack.
+    let session = LanguageModelSession()
+    let clampedMaxTokens = max(1, maxTokens)
+    let options: GenerationOptions
+    if let t = temperature {
+        options = GenerationOptions(
+            temperature: t,
+            maximumResponseTokens: clampedMaxTokens
+        )
+        debugLog(
+            "runCompleteStream",
+            "max_tokens=\(clampedMaxTokens) temperature=\(t) prompt_len=\(prompt.count)"
+        )
+    } else {
+        options = GenerationOptions(maximumResponseTokens: clampedMaxTokens)
+        debugLog(
+            "runCompleteStream",
+            "max_tokens=\(clampedMaxTokens) temperature=default prompt_len=\(prompt.count)"
+        )
+    }
+    // Apple's `streamResponse` yields cumulative snapshots —
+    // each value is the full response so far. To deliver
+    // *deltas* over the FFI we keep a running `previous` and
+    // emit only the suffix that's new.
+    var previous = ""
+    do {
+        let stream = session.streamResponse(to: prompt, options: options)
+        for try await snapshot in stream {
+            // `snapshot.content` is the cumulative String for
+            // unstructured stream responses on macOS 26+.
+            let full: String = snapshot.content
+            if full.count > previous.count, full.hasPrefix(previous) {
+                let delta = String(full.dropFirst(previous.count))
+                if !delta.isEmpty {
+                    onChunk(delta)
+                }
+                previous = full
+            } else if full != previous {
+                // Non-monotone snapshot (rare; framework resets
+                // mid-stream). Emit the whole snapshot as a
+                // single chunk — the Rust side concatenates.
+                onChunk(full)
+                previous = full
+            }
+        }
+        debugLog("runCompleteStream", "stream_done total_len=\(previous.count)")
+    } catch {
+        throw AborgFmError.generationFailed("\(error)")
+    }
+    #else
+    _ = (prompt, maxTokens, temperature, onChunk)
+    throw AborgFmError.frameworkUnavailable
+    #endif
+}

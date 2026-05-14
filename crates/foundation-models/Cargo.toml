@@ -13,12 +13,16 @@ build        = "build.rs"
 workspace = true
 
 [dependencies]
-ab-core    = { workspace = true }
-serde      = { workspace = true }
-serde_json = { workspace = true }
-thiserror  = { workspace = true }
-tokio      = { workspace = true }
-tracing    = { workspace = true }
+ab-core      = { workspace = true }
+# `Stream` trait + helpers — only consumed by `complete_stream`.
+futures      = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
+tokio        = { workspace = true }
+# UnboundedReceiverStream wrapper for the streaming FFI bridge.
+tokio-stream = { workspace = true }
+tracing      = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
