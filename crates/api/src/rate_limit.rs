@@ -130,12 +130,26 @@ impl RateLimiter {
             tracing::warn!("rate_limit.mutex_poisoned check fail_open");
             return CheckResult::Allowed;
         };
-        let cutoff = now.checked_sub(self.window).unwrap_or(now);
-        while let Some(&front) = q.front() {
-            if front < cutoff {
-                q.pop_front();
-            } else {
-                break;
+        // `Instant::now()` is monotonic but its origin is
+        // implementation-defined; on a freshly-booted CI runner
+        // the value can be smaller than `self.window` (e.g. 50ms
+        // since system start with a 60s window). In that case
+        // `checked_sub` returns None — and "the cutoff is
+        // negative" means logically "nothing has aged out yet,"
+        // so skip the prune entirely.
+        //
+        // The earlier `.unwrap_or(now)` fallback was a bug: it
+        // set the cutoff TO `now`, causing the loop to prune
+        // every entry whose timestamp was < now (i.e., every
+        // entry). That caused `partial_age_out_partially_unlocks`
+        // to flake on macOS CI runners.
+        if let Some(cutoff) = now.checked_sub(self.window) {
+            while let Some(&front) = q.front() {
+                if front < cutoff {
+                    q.pop_front();
+                } else {
+                    break;
+                }
             }
         }
         // Compute the answer in this scope before dropping the
@@ -288,5 +302,36 @@ mod tests {
         // is ~60ms old (within window). Bucket count = 1, below
         // limit of 3.
         assert_eq!(rl.check(), CheckResult::Allowed);
+    }
+
+    /// Regression test for the `Instant::checked_sub` underflow
+    /// bug that flaked CI on macOS runners with recent
+    /// boot-time monotonic clocks.
+    ///
+    /// When `now < window` (the runner just booted, or `Instant`
+    /// origin is recent for any reason), the earlier
+    /// `.unwrap_or(now)` fallback set the prune cutoff TO `now`,
+    /// erroneously pruning every entry. The fix: skip the prune
+    /// when the cutoff can't be computed.
+    ///
+    /// We can't actually force `Instant` to be small (the type
+    /// is opaque). But the BEHAVIOUR we care about — "after
+    /// recording N failures and immediately checking, the
+    /// bucket isn't empty" — IS testable, and is the proxy
+    /// invariant the production code relies on.
+    #[test]
+    fn check_immediately_after_record_does_not_prune() {
+        // Use a 1-hour window so absolutely nothing should age
+        // out between `record_failure` and `check`. If the prune
+        // logic ever again accidentally treats "can't compute
+        // cutoff" as "cutoff = now", this test breaks because
+        // the bucket would empty during the prune.
+        let rl = RateLimiter::new(2, Duration::from_secs(3600));
+        rl.record_failure();
+        rl.record_failure();
+        assert!(
+            matches!(rl.check(), CheckResult::RateLimited { .. }),
+            "fresh failures within a long window must NOT be pruned by check()"
+        );
     }
 }
