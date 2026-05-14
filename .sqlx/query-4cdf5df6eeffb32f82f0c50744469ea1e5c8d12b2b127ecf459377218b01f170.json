@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            DELETE FROM mass_edit_history\n             WHERE edit_id IN (\n               SELECT edit_id FROM (\n                 SELECT edit_id, recorded_at,\n                        row_number() OVER (\n                          PARTITION BY target_kind, target_id, field\n                          ORDER BY recorded_at DESC, edit_id DESC\n                        ) AS rn\n                   FROM mass_edit_history\n               )\n              WHERE (rn = 1 AND recorded_at < ?)\n                 OR (rn > 1 AND recorded_at < ?)\n             )\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "4cdf5df6eeffb32f82f0c50744469ea1e5c8d12b2b127ecf459377218b01f170"
+}

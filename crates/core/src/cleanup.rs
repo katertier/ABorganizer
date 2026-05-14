@@ -209,6 +209,7 @@ mod tests {
                 free_bytes: None,
                 age_days: 7,
             }],
+            ..CleanupTunables::default()
         };
         let age = compute_age_seconds(&t, 500, 1_000);
         assert_eq!(age, 14 * 86_400);
@@ -231,6 +232,7 @@ mod tests {
                     age_days: 3,
                 },
             ],
+            ..CleanupTunables::default()
         };
         // 4% free → both tiers hit (4 < 10, 4 < 5); minimum (3) wins.
         let age = compute_age_seconds(&t, 40, 1_000);
@@ -253,6 +255,7 @@ mod tests {
                 free_bytes: Some(1_000),
                 age_days: 3,
             }],
+            ..CleanupTunables::default()
         };
         let age = compute_age_seconds(&t, 500, 1_000);
         assert_eq!(age, 3 * 86_400);
@@ -266,6 +269,7 @@ mod tests {
             check_secs: 3_600,
             default_age_days: 0,
             pressure: vec![],
+            ..CleanupTunables::default()
         };
         let age = compute_age_seconds(&t, u64::MAX, u64::MAX);
         assert_eq!(age, 86_400);

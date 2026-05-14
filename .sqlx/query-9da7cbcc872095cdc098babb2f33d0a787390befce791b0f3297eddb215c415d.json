@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM mass_edit_history",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "9da7cbcc872095cdc098babb2f33d0a787390befce791b0f3297eddb215c415d"
+}

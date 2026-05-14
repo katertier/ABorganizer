@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT COUNT(*) AS \"n!: i64\"\n          FROM (\n            SELECT recorded_at,\n                   row_number() OVER (\n                     PARTITION BY target_kind, target_id, field\n                     ORDER BY recorded_at DESC, edit_id DESC\n                   ) AS rn\n              FROM mass_edit_history\n          )\n         WHERE (rn = 1 AND recorded_at < ?)\n            OR (rn > 1 AND recorded_at < ?)\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "n!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "070e7218bd6bc1e40b900cc3f86cde265d481c24de8c716f16bf3172e5589354"
+}

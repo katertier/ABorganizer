@@ -319,7 +319,7 @@ async fn main() -> Result<()> {
     // Periodic cleanup loop (H.2.2/H.2.3, ADR-0025). Registry is
     // shared with the API surface so `aborg clean` and the
     // autonomous tick agree on scope.
-    let cleanup = build_cleanup_registry();
+    let cleanup = build_cleanup_registry(&tunables);
     spawn_cleanup_loop(
         &library,
         &ephemeral,
@@ -429,13 +429,23 @@ fn spawn_cleanup_loop(
 }
 
 /// Build the cleanup target registry. Each new target gets a line
-/// here — `Arc::new(NewTarget)` is the entire wire job.
-fn build_cleanup_registry() -> CleanupRegistry {
+/// here — `Arc::new(NewTarget)` is the entire wire job. Tunables
+/// are threaded through so targets with operator-configurable
+/// retention (e.g. `MassEditHistoryRetentionTarget`) read their
+/// thresholds at registry-build time, not at every tick.
+fn build_cleanup_registry(tunables: &Tunables) -> CleanupRegistry {
     let targets: Vec<Arc<dyn CleanupTarget>> = vec![
         // Queue: pairing codes past `expires_at` with no
         // `consumed_token_id`. Consumed rows survive as an audit
         // trail; only the dead-on-arrival pending codes go.
         Arc::new(ab_api::ExpiredPairingCodesTarget),
+        // Db: mass-edit-history retention. 90-day window for the
+        // latest row per (target_kind, target_id, field); 30-day
+        // window for older intermediate rows. Both thresholds
+        // configurable in `tunables.cleanup`.
+        Arc::new(ab_tag_write::MassEditHistoryRetentionTarget::from_tunables(
+            &tunables.cleanup,
+        )),
     ];
     CleanupRegistry::new(targets)
 }

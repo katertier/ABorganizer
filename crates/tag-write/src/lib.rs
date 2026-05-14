@@ -48,9 +48,12 @@
 
 #![allow(missing_docs)] // scaffold-stage
 
+pub mod cleanup;
 pub mod stage;
 pub mod winners;
 pub mod write;
+
+pub use cleanup::MassEditHistoryRetentionTarget;
 
 /// Provenance-source convention for tags written via the web UI's
 /// metadata-edit endpoint (`PATCH /api/v1/books/{id}`).
