@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE books SET deleted_at = NULL WHERE book_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "cbec86c1c6c76a5a0c0d6a0531d2752ca06b96a3849cd8a653f5dba398ca38c8"
+}
