@@ -64,8 +64,8 @@ anyhow         = "1.0"
 argon2         = { version = "0.5", features = ["std"] }
 askama         = "0.12"
 async-trait    = "0.1"
-axum           = { version = "0.7", features = ["macros", "http2", "ws"] }
-axum-server    = { version = "0.7", features = ["tls-rustls"] }
+axum           = { version = "0.8", features = ["macros", "http2", "ws"] }
+axum-server    = { version = "0.8", features = ["tls-rustls"] }
 blake3         = "1.8"
 bytes          = "1.7"
 chrono         = { version = "0.4", default-features = false, features = ["clock", "serde"] }
