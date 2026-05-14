@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT root_id FROM library_roots WHERE root_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "root_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e0ccfe73b7b63f996141a30e41e334776dc62565ceb6141712b736a5104a28c9"
+}

@@ -5,7 +5,7 @@ use std::path::{Path as FsPath, PathBuf};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +20,15 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/version", get(version))
         .route("/library/scan", post(library_scan))
         .route("/library/duplicates", get(library_duplicates))
+        .route(
+            "/library_roots",
+            get(crate::library_roots::library_roots_list)
+                .post(crate::library_roots::library_roots_create),
+        )
+        .route(
+            "/library_roots/{root_id}",
+            delete(crate::library_roots::library_roots_delete),
+        )
         .route(
             "/library/pending_speech_installs",
             get(library_pending_speech_installs),
@@ -278,32 +287,24 @@ struct ScanResponse {
 }
 
 /// Canonicalise + verify the requested scan path is at-or-under
-/// one of the configured `security.library_roots`. Returns the
+/// one of the active rows in `library_roots`. Returns the
 /// canonical path on success, [`ApiError::BadRequest`] on any
 /// rejection (empty root list, nonexistent path, path outside
 /// the allow-list).
 ///
-/// Surfaced as a free function (not a method) so the
-/// `library_scan` handler stays under the
-/// `clippy::too_many_lines` cap. The cross-model code review
-/// (REVIEW.md § 1.2 / § 3.1, MYREVIEW.md § 3.1) called this
-/// gate out as missing — before this slice the handler walked
-/// whatever path the caller sent.
+/// **Source-of-truth migration (backlog item 3)**: this gate
+/// used to walk the `tunables.security.library_roots` Vec at
+/// every request. The roots now live in the `library_roots`
+/// table (DB-backed, managed via `GET/POST/DELETE
+/// /api/v1/library_roots`). The tunable still exists as a
+/// one-cycle bridge — `aborg-daemon::main` seeds the table from
+/// it on first boot when the table is empty. Operators that
+/// have already registered roots via POST no longer need the
+/// tunable.
 ///
-/// Each root is canonicalised at check time (not at boot) so
-/// operators can fix typos in config without a restart, and so
-/// symlinks that change resolution at runtime are caught.
-fn validate_scan_path(state: &ApiState, requested: &FsPath) -> Result<PathBuf, ApiError> {
-    let allowed = &state.inner.security.library_roots;
-    if allowed.is_empty() {
-        tracing::warn!(
-            requested = %requested.display(),
-            "api.library_scan.reject_no_roots_configured"
-        );
-        return Err(ApiError::BadRequest(
-            "scan disabled: no `security.library_roots` configured".to_owned(),
-        ));
-    }
+/// Surfaced as a free function so the `library_scan` handler
+/// stays under the `clippy::too_many_lines` cap.
+async fn validate_scan_path(state: &ApiState, requested: &FsPath) -> Result<PathBuf, ApiError> {
     let canonical = std::fs::canonicalize(requested).map_err(|e| {
         tracing::info!(
             requested = %requested.display(),
@@ -312,18 +313,33 @@ fn validate_scan_path(state: &ApiState, requested: &FsPath) -> Result<PathBuf, A
         );
         ApiError::BadRequest(format!("path does not exist or is not readable: {e}"))
     })?;
-    let allowed_match = allowed.iter().any(|root| {
-        std::fs::canonicalize(root)
-            .ok()
-            .is_some_and(|r| canonical.starts_with(&r))
-    });
-    if !allowed_match {
+    let under = crate::library_roots::path_is_under_any_root(state, &canonical).await?;
+    if !under {
+        // Distinguish "no roots at all" from "outside the list"
+        // so the operator's diagnostic is precise. Cheap extra
+        // query — happens only on the reject path.
+        let roots_exist: i64 = sqlx::query_scalar!(
+            "SELECT COUNT(*) AS \"n!: i64\" FROM library_roots WHERE is_active = 1",
+        )
+        .fetch_one(state.inner.library.pool())
+        .await
+        .map_err(|e| ab_core::Error::Database(format!("library_scan roots-count check: {e}")))?;
+        if roots_exist == 0 {
+            tracing::warn!(
+                requested = %canonical.display(),
+                "api.library_scan.reject_no_roots_configured"
+            );
+            return Err(ApiError::BadRequest(
+                "scan disabled: no library_roots registered (POST /api/v1/library_roots)"
+                    .to_owned(),
+            ));
+        }
         tracing::warn!(
             requested = %canonical.display(),
             "api.library_scan.reject_outside_roots"
         );
         return Err(ApiError::BadRequest(format!(
-            "path {} is not under any configured library root",
+            "path {} is not under any registered library root",
             canonical.display(),
         )));
     }
@@ -334,7 +350,7 @@ async fn library_scan(
     State(state): State<ApiState>,
     Json(req): Json<ScanRequest>,
 ) -> Result<Json<ScanResponse>, ApiError> {
-    let requested = validate_scan_path(&state, &req.path)?;
+    let requested = validate_scan_path(&state, &req.path).await?;
     let report = ab_scan::scan(&requested, &state.inner.library).await?;
 
     // Submit each newly-discovered book to the scheduler for

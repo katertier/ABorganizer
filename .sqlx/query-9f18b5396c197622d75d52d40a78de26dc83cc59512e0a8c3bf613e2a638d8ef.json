@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE library_roots\n                SET is_active = 1,\n                    label = ?\n              WHERE root_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "9f18b5396c197622d75d52d40a78de26dc83cc59512e0a8c3bf613e2a638d8ef"
+}

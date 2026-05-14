@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT root_id AS \"root_id!: i64\",\n                  path    AS \"path!: String\",\n                  label   AS \"label?: String\",\n                  created_at AS \"created_at!: i64\"\n             FROM library_roots\n            WHERE is_active = 1\n            ORDER BY created_at ASC, root_id ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "root_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "path!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "label?: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at!: i64",
+        "ordinal": 3,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "9c5fdf4fd03d5157f0ff900c70f44765983c452f6e22d1cb44e9d45aacf2e44e"
+}
