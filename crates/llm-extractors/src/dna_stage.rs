@@ -59,7 +59,7 @@ use ab_core::{BookId, CacheKey, Error, Result, TagKind};
 use ab_db::LibraryDb;
 use ab_pipeline::{Stage, StageContext, StageId, StageOutcome};
 
-use ab_foundation_models::{BridgeError, complete_structured};
+use ab_foundation_models::{BridgeError, GenerationOptions, complete_structured};
 
 /// Typed identifier for this stage.
 pub const STAGE_ID: StageId = StageId::new("extract-dna-tags");
@@ -145,9 +145,13 @@ impl Stage for ExtractDnaTagsStage {
             self.tunables.dna_max_tags,
             self.tunables.dna_max_spoiler_tags,
         );
-        let raw = match complete_structured(&prompt, DNA_SCHEMA_JSON, self.tunables.dna_max_tokens)
-            .await
-        {
+        // DNA-tag extraction is deterministic-by-design: same input
+        // → same tag set. temperature=0.0 picks the highest-prob
+        // token at every step (greedy) so the output is
+        // reproducible across runs, which matters for the consensus
+        // stage's "did two passes agree?" check.
+        let opts = GenerationOptions::with_temperature(self.tunables.dna_max_tokens, 0.0);
+        let raw = match complete_structured(&prompt, DNA_SCHEMA_JSON, &opts).await {
             Ok(s) => s,
             Err(BridgeError::PromptEmpty) => {
                 // Should be impossible given the sanity floor

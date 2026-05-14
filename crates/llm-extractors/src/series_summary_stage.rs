@@ -60,7 +60,7 @@ use ab_core::{BookId, Error, Result};
 use ab_db::LibraryDb;
 use ab_pipeline::{Stage, StageContext, StageId, StageOutcome};
 
-use ab_foundation_models::{BridgeError, complete_structured};
+use ab_foundation_models::{BridgeError, GenerationOptions, complete_structured};
 
 /// Typed identifier for this stage.
 pub const STAGE_ID: StageId = StageId::new("extract-summary-spoiler-free-series");
@@ -179,13 +179,8 @@ async fn regenerate_series_summary(
         tunables.summary_target_words_low,
         tunables.summary_target_words_high,
     );
-    let raw = match complete_structured(
-        &prompt,
-        SERIES_SUMMARY_SCHEMA_JSON,
-        tunables.summary_max_tokens,
-    )
-    .await
-    {
+    let opts = GenerationOptions::new(tunables.summary_max_tokens);
+    let raw = match complete_structured(&prompt, SERIES_SUMMARY_SCHEMA_JSON, &opts).await {
         Ok(s) => s,
         Err(BridgeError::PromptEmpty) => return Ok(RegenOutcome::Skipped),
         Err(e) => return Err(bridge_to_stage_error(&e)),
