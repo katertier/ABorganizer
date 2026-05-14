@@ -203,6 +203,15 @@ pub async fn audiologos_approve(
             method: &r.method,
             audiologo_id: r.audiologo_id,
             confidence: r.confidence,
+            // ADR-0024 Rev 3: detector-side flags default to false
+            // ("always pad") until slice 4B.x.3 flips them based on
+            // waveform analysis. Approve path uses the conservative
+            // default; future slice will read the detector-set
+            // flags from the candidate row.
+            head_silence_ms: 500,
+            tail_silence_ms: 1500,
+            head_lands_in_silence: false,
+            tail_lands_in_silence: false,
         },
     )
     .await?;

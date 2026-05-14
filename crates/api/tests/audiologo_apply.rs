@@ -177,6 +177,10 @@ async fn single_file_intro_shifts_chapters_correctly() {
             method: "manual",
             audiologo_id: None,
             confidence: 1.0,
+            head_silence_ms: 500,
+            tail_silence_ms: 1500,
+            head_lands_in_silence: false,
+            tail_lands_in_silence: false,
         },
     )
     .await
@@ -243,6 +247,10 @@ async fn outro_shift_in_multi_file_book_uses_correct_cumulative_offset() {
             method: "manual",
             audiologo_id: None,
             confidence: 1.0,
+            head_silence_ms: 500,
+            tail_silence_ms: 1500,
+            head_lands_in_silence: false,
+            tail_lands_in_silence: false,
         },
     )
     .await
@@ -310,6 +318,10 @@ async fn sequential_cuts_on_different_files_account_for_prior_shifts() {
             method: "manual",
             audiologo_id: None,
             confidence: 1.0,
+            head_silence_ms: 500,
+            tail_silence_ms: 1500,
+            head_lands_in_silence: false,
+            tail_lands_in_silence: false,
         },
     )
     .await
@@ -367,6 +379,10 @@ async fn sequential_cuts_on_different_files_account_for_prior_shifts() {
             method: "manual",
             audiologo_id: None,
             confidence: 1.0,
+            head_silence_ms: 500,
+            tail_silence_ms: 1500,
+            head_lands_in_silence: false,
+            tail_lands_in_silence: false,
         },
     )
     .await
@@ -420,6 +436,10 @@ async fn chapter_entirely_before_the_trim_is_untouched() {
             method: "manual",
             audiologo_id: None,
             confidence: 1.0,
+            head_silence_ms: 500,
+            tail_silence_ms: 1500,
+            head_lands_in_silence: false,
+            tail_lands_in_silence: false,
         },
     )
     .await
@@ -465,6 +485,10 @@ async fn padding_clamps_cut_amount() {
             method: "manual",
             audiologo_id: None,
             confidence: 1.0,
+            head_silence_ms: 500,
+            tail_silence_ms: 1500,
+            head_lands_in_silence: false,
+            tail_lands_in_silence: false,
         },
     )
     .await
@@ -514,6 +538,10 @@ async fn status_recompute_demotes_applied_to_detected_when_row_resets() {
             method: "manual",
             audiologo_id: None,
             confidence: 1.0,
+            head_silence_ms: 500,
+            tail_silence_ms: 1500,
+            head_lands_in_silence: false,
+            tail_lands_in_silence: false,
         },
     )
     .await
@@ -601,4 +629,103 @@ async fn status_recompute_returns_to_unknown_when_no_rows() {
         status, "unknown",
         "'applied' without rows is inconsistent — recompute collapses to 'unknown'"
     );
+}
+
+#[tokio::test]
+async fn lands_in_silence_flags_persist_to_row() {
+    // ADR-0024 Revision 3: `head_lands_in_silence` /
+    // `tail_lands_in_silence` are populated by the detector
+    // (slice 4B.x.3) and consumed by the audio-cut path (slice
+    // 4B.x.2). This slice (4B.x.1) lands only the shape +
+    // persistence — verify the bools round-trip from
+    // `ApplyCutParams` to `book_file_audiologos` via migration
+    // 023's new columns.
+    let (lib, _tmp) = fresh_db().await;
+    let (book_id, files) = fixture_book(&lib, "silence-flags", 1, 60_000).await;
+    fixture_chapters(&lib, book_id, &[(0, 60_000, "ch0")]).await;
+
+    apply_audiologo_cut(
+        lib.pool(),
+        ApplyCutParams {
+            book_id,
+            file_id: files[0],
+            kind: "intro",
+            jingle_start_ms: 5_000,
+            jingle_end_ms: 7_500,
+            padding_ms: Some(0),
+            method: "manual",
+            audiologo_id: None,
+            confidence: 1.0,
+            head_silence_ms: 500,
+            tail_silence_ms: 1500,
+            // Deliberately split the two flags so the test
+            // catches column-swap bugs in the INSERT bind order.
+            head_lands_in_silence: true,
+            tail_lands_in_silence: false,
+        },
+    )
+    .await
+    .expect("apply succeeds");
+
+    let row = sqlx::query!(
+        r#"SELECT head_lands_in_silence AS "head!: i64",
+                  tail_lands_in_silence AS "tail!: i64"
+           FROM book_file_audiologos
+           WHERE file_id = ? AND kind = 'intro' AND status = 'applied'"#,
+        files[0],
+    )
+    .fetch_one(lib.pool())
+    .await
+    .expect("fetch applied row");
+
+    assert_eq!(row.head, 1, "head_lands_in_silence=true → column = 1");
+    assert_eq!(row.tail, 0, "tail_lands_in_silence=false → column = 0");
+}
+
+#[tokio::test]
+async fn lands_in_silence_flags_default_to_false_for_legacy_callers() {
+    // Sanity: a caller that uses the conservative defaults
+    // (both flags false = "always pad") gets the expected
+    // column values. This is what every existing call site in
+    // the workspace ships today; the slice 4B.x.2 / 4B.x.3
+    // detector + cut path will flip them per row when the
+    // analysis warrants.
+    let (lib, _tmp) = fresh_db().await;
+    let (book_id, files) = fixture_book(&lib, "silence-default", 1, 60_000).await;
+    fixture_chapters(&lib, book_id, &[(0, 60_000, "ch0")]).await;
+
+    apply_audiologo_cut(
+        lib.pool(),
+        ApplyCutParams {
+            book_id,
+            file_id: files[0],
+            kind: "intro",
+            jingle_start_ms: 5_000,
+            jingle_end_ms: 7_500,
+            padding_ms: Some(0),
+            method: "manual",
+            audiologo_id: None,
+            confidence: 1.0,
+            head_silence_ms: 500,
+            tail_silence_ms: 1500,
+            head_lands_in_silence: false,
+            tail_lands_in_silence: false,
+        },
+    )
+    .await
+    .expect("apply succeeds");
+
+    let row = sqlx::query!(
+        r#"SELECT head_lands_in_silence AS "head!: i64",
+                  tail_lands_in_silence AS "tail!: i64"
+           FROM book_file_audiologos
+           WHERE file_id = ? AND kind = 'intro' AND status = 'applied'"#,
+        files[0],
+    )
+    .fetch_one(lib.pool())
+    .await
+    .expect("fetch applied row");
+
+    assert_eq!(row.head, 0, "head=false → 0 (conservative default)");
+    assert_eq!(row.tail, 0, "tail=false → 0 (conservative default)");
 }
