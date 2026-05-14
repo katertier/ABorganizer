@@ -3,8 +3,8 @@
 //! Two SQLite databases:
 //!
 //! * **`library.db`** — canonical, persistent, user-owned (books,
-//!   authors, narrators, series, audiologo fingerprints, playlists,
-//!   sessions, provenance audit trail).
+//!   authors, narrators, series, audiologo fingerprints, bookmarks,
+//!   play queue, sessions, provenance audit trail).
 //! * **`ephemeral.db`** — restartable, throwable on crash (job queue,
 //!   pipeline progress, rate-limit state, metrics).
 //!
