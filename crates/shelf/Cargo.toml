@@ -15,6 +15,11 @@ workspace = true
 ab-core     = { workspace = true }
 ab-db       = { workspace = true }
 axum        = { workspace = true }
+# Cover-art read path (slice C3c). Same crate the tag-read +
+# tag-write stages use; needed here to pull the embedded
+# `Picture` out of the file for the cover endpoint. Leaf dep
+# only — no transitive pipeline / api drag.
+lofty       = { workspace = true }
 # MIME-type lookup for file-streaming Content-Type. Maps `.m4b`
 # → audio/mp4 etc. Standard small crate.
 mime_guess  = { workspace = true }
