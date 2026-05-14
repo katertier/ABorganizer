@@ -42,11 +42,11 @@ FROM book_file_refs;
 DROP TABLE book_file_refs;
 ALTER TABLE book_file_refs_new RENAME TO book_file_refs;
 
--- Recreate the partial indexes from migration 018. The
--- acquired_at index is retained for the future `aborg doctor`
--- staleness check; if a follow-up review judges it YAGNI it
--- gets its own migration.
+-- Recreate the live-ref partial index from migration 018. The
+-- acquired_at index was YAGNI — no production query reads by
+-- acquired_at; both live_ref_count() and post-transcode-sources
+-- filter by file_id (covered by idx_book_file_refs_live). If
+-- `aborg doctor` later adds a staleness check by acquired_at,
+-- it can add the index in its own migration.
 CREATE INDEX idx_book_file_refs_live
     ON book_file_refs(file_id) WHERE released_at IS NULL;
-CREATE INDEX idx_book_file_refs_acquired_at
-    ON book_file_refs(acquired_at) WHERE released_at IS NULL;
