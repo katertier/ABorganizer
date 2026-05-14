@@ -390,6 +390,37 @@ enum BookAction {
         #[arg(long, value_name = "true|false")]
         explicit: Option<bool>,
     },
+    /// Hard-delete a book from the library DB.
+    ///
+    /// Per ADR-0029's two-tier rule for irreversible operations:
+    /// `--commit` is the verb-shaped opt-in to mutate; `--force`
+    /// is the second-tier explicit acknowledgement that this is
+    /// the unrecoverable variant. Both flags are required.
+    ///
+    /// Cascade-deletes every per-book FK row
+    /// (`book_field_provenance`, `book_files`, `chapters`, …).
+    /// `mass_edit_history` audit rows survive with orphaned
+    /// `target_id`. On-disk files in `book_files.file_path` are
+    /// NOT removed by this command — reclaim disk space
+    /// separately via `rm` (or a future cleanup target).
+    ///
+    /// v1 ONLY supports the hard-delete path. Soft-delete (the
+    /// future default per API.md) ships when its schema +
+    /// every-read-query filter lands.
+    Delete {
+        /// Book ID — matches `books.book_id`.
+        book_id: i64,
+        /// Required by ADR-0029. Without `--commit` the CLI
+        /// refuses up front rather than round-trip and let the
+        /// daemon reject — same dry-run-default safety net the
+        /// rest of `aborg` follows.
+        #[arg(long)]
+        commit: bool,
+        /// Required by ADR-0029 § "second tier" for irreversible
+        /// operations. Maps to the daemon's `?force=true`.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -483,6 +514,13 @@ async fn main() -> Result<()> {
                     cli.output,
                 )
                 .await?;
+            }
+            BookAction::Delete {
+                book_id,
+                commit,
+                force,
+            } => {
+                book_delete(&cli.daemon, book_id, commit, force, cli.output).await?;
             }
         },
         Command::Daemon { action: _ } => {
@@ -1066,6 +1104,62 @@ async fn book_patch(
                     "book.patched"
                 );
             }
+        }
+    }
+    Ok(())
+}
+
+// ── `aborg book delete <id> --commit --force` ────────────────────
+
+/// `aborg book delete <book_id> --commit --force` — hard delete
+/// over `DELETE /api/v1/books/{book_id}?force=true`.
+///
+/// Per ADR-0029 § "second tier", BOTH `--commit` AND `--force`
+/// are required client-side. Refusing here avoids a round-trip
+/// and matches the dry-run-default safety net the rest of
+/// `aborg` follows.
+async fn book_delete(
+    daemon: &str,
+    book_id: i64,
+    commit: bool,
+    force: bool,
+    output: OutputFormat,
+) -> Result<()> {
+    if !commit {
+        anyhow::bail!("refusing to delete without --commit (per ADR-0029 dry-run-default)");
+    }
+    if !force {
+        anyhow::bail!(
+            "refusing to delete without --force (per ADR-0029 second-tier irreversible-ops rule). \
+             `aborg book delete <id> --commit --force` is the full incantation."
+        );
+    }
+    let url = format!("{daemon}/api/v1/books/{book_id}?force=true");
+    let resp = client()
+        .delete(&url)
+        .send()
+        .await
+        .with_context(|| format!("DELETE {url}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("book delete failed: HTTP {status}: {body}");
+    }
+    match output {
+        OutputFormat::Json => {
+            // 204 NoContent — emit a structured success body so
+            // operators have something to pipe.
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "book_id": book_id,
+                    "deleted": true,
+                }))
+                .unwrap_or_default()
+            );
+        }
+        OutputFormat::Human => {
+            tracing::info!(book_id, "book.deleted");
         }
     }
     Ok(())
