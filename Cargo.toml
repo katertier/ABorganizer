@@ -19,6 +19,7 @@ members = [
     "crates/webui-player",
     "crates/seed",
     "crates/scan",
+    "crates/query",
     "crates/tag-read",
     "crates/tag-write",
     "bins/aborg",
@@ -153,6 +154,7 @@ ab-webui-config = { path = "crates/webui-config" }
 ab-webui-player = { path = "crates/webui-player" }
 ab-seed        = { path = "crates/seed" }
 ab-scan        = { path = "crates/scan" }
+ab-query       = { path = "crates/query" }
 ab-tag-read    = { path = "crates/tag-read" }
 ab-tag-write   = { path = "crates/tag-write" }
 
