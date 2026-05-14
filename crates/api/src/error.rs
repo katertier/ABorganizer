@@ -1,7 +1,7 @@
 //! Typed API errors that render to RFC 7807 Problem Details responses.
 
 use axum::Json;
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
@@ -41,6 +41,17 @@ pub enum ApiError {
     /// caller resolves by issuing a reject / re-detect first.
     #[error("conflict: {0}")]
     Conflict(String),
+    /// Caller exceeded the rate budget for an endpoint. Carries
+    /// the `Retry-After` value the response should advertise
+    /// (always ≥ 1 second). Today only emitted by
+    /// `POST /pairing/consume` via
+    /// [`crate::rate_limit::RateLimiter`].
+    #[error("too many requests: retry after {retry_after_secs}s")]
+    RateLimited {
+        /// Seconds the client should wait before retrying.
+        /// Lands as the `Retry-After` HTTP header.
+        retry_after_secs: u64,
+    },
     /// Underlying core error.
     #[error("internal: {0}")]
     Internal(#[from] ab_core::Error),
@@ -94,6 +105,26 @@ impl IntoResponse for ApiError {
                     detail: self.to_string(),
                 },
             ),
+            Self::RateLimited { retry_after_secs } => {
+                // 429 with Retry-After header is the wire-format
+                // standard. Branch separately because we need to
+                // mount the header on the response; every other
+                // variant only sets a status + body.
+                let problem = Problem {
+                    kind: "about:blank#rate-limited",
+                    title: "Too Many Requests",
+                    status: 429,
+                    detail: self.to_string(),
+                };
+                let mut resp = (StatusCode::TOO_MANY_REQUESTS, Json(problem)).into_response();
+                // `Retry-After: <seconds>` — RFC 9110 § 10.2.3.
+                // HeaderValue::from is infallible for u64 via the
+                // i64 / u64 numeric conversion impls; *retry_after_secs
+                // is bounded ≤ window length so it fits in any reasonable HeaderValue.
+                resp.headers_mut()
+                    .insert(header::RETRY_AFTER, HeaderValue::from(*retry_after_secs));
+                return resp;
+            }
             Self::Internal(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Problem {

@@ -26,10 +26,14 @@
 //! It's how a new device gets its FIRST bearer token. Putting it
 //! behind auth would defeat the whole point. Defense-in-depth:
 //!
-//! - **Rate-limit eventually** (TODO follow-up slice) — for now
-//!   pairing codes expire in ≤10 min and the consume path is
-//!   gated by argon2id (~50ms per verify), so a brute-force
-//!   attack on an 8-char alphanumeric code takes ~15 GPU-years.
+//! - **Rate-limit** ([`crate::rate_limit::RateLimiter`]) — 30
+//!   failed attempts per 60-second rolling window before the
+//!   handler returns 429 `Too Many Requests` with
+//!   `Retry-After` set. Check fires BEFORE argon2id verify so a
+//!   flood can't soak daemon CPU.
+//! - **argon2id verify** — ~50ms per attempt, so even within
+//!   the rate budget, brute-forcing an 8-char alphanumeric code
+//!   takes ~15 GPU-years against the 36-bit code space.
 //! - **Single-use** — `consumed_token_id` flips on success, so
 //!   even if the same code somehow leaked the second consume
 //!   call returns 404.
@@ -317,9 +321,25 @@ pub async fn pairing_codes_revoke(
 ///
 /// Returns the raw bearer **exactly once**.
 ///
+/// # Rate limiting
+///
+/// Gated by [`crate::rate_limit::RateLimiter`] (default 30
+/// failed attempts per 60s rolling window). When the budget is
+/// exhausted the handler returns [`ApiError::RateLimited`] with
+/// a `Retry-After` header — argon2id verify is NOT attempted,
+/// so the daemon's CPU stays free even under a flood.
+///
+/// Only FAILED consume attempts count toward the budget;
+/// successful pairings don't increment. The check happens
+/// before any DB query so a 429 response is cheap.
+///
 /// # Errors
 ///
 /// - [`ApiError::BadRequest`] — code is empty / malformed.
+/// - [`ApiError::RateLimited`] — too many recent failures from
+///   anywhere on the network. Same response for all sources
+///   (single global counter, see `rate_limit.rs` module doc on
+///   "Why global, not per-IP").
 /// - [`ApiError::NotFound`] — no active pairing code matched
 ///   the presented value (wrong code, expired, already
 ///   consumed, or revoked). Same response shape for all four
@@ -328,6 +348,17 @@ pub async fn pairing_consume(
     State(state): State<ApiState>,
     Json(req): Json<ConsumePairingCodeRequest>,
 ) -> Result<(StatusCode, Json<ConsumePairingCodeResponse>), ApiError> {
+    // Rate-limit FIRST so a flood doesn't soak the daemon on
+    // argon2id verifies. The check is cheap (mutex + VecDeque
+    // pop_front of stale entries); recording happens only on
+    // the failure path below.
+    if let crate::rate_limit::CheckResult::RateLimited { retry_after_secs } =
+        state.inner.pairing_consume_limiter.check()
+    {
+        tracing::warn!(retry_after_secs, "api.pairing.consume_rate_limited");
+        return Err(ApiError::RateLimited { retry_after_secs });
+    }
+
     let presented = req.code.trim().to_ascii_uppercase();
     if presented.is_empty() {
         return Err(ApiError::BadRequest("code must not be empty".to_owned()));
@@ -378,6 +409,11 @@ pub async fn pairing_consume(
         }
     }
     let Some(hit) = matched else {
+        // Failed attempt — record into the rate-limiter's
+        // rolling-window bucket. The check at the top of this
+        // handler will see it next time. Only NoMatch counts
+        // (successful pairings explicitly don't increment).
+        state.inner.pairing_consume_limiter.record_failure();
         // Same shape for every "no good match" sub-case so an
         // attacker can't distinguish "wrong code" from "expired"
         // from "already consumed."
@@ -507,7 +543,7 @@ fn unix_now_secs() -> i64 {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
     use ab_core::tunables::{DbTunables, SchedulerTunables, SecurityTunables};
@@ -833,6 +869,83 @@ mod tests {
         assert!(
             matches!(r, Err(ApiError::Conflict(_))),
             "consumed code → 409 conflict; revoke the token instead"
+        );
+    }
+
+    /// Repeatedly hammering the consume endpoint with wrong
+    /// codes should eventually trip the rate-limiter and return
+    /// `RateLimited` instead of `NotFound`. The default budget
+    /// is 30 failures / 60s — we hammer 32 times and check the
+    /// 31st response (1-indexed) flips to `RateLimited`.
+    #[tokio::test]
+    async fn consume_rate_limit_kicks_in_after_threshold() {
+        let (state, _tmp) = fresh_state().await;
+
+        // First 30 attempts: each should fail with NotFound (no
+        // pairing codes exist), each records a failure.
+        for i in 1..=30 {
+            let r = pairing_consume(
+                State(state.clone()),
+                Json(ConsumePairingCodeRequest {
+                    code: "WRON-GONE".to_owned(),
+                    device_label: None,
+                }),
+            )
+            .await;
+            assert!(
+                matches!(r, Err(ApiError::NotFound(_))),
+                "attempt {i}: expected NotFound, got {r:?}"
+            );
+        }
+
+        // 31st attempt: bucket is full → RateLimited.
+        let r = pairing_consume(
+            State(state.clone()),
+            Json(ConsumePairingCodeRequest {
+                code: "WRON-GONE".to_owned(),
+                device_label: None,
+            }),
+        )
+        .await;
+        match r {
+            Err(ApiError::RateLimited { retry_after_secs }) => {
+                assert!(
+                    retry_after_secs >= 1,
+                    "Retry-After must be ≥ 1, got {retry_after_secs}"
+                );
+            }
+            other => panic!("31st attempt should return RateLimited, got {other:?}"),
+        }
+    }
+
+    /// The rate-limiter check fires BEFORE bad-request
+    /// validation, so even an empty-code request gets 429 when
+    /// the bucket is full. This matches the doc contract:
+    /// "argon2id verify is NOT attempted" implies "no
+    /// per-request work happens at all once locked out."
+    #[tokio::test]
+    async fn rate_limit_short_circuits_empty_code() {
+        let (state, _tmp) = fresh_state().await;
+
+        // Pre-fill the bucket to the limit via the limiter
+        // directly — faster than 30 handler calls.
+        for _ in 0..30 {
+            state.inner.pairing_consume_limiter.record_failure();
+        }
+
+        // Even with an empty code (which would normally return
+        // BadRequest), the rate-limiter fires first.
+        let r = pairing_consume(
+            State(state),
+            Json(ConsumePairingCodeRequest {
+                code: String::new(),
+                device_label: None,
+            }),
+        )
+        .await;
+        assert!(
+            matches!(r, Err(ApiError::RateLimited { .. })),
+            "rate-limit must short-circuit before BadRequest validation, got {r:?}"
         );
     }
 }
