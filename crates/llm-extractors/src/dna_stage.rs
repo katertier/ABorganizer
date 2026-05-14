@@ -248,9 +248,12 @@ async fn load_full_transcript(
     let Some(locale) = row.locale else {
         return Ok(None);
     };
-    let cached: CachedTranscript = match serde_json::from_slice(&bytes) {
+    let cached: CachedTranscript = match ab_core::cache::deserialize_cache_content(&bytes) {
         Ok(c) => c,
         Err(e) => {
+            // B.2a: covers both JSON-parse failures and oversized
+            // payloads beyond `MAX_CACHE_BYTES`. Either way fall
+            // back to "no cache" — the upstream stage re-runs.
             tracing::warn!(book_id = id, error = %e, "fm.dna.transcript_unparseable");
             return Ok(None);
         }
