@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO library_roots (path, label, created_at)\n         VALUES (?, ?, ?)\n         RETURNING root_id AS \"root_id!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "root_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6f135898021405d85800612b6247a8a4ae913820d2f796fcbd4583a6d6405d02"
+}

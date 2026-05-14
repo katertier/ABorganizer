@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT path AS \"path!: String\"\n             FROM library_roots\n            WHERE is_active = 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "path!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1700297e5c8b7345f047ea99ae93c9d0bf0eb82b72bed820281885c734733dbe"
+}

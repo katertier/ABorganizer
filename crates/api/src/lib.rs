@@ -23,6 +23,7 @@ pub mod audiologo_review;
 pub mod auth;
 pub mod cleanup_targets;
 pub mod error;
+pub mod library_roots;
 pub mod names;
 pub mod reports;
 pub mod router;
