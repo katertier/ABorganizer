@@ -57,6 +57,11 @@ homepage     = "https://github.com/katertier/ABorganizer"
 # here once, applies everywhere. Sorted alphabetically.
 [workspace.dependencies]
 anyhow         = "1.0"
+# argon2id PHF for low-entropy secrets (pairing codes, future
+# user passwords). Defaults to the `password-hash` PHC-string
+# format which embeds salt + params in the encoded output —
+# we don't store params separately.
+argon2         = { version = "0.5", features = ["std"] }
 askama         = "0.12"
 async-trait    = "0.1"
 axum           = { version = "0.7", features = ["macros", "http2", "ws"] }
