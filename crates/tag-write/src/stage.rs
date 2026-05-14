@@ -1,28 +1,35 @@
-//! `tag-write-early` (lofty-backed body) + `tag-write-final`
-//! (still scaffolding) Stage impls (ADR-0028).
+//! `tag-write-early` + `tag-write-final` Stage impls (ADR-0028).
 //!
-//! Slice scope notes:
+//! Both stages share the per-book write pattern: load winners
+//! from `book_field_provenance`, derive a per-run `batch_id`,
+//! fetch the cover-art bytes once when a `CoverUrl` winner is
+//! present, then loop over every active `book_files` row
+//! calling [`crate::write::write_winners`] under a
+//! `book_file_refs` lifecycle guard (ADR-0027). Per-field
+//! before/after pairs flow into `mass_edit_history`.
 //!
-//! - **`TagWriteEarlyStage::run`** ships its real body in this
-//!   slice. It pulls winners via [`crate::winners`], filters
-//!   away the no-op "everything came from the tag file" case
-//!   (ADR-0028 § "Skips"), and writes the supported fields back
-//!   to every active `book_files` row for the book via
-//!   [`crate::write::write_winners`]. Each per-file pass
-//!   acquires + releases a `book_file_refs` row so the future
-//!   `transcode-m4b` cleanup target never reaps a source the
-//!   stage is mid-write on (ADR-0027 lifecycle).
-//! - **`TagWriteFinalStage::run`** still returns `Skipped`. The
-//!   final pass needs the AI-extractor surface (`extract-summary-
-//!   spoiler-free`, `extract-story-arc`, `extract-characters`,
-//!   `extract-setting`) to actually produce non-`tag_file`
-//!   winners; until those land at the `StageId` level the
-//!   late pass would just rewrite what Early already wrote.
+//! The stages differ in two ways:
 //!
-//! Neither stage is registered in `aborg-daemon` yet — turning
-//! on Early means every existing book gets re-tagged on the next
-//! pipeline pass, which is a deliberate operator opt-in. The
-//! daemon-wiring flip is its own slice.
+//! - **When they run.** Early sits right after `tag-read` +
+//!   `identity-resolve` + `extract-dna-tags`; Final sits after
+//!   every AI extractor (`extract-summary-spoiler-free`,
+//!   `extract-story-arc`, `extract-characters`, `extract-setting`,
+//!   `extract-summary-spoiler-free-series`) plus `consensus` and
+//!   `transcode-m4b`. The `requires()` lists encode the
+//!   ordering.
+//! - **What they filter.** Early writes every available winner.
+//!   Final additionally strips `source = 'user_edit'` winners
+//!   (ADR-0028 § "Skips per-field on user-edit") so a user
+//!   correction made between import and AI completion stays
+//!   sticky.
+//!
+//! Both are gated behind separate `PipelineTunables` switches —
+//! `tag_write_early_enabled` + `tag_write_final_enabled` — and
+//! both default `false`. Flipping either on re-tags every book
+//! whose winners differ from on-disk; that's a deliberate
+//! operator decision, not a fresh-checkout default. Daemon
+//! wiring lives in `bins/aborg-daemon/src/main.rs` §
+//! `build_pipeline_stages`.
 
 use async_trait::async_trait;
 
@@ -58,9 +65,27 @@ const TAG_WRITE_EARLY_REQUIRES: &[StageId] = &[StageId::new("tag-read")];
 ///
 /// Per ADR-0028 § "`TagWriteFinal` `requires()`": every AI extractor
 /// that can produce a `book_field_provenance` row, plus
-/// `transcode-m4b` when present. Today only `tag-read` exists as
-/// a referenceable `StageId`; the rest land slice-by-slice.
-const TAG_WRITE_FINAL_REQUIRES: &[StageId] = &[StageId::new("tag-read")];
+/// `transcode-m4b` so the late write lands on the post-transcode
+/// canonical file rather than the soon-to-be-deleted source. All
+/// listed stages are unconditionally registered by the daemon
+/// (`bins/aborg-daemon/src/main.rs` § `build_pipeline_stages`); the
+/// `Dag::build` topological-sort step verifies presence at boot.
+///
+/// Stage names are bare strings rather than imported typed
+/// constants to avoid pulling `ab-llm-extractors`, `ab-catalog`,
+/// and `ab-transcode` into `ab-tag-write`'s compile graph. A
+/// stage rename would surface as a `Dag::build` "unknown
+/// dependency" error at daemon startup — a fast failure.
+const TAG_WRITE_FINAL_REQUIRES: &[StageId] = &[
+    StageId::new("tag-read"),
+    StageId::new("consensus"),
+    StageId::new("extract-summary-spoiler-free"),
+    StageId::new("extract-story-arc"),
+    StageId::new("extract-characters"),
+    StageId::new("extract-setting"),
+    StageId::new("extract-summary-spoiler-free-series"),
+    StageId::new("transcode-m4b"),
+];
 
 /// Early-pass tag-write stage (ADR-0028 § `TagWriteEarly`).
 ///
@@ -448,26 +473,71 @@ async fn write_one_file(
 
 /// Final-pass tag-write stage (ADR-0028 § `TagWriteFinal`).
 ///
-/// Intended priority: `Background`. Writes every field with a
-/// winner *that the early pass didn't already write the same
-/// value for*, EXCEPT fields whose winner has
-/// `source = 'user_edit'`. Per ADR-0028 § "Skips per-field on
-/// user-edit": the user's correction wins until they explicitly
-/// clear it.
+/// Background priority. Writes every field with a winner that the
+/// early pass didn't already write the same value for, EXCEPT
+/// fields whose winner has `source = 'user_edit'`. Per ADR-0028 §
+/// "Skips per-field on user-edit": the user's correction wins
+/// until they explicitly clear it. The skip predicate is
+/// [`crate::skip_for_final_pass`].
 ///
-/// Still scaffolding at this slice — `run()` returns `Skipped`.
-/// The final pass becomes meaningful only after the AI
-/// extractors (`extract-summary-spoiler-free`, `extract-story-arc`,
-/// `extract-characters`, `extract-setting`) start producing
-/// non-`tag_file` winners.
-#[derive(Debug, Default)]
-pub struct TagWriteFinalStage;
+/// ## File targeting
+///
+/// `load_active_file_paths` already filters on `is_active = 1`,
+/// which means post-transcode the m4b row is the only active one
+/// (ADR-0027: `PostTranscodeSourcesTarget` flips the source rows
+/// to `is_active = 0` once their refs settle). So the late write
+/// lands on the surviving file automatically — no explicit
+/// "prefer m4b" branch needed.
+///
+/// Carries its own [`crate::CoverClient`] for the same reason
+/// [`TagWriteEarlyStage`] does: a `CoverUrl` winner late-revised
+/// by an extractor needs the bytes fetched once per run, shared
+/// across every active file.
+#[derive(Debug, Clone)]
+pub struct TagWriteFinalStage {
+    cover: crate::CoverClient,
+}
 
 impl TagWriteFinalStage {
-    /// Construct.
+    /// Construct from the workspace's HTTP-client tunables.
+    /// Mirrors [`TagWriteEarlyStage::from_tunables`]; same
+    /// permissive-fallback rationale.
+    ///
+    /// # Errors
+    ///
+    /// Surfaces [`crate::CoverFetchError::ClientBuild`] from
+    /// the underlying `reqwest::Client::build`.
+    pub fn from_tunables(
+        tunables: &ab_core::tunables::HttpClientTunables,
+    ) -> std::result::Result<Self, crate::CoverFetchError> {
+        Ok(Self {
+            cover: crate::CoverClient::new(tunables)?,
+        })
+    }
+
+    /// Construct with the default HTTP-client tunables. Same
+    /// permissive-fallback shape as [`TagWriteEarlyStage::new`] —
+    /// the daemon must stay bootable even if the cover-art HTTP
+    /// client build fails.
     #[must_use]
-    pub const fn new() -> Self {
-        Self
+    pub fn new() -> Self {
+        let defaults = ab_core::tunables::HttpClientTunables::default();
+        match crate::CoverClient::new(&defaults) {
+            Ok(cover) => Self { cover },
+            Err(e) => {
+                tracing::warn!(error = %e, "tag-write.final.cover_client_build_failed_using_fallback");
+                let http = reqwest::Client::new();
+                Self {
+                    cover: crate::cover::CoverClient::with_parts(http, defaults.cover_max_bytes),
+                }
+            }
+        }
+    }
+}
+
+impl Default for TagWriteFinalStage {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -481,13 +551,168 @@ impl Stage for TagWriteFinalStage {
         TAG_WRITE_FINAL_REQUIRES
     }
 
-    async fn run(&self, _ctx: &StageContext, book_id: BookId) -> Result<StageOutcome> {
-        tracing::debug!(
+    #[allow(
+        clippy::too_many_lines,
+        reason = "mirrors TagWriteEarlyStage::run by design — same per-book linear flow, with the one ADR-0028 § user-edit filter layered after the winner load. Sharing a helper across the two would force generic comment text that loses each stage's specific rationale."
+    )]
+    async fn run(&self, ctx: &StageContext, book_id: BookId) -> Result<StageOutcome> {
+        let winners_all = select_winners_for_book(ctx.library.pool(), book_id.0).await?;
+        if winners_all.is_empty() {
+            tracing::debug!(
+                book = %book_id,
+                stage = TAG_WRITE_FINAL_STAGE_NAME,
+                "tag-write.final.no_winners"
+            );
+            return Ok(StageOutcome::Skipped);
+        }
+
+        // ADR-0028 § "Skips per-field on user-edit". Strip every
+        // winner whose source is `'user_edit'` BEFORE passing
+        // them to `write_one_file`; the writer is source-agnostic
+        // and will overwrite anything it's handed. Keeping the
+        // filter at the stage boundary (rather than inside
+        // `write_winners`) preserves Early's existing behavior
+        // (Early runs before any user can have edited so the
+        // filter would be a no-op there anyway) and keeps the
+        // skip predicate documented in one place — see
+        // `crate::skip_for_final_pass`.
+        let user_edit_skipped: usize = winners_all
+            .iter()
+            .filter(|w| crate::skip_for_final_pass(&w.source))
+            .count();
+        let winners: Vec<FieldWinner> = winners_all
+            .into_iter()
+            .filter(|w| !crate::skip_for_final_pass(&w.source))
+            .collect();
+
+        if winners.is_empty() {
+            tracing::debug!(
+                book = %book_id,
+                stage = TAG_WRITE_FINAL_STAGE_NAME,
+                user_edit_skipped,
+                "tag-write.final.all_winners_user_edit_skip"
+            );
+            return Ok(StageOutcome::Skipped);
+        }
+
+        // Mirror Early's tautology guard: if every surviving
+        // winner is itself `tag_file`-sourced, the file already
+        // has what we'd write. Skip the I/O cycle. This is the
+        // common steady-state case for books that ran through
+        // Early without any subsequent AI extractor producing a
+        // new winner.
+        if winners.iter().all(|w| w.source == "tag_file") {
+            tracing::debug!(
+                book = %book_id,
+                stage = TAG_WRITE_FINAL_STAGE_NAME,
+                winner_count = winners.len(),
+                user_edit_skipped,
+                "tag-write.final.all_winners_from_tag_file_skip"
+            );
+            return Ok(StageOutcome::Skipped);
+        }
+
+        let files = load_active_file_paths(ctx, book_id).await?;
+        if files.is_empty() {
+            tracing::debug!(
+                book = %book_id,
+                stage = TAG_WRITE_FINAL_STAGE_NAME,
+                "tag-write.final.no_active_files"
+            );
+            return Ok(StageOutcome::Skipped);
+        }
+
+        // Cover-fetch: do it once per run. An extractor that ran
+        // between Early and Final may have produced a new
+        // CoverUrl winner; fetch the bytes here so the per-file
+        // loop can share them. Same best-effort failure handling
+        // as Early — log + None on failure; other winners still
+        // write.
+        let cover_bytes: Option<Vec<u8>> = match winners
+            .iter()
+            .find(|w| w.field == ab_core::Field::CoverUrl)
+            .and_then(|w| w.value.as_deref())
+        {
+            Some(url) => match self.cover.fetch(url).await {
+                Ok(bytes) => Some(bytes),
+                Err(e) => {
+                    tracing::warn!(
+                        book = %book_id,
+                        url = %url,
+                        error = %e,
+                        "tag-write.final.cover_fetch_failed"
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
+
+        let batch_id = Uuid::new_v4().to_string();
+        let mut total_changes: usize = 0;
+        let mut total_matched: usize = 0;
+        let mut total_unmapped: usize = 0;
+        let mut any_changed = false;
+        for (file_id, file_path) in files {
+            match write_one_file(
+                ctx,
+                book_id,
+                file_id,
+                &file_path,
+                &winners,
+                cover_bytes.as_deref(),
+            )
+            .await
+            {
+                Ok(report) => {
+                    total_changes += report.fields_changed();
+                    total_matched += report.fields_already_matched;
+                    total_unmapped += report.fields_unmapped;
+                    if !report.changes.is_empty() {
+                        any_changed = true;
+                        if let Err(e) =
+                            record_audit_rows(ctx, &batch_id, file_id, &report.changes).await
+                        {
+                            tracing::warn!(
+                                book = %book_id,
+                                file_id = file_id.0,
+                                error = %e,
+                                "tag-write.final.audit_log_failed"
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        book = %book_id,
+                        file_id = file_id.0,
+                        path = %file_path,
+                        error = %e,
+                        "tag-write.final.file_failed"
+                    );
+                }
+            }
+        }
+
+        tracing::info!(
             book = %book_id,
             stage = TAG_WRITE_FINAL_STAGE_NAME,
-            "tag-write.final.skeleton_skip"
+            batch_id = %batch_id,
+            fields_changed = total_changes,
+            fields_already_matched = total_matched,
+            fields_unmapped = total_unmapped,
+            user_edit_skipped,
+            "tag-write.final.done"
         );
-        Ok(StageOutcome::Skipped)
+
+        if any_changed {
+            Ok(StageOutcome::Done)
+        } else {
+            // All surviving winners matched on-disk values; the
+            // late re-tag pass is a no-op. Idempotent re-runs of
+            // a steady-state book hit this path.
+            Ok(StageOutcome::Skipped)
+        }
     }
 }
 
@@ -563,13 +788,105 @@ mod tests {
     async fn final_stage_metadata() {
         let s = TagWriteFinalStage::new();
         assert_eq!(s.name(), "tag-write-final");
-        assert_eq!(s.requires(), &[StageId::new("tag-read")]);
+        // ADR-0028 § "TagWriteFinal `requires()`": all AI
+        // extractors + consensus + transcode-m4b + tag-read.
+        // Order matters here because the const is laid out that
+        // way for readability — the assertion pins both the set
+        // and the listing order so a rename surfaces as a diff,
+        // not a silent reorder.
+        assert_eq!(
+            s.requires(),
+            &[
+                StageId::new("tag-read"),
+                StageId::new("consensus"),
+                StageId::new("extract-summary-spoiler-free"),
+                StageId::new("extract-story-arc"),
+                StageId::new("extract-characters"),
+                StageId::new("extract-setting"),
+                StageId::new("extract-summary-spoiler-free-series"),
+                StageId::new("transcode-m4b"),
+            ]
+        );
     }
 
     #[tokio::test]
-    async fn final_skeleton_run_returns_skipped() {
+    async fn final_skips_when_no_winners() {
+        // No `book_field_provenance` rows for this book → the
+        // first guard in `run` short-circuits before any file
+        // I/O. Steady-state "this book hasn't progressed past
+        // tag-read yet" path.
         let tmp = TempDir::new().expect("tmpdir");
         let ctx = fresh_ctx(tmp.path(), TAG_WRITE_FINAL_STAGE_NAME).await;
+        let outcome = TagWriteFinalStage::new()
+            .run(&ctx, BookId(1))
+            .await
+            .expect("run");
+        match outcome {
+            StageOutcome::Skipped => {}
+            other => panic!("expected Skipped, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn final_skips_when_all_winners_are_user_edits() {
+        // ADR-0028 § "Skips per-field on user-edit". When the
+        // only winners present have source = 'user_edit', the
+        // late pass has nothing left after the filter — it
+        // returns Skipped instead of touching the file.
+        let tmp = TempDir::new().expect("tmpdir");
+        let ctx = fresh_ctx(tmp.path(), TAG_WRITE_FINAL_STAGE_NAME).await;
+        seed_book(&ctx, 1).await;
+        seed_winner(&ctx, 1, "title", "User Title", USER_EDIT_SOURCE).await;
+        seed_winner(&ctx, 1, "description", "User Description", USER_EDIT_SOURCE).await;
+
+        let outcome = TagWriteFinalStage::new()
+            .run(&ctx, BookId(1))
+            .await
+            .expect("run");
+        match outcome {
+            StageOutcome::Skipped => {}
+            other => panic!("expected Skipped, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn final_skips_when_all_winners_are_tag_file_sourced() {
+        // Tautology guard: every remaining winner is already
+        // tag_file-sourced, so the on-disk values match by
+        // definition. No I/O needed.
+        let tmp = TempDir::new().expect("tmpdir");
+        let ctx = fresh_ctx(tmp.path(), TAG_WRITE_FINAL_STAGE_NAME).await;
+        seed_book(&ctx, 1).await;
+        seed_winner(&ctx, 1, "title", "Tag File Title", "tag_file").await;
+        seed_winner(&ctx, 1, "description", "Tag File Description", "tag_file").await;
+
+        let outcome = TagWriteFinalStage::new()
+            .run(&ctx, BookId(1))
+            .await
+            .expect("run");
+        match outcome {
+            StageOutcome::Skipped => {}
+            other => panic!("expected Skipped, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn final_skips_when_no_active_files_present() {
+        // Non-tag_file winner survives the filter, but the book
+        // has no rows in `book_files` with `is_active = 1` —
+        // nothing to write to. Skipped.
+        let tmp = TempDir::new().expect("tmpdir");
+        let ctx = fresh_ctx(tmp.path(), TAG_WRITE_FINAL_STAGE_NAME).await;
+        seed_book(&ctx, 1).await;
+        seed_winner(
+            &ctx,
+            1,
+            "title",
+            "AI Suggested Title",
+            "extract-summary-spoiler-free",
+        )
+        .await;
+
         let outcome = TagWriteFinalStage::new()
             .run(&ctx, BookId(1))
             .await
