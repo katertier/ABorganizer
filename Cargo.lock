@@ -73,6 +73,7 @@ dependencies = [
  "ab-pipeline",
  "ab-tag-read",
  "async-trait",
+ "lofty",
  "mp4ameta",
  "reqwest",
  "serde",
