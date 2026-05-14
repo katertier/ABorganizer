@@ -2,9 +2,13 @@
 //!
 //! # Layers
 //!
-//! 1. **Pure-Rust decode/probe** via Symphonia + Lofty + mp4ameta.
-//!    Reading tags, probing durations, decoding PCM for analysis.
-//!    No subprocess; cross-machine reproducible.
+//! 1. **Pure-Rust probe** via [`lofty`]. Today: duration probe in
+//!    [`info::probe_duration_ms`]. Tag-read lives in `ab-tag-read`
+//!    (separate crate); PCM decode for fingerprinting lives in
+//!    `ab-fingerprint` (separate crate, uses Symphonia). This
+//!    crate intentionally stays small — just the bits the FFI
+//!    layer's callers need to know about a file *before* dropping
+//!    into Swift.
 //!
 //! 2. **Swift FFI bridge** for everything that needs Apple's
 //!    frameworks: AVFoundation (transcode, encode, AVPlayer/AirPlay),

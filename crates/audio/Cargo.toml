@@ -6,7 +6,7 @@ rust-version = { workspace = true }
 license      = { workspace = true }
 authors      = { workspace = true }
 repository   = { workspace = true }
-description  = "Pure-Rust audio decode (Symphonia + Lofty) plus Swift FFI bridge for AVFoundation transcode/encode and Apple Intelligence (SpeechAnalyzer, NLLanguageRecognizer, FoundationModels)."
+description  = "Pure-Rust audio probe (Lofty) plus Swift FFI bridge for AVFoundation transcode/encode and Apple Intelligence (SpeechAnalyzer, NLLanguageRecognizer, FoundationModels). Tag-read lives in ab-tag-read; PCM decode for fingerprinting lives in ab-fingerprint."
 
 [lints]
 workspace = true
