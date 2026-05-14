@@ -651,21 +651,13 @@ mod tests {
     fn compile_excludes_drops_bad_patterns() {
         // `[` is an unterminated character class — globset rejects it.
         // Valid neighbours stay in the set.
-        let set = compile_excludes(&[
-            "*.tmp".into(),
-            "[".into(),
-            ".DS_Store".into(),
-        ]);
+        let set = compile_excludes(&["*.tmp".into(), "[".into(), ".DS_Store".into()]);
         assert_eq!(set.len(), 2, "two valid patterns survived");
     }
 
     #[test]
     fn path_matches_excludes_by_basename_or_component() {
-        let set = compile_excludes(&[
-            "*.tmp".into(),
-            ".DS_Store".into(),
-            "temp".into(),
-        ]);
+        let set = compile_excludes(&["*.tmp".into(), ".DS_Store".into(), "temp".into()]);
         // Basename glob.
         assert!(path_matches_excludes(
             &PathBuf::from("/a/b/in-progress.tmp"),

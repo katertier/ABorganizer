@@ -9,6 +9,7 @@ use ab_pipeline::{Dag, Scheduler};
 use globset::GlobSet;
 use tokio_util::sync::CancellationToken;
 
+use crate::doctor::DoctorRegistry;
 use crate::rate_limit::RateLimiter;
 
 /// Application state injected into every handler via axum's `State<>`.
@@ -62,6 +63,10 @@ pub struct ApiStateInner {
     /// `ab_scan::scan_with_excludes`. Compiled once at boot;
     /// empty `GlobSet` disables exclusions (suitable for tests).
     pub scan_excludes: GlobSet,
+    /// Registered doctor checks (ADR-0037, B.9). Read-only by
+    /// trait contract; consumed by `/doctor`, `/doctor/all`,
+    /// `/doctor/{name}` handlers.
+    pub doctor: DoctorRegistry,
 }
 
 impl ApiState {
@@ -84,6 +89,7 @@ impl ApiState {
         cancel: CancellationToken,
         security: SecurityTunables,
         scan_excludes: GlobSet,
+        doctor: DoctorRegistry,
     ) -> Self {
         Self {
             inner: Arc::new(ApiStateInner {
@@ -97,6 +103,7 @@ impl ApiState {
                 started_at: std::time::Instant::now(),
                 pairing_consume_limiter: Arc::new(RateLimiter::default()),
                 scan_excludes,
+                doctor,
             }),
         }
     }

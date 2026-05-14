@@ -584,6 +584,7 @@ mod tests {
             cancel,
             SecurityTunables::default(),
             globset::GlobSet::empty(),
+            crate::doctor::DoctorRegistry::new(vec![]),
         );
         (state, tmp)
     }
