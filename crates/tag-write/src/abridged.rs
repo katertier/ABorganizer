@@ -205,7 +205,12 @@ fn write_abridged_mp4(path: &Path, value: &str) -> Result<FieldWriteOutcome> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::expect_used, clippy::unwrap_used, reason = "test setup idioms")]
+    #![allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::panic,
+        reason = "test setup idioms"
+    )]
 
     use super::write_abridged;
     use crate::write::FieldWriteOutcome;
@@ -214,15 +219,6 @@ mod tests {
     /// returns `Unmapped` (not an error). The `Probe::open` +
     /// `guess_file_type` dispatch path is exercised; the format-
     /// specific writers are not.
-    ///
-    /// Integration tests against real MP3 / M4A files are
-    /// deferred to a fixture-setup slice — the workspace has no
-    /// audio fixtures today and synthesising a minimal valid
-    /// MP3 / MP4 from scratch is non-trivial. The real
-    /// verification path is `aborg book patch <id>
-    /// --abridged true` against an operator's actual audio
-    /// file, with `lofty::read_from_path` to inspect the
-    /// resulting TXXX / freeform-atom.
     #[test]
     fn non_audio_file_returns_unmapped() {
         let tmp = tempfile::NamedTempFile::new().expect("tempfile");
@@ -232,6 +228,162 @@ mod tests {
             outcome,
             FieldWriteOutcome::Unmapped,
             "non-audio file should yield Unmapped (probe couldn't guess type)"
+        );
+    }
+
+    /// Generate a minimal valid silent audio file at `path`
+    /// using ffmpeg. Returns `None` if ffmpeg isn't on PATH so
+    /// the calling test can skip gracefully — CI runners may or
+    /// may not have ffmpeg installed.
+    ///
+    /// `codec` is the `-c:a` argument (e.g. `libmp3lame`,
+    /// `aac`); `path` should already have the matching
+    /// extension. 0.5 seconds is enough audio to make the file
+    /// shape valid for lofty's parser without bloating the test.
+    fn ffmpeg_silence(path: &std::path::Path, codec: &str) -> Option<()> {
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=44100:cl=mono",
+                "-t",
+                "0.5",
+                "-c:a",
+                codec,
+                "-b:a",
+                "64k",
+            ])
+            .arg(path)
+            .status()
+            .ok()?;
+        status.success().then_some(())
+    }
+
+    /// `ID3v2` path: write Abridged to a silent MP3, then
+    /// re-read via lofty and verify the TXXX:ABRIDGED frame
+    /// round-trips.
+    ///
+    /// Skips when ffmpeg isn't on PATH (CI runners without it).
+    #[test]
+    fn id3v2_round_trip_mp3() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("silence.mp3");
+        if ffmpeg_silence(&path, "libmp3lame").is_none() {
+            // ffmpeg not on PATH — silent-skip so the test
+            // suite still passes on bare runners. Locally
+            // (and on macOS CI with homebrew ffmpeg) the test
+            // runs.
+            return;
+        }
+
+        // First write: TXXX absent → Changed { before: None }.
+        let outcome = write_abridged(&path, "true").expect("write");
+        assert!(
+            matches!(outcome, FieldWriteOutcome::Changed { before: None }),
+            "first write: expected Changed{{before:None}}, got {outcome:?}"
+        );
+
+        // Read back via the typed MpegFile and check the
+        // TXXX:ABRIDGED frame actually landed on disk.
+        let mpeg_file = <lofty::mpeg::MpegFile as lofty::file::AudioFile>::read_from(
+            &mut std::fs::File::open(&path).expect("reopen"),
+            lofty::config::ParseOptions::default(),
+        )
+        .expect("MpegFile parse");
+        let id3 = mpeg_file.id3v2().expect("id3v2");
+        assert_eq!(
+            id3.get_user_text("ABRIDGED"),
+            Some("true"),
+            "TXXX:ABRIDGED must round-trip; got {:?}",
+            id3.get_user_text("ABRIDGED")
+        );
+
+        // Idempotence: a second write with the same value
+        // returns Matched and doesn't rewrite the file.
+        let mtime_before = std::fs::metadata(&path)
+            .expect("stat")
+            .modified()
+            .expect("mtime");
+        let outcome2 = write_abridged(&path, "true").expect("write");
+        assert_eq!(
+            outcome2,
+            FieldWriteOutcome::Matched,
+            "second write with same value: expected Matched"
+        );
+        let mtime_after = std::fs::metadata(&path)
+            .expect("stat")
+            .modified()
+            .expect("mtime");
+        assert_eq!(
+            mtime_before, mtime_after,
+            "Matched outcome must not rewrite the file (mtime invariant)"
+        );
+
+        // Update path: write a different value → Changed with
+        // `before = Some("true")`.
+        let outcome3 = write_abridged(&path, "false").expect("write");
+        assert!(
+            matches!(&outcome3, FieldWriteOutcome::Changed { before } if before.as_deref() == Some("true")),
+            "third write: expected Changed{{before:Some(\"true\")}}, got {outcome3:?}"
+        );
+    }
+
+    /// MP4 path: write Abridged to a silent M4A, then re-read
+    /// via lofty and verify the freeform atom round-trips.
+    ///
+    /// Skips when ffmpeg isn't on PATH.
+    #[test]
+    fn mp4_round_trip_m4a() {
+        use std::borrow::Cow;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("silence.m4a");
+        if ffmpeg_silence(&path, "aac").is_none() {
+            // Same silent-skip rationale as id3v2_round_trip_mp3.
+            return;
+        }
+
+        // First write.
+        let outcome = write_abridged(&path, "true").expect("write");
+        assert!(
+            matches!(outcome, FieldWriteOutcome::Changed { before: None }),
+            "first write: expected Changed{{before:None}}, got {outcome:?}"
+        );
+
+        // Read back via the typed Mp4File and check the freeform
+        // atom landed at the right ident.
+        let mp4_file = <lofty::mp4::Mp4File as lofty::file::AudioFile>::read_from(
+            &mut std::fs::File::open(&path).expect("reopen"),
+            lofty::config::ParseOptions::default(),
+        )
+        .expect("Mp4File parse");
+        let ilst = mp4_file.ilst().expect("ilst");
+        let ident = lofty::mp4::AtomIdent::Freeform {
+            mean: Cow::Borrowed("com.apple.iTunes"),
+            name: Cow::Borrowed("ABRIDGED"),
+        };
+        let atom = ilst.get(&ident).expect("freeform atom present");
+        let data = atom.data().next().expect("at least one data entry");
+        match data {
+            lofty::mp4::AtomData::UTF8(s) => {
+                assert_eq!(s, "true", "freeform atom data must round-trip");
+            }
+            other => panic!("expected AtomData::UTF8, got {other:?}"),
+        }
+
+        // Idempotence.
+        let outcome2 = write_abridged(&path, "true").expect("write");
+        assert_eq!(outcome2, FieldWriteOutcome::Matched);
+
+        // Update.
+        let outcome3 = write_abridged(&path, "false").expect("write");
+        assert!(
+            matches!(&outcome3, FieldWriteOutcome::Changed { before } if before.as_deref() == Some("true")),
+            "third write: expected Changed{{before:Some(\"true\")}}, got {outcome3:?}"
         );
     }
 }
