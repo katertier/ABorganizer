@@ -38,6 +38,8 @@ enum Cmd {
     Macros,
     /// Run only the hardcoded-app-name check.
     Brand,
+    /// Run only the route-test-coverage check.
+    RouteTests,
 }
 
 fn main() -> ExitCode {
@@ -47,6 +49,7 @@ fn main() -> ExitCode {
         Cmd::Names => checks::names::run(),
         Cmd::Macros => checks::macros::run(),
         Cmd::Brand => checks::brand::run(),
+        Cmd::RouteTests => checks::route_tests::run(),
     };
     match result {
         Ok(0) => ExitCode::SUCCESS,

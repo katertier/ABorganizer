@@ -5,6 +5,7 @@
 pub(crate) mod brand;
 pub(crate) mod macros;
 pub(crate) mod names;
+pub(crate) mod route_tests;
 pub(crate) mod walk;
 
 use anyhow::Result;
@@ -22,6 +23,7 @@ pub(crate) fn run_all() -> Result<u32> {
     total += names::run()?;
     total += macros::run()?;
     total += brand::run()?;
+    total += route_tests::run()?;
     if total == 0 {
         eprintln!("xtask check: all checks pass");
     }
