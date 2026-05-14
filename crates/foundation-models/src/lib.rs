@@ -370,6 +370,101 @@ pub async fn complete_structured(
     }
 }
 
+/// Ergonomic typed wrapper over [`complete_structured`].
+///
+/// Calls the schema-constrained completion, then decodes the
+/// returned JSON into a caller-supplied `T: DeserializeOwned`.
+/// Saves the `serde_json::from_str::<T>(&raw)?` line at every
+/// extractor call site without violating the
+/// no-domain-types-in-this-crate rule — `T` is generic and
+/// comes from the caller.
+///
+/// `schema_json` should match `T`'s shape; the framework
+/// constrains the model to emit only on-schema tokens but the
+/// surface here doesn't verify they agree.
+///
+/// # Errors
+///
+/// In addition to the variants documented on [`complete_structured`]:
+/// [`BridgeError::InvalidPayload`] when the JSON returned by
+/// the model fails to deserialise into `T` (typically a schema
+/// vs. type mismatch).
+///
+/// # Example
+///
+/// ```no_run
+/// use ab_core::auth;
+/// use ab_foundation_models::{
+///     GenerationOptions, complete_structured_typed,
+/// };
+/// use serde::Deserialize;
+///
+/// #[derive(Deserialize)]
+/// struct Greet {
+///     greeting: String,
+/// }
+///
+/// # async fn doit() -> Result<(), ab_foundation_models::BridgeError> {
+/// let schema = r#"{
+///     "type": "object",
+///     "properties": { "greeting": { "type": "string" } },
+///     "required": ["greeting"]
+/// }"#;
+/// let greet: Greet = complete_structured_typed::<Greet>(
+///     "Say hi as JSON.",
+///     schema,
+///     &GenerationOptions::new(64),
+/// ).await?;
+/// let _ = (auth::hash_api_token("x"), greet.greeting);
+/// # Ok(()) }
+/// ```
+pub async fn complete_structured_typed<T: serde::de::DeserializeOwned>(
+    prompt: &str,
+    schema_json: &str,
+    options: &GenerationOptions,
+) -> Result<T, BridgeError> {
+    let raw = complete_structured(prompt, schema_json, options).await?;
+    serde_json::from_str::<T>(&raw)
+        .map_err(|e| BridgeError::InvalidPayload(format!("typed decode: {e}")))
+}
+
+/// Async stream of token chunks from a single generation call.
+///
+/// Each yielded `Ok(String)` is one chunk of UTF-8 text. The
+/// stream ends (returns `None`) when the model signals EOS, or
+/// yields one `Err(BridgeError::...)` and ends when generation
+/// fails. Designed for UI surfaces that want progressive
+/// rendering on long-running extractors (story-arc, spoiler-free
+/// description). Extractors that need the full response before
+/// parsing should keep using [`complete`] / [`complete_structured`].
+///
+/// Per [Apple's `LanguageModelSession.streamResponse`] docs the
+/// stream emits incremental text; the chunks together form the
+/// complete response (concatenation is well-defined).
+///
+/// On hosts where the bridge isn't compiled in (non-macOS, no
+/// swiftc, framework missing): the returned stream yields a
+/// single `Err(BridgeError::BridgeUnavailable)` and ends.
+///
+/// [Apple's `LanguageModelSession.streamResponse`]:
+/// https://developer.apple.com/documentation/foundationmodels/languagemodelsession/streamresponse(to:options:)
+pub fn complete_stream(
+    prompt: &str,
+    options: &GenerationOptions,
+) -> impl futures::Stream<Item = Result<String, BridgeError>> + Send + 'static + use<> {
+    #[cfg(aborg_fm_bridge)]
+    {
+        ffi::complete_stream_impl(prompt, options)
+    }
+    #[cfg(not(aborg_fm_bridge))]
+    {
+        let _ = (prompt, options);
+        // One-shot error stream: yield Err(BridgeUnavailable), end.
+        use futures::stream::{self, StreamExt as _};
+        stream::once(async move { Err(BridgeError::BridgeUnavailable) }).boxed()
+    }
+}
+
 // ── FFI ─────────────────────────────────────────────────────────────
 //
 // The whole `ffi` module is gated on `cfg(aborg_fm_bridge)`. When
@@ -481,6 +576,23 @@ mod ffi {
         fn aborg_fm_complete_structured(
             prompt: *const c_char,
             schema_json: *const c_char,
+            max_tokens: usize,
+            temperature: f64,
+            use_temperature: i32,
+            ctx: *mut c_void,
+            callback: extern "C" fn(*mut c_void, *const c_char, usize, i32),
+        );
+
+        /// Streaming completion. Callback fires once per chunk
+        /// with the chunk's UTF-8 bytes; a terminal `(ptr=null,
+        /// len=0, code=0)` callback signals end-of-stream. On
+        /// error the callback fires once with `(ptr=null, len=0,
+        /// code=nonzero)` and no terminal call follows. The Rust
+        /// side reclaims the `ctx` `Box<Sender>` on either
+        /// terminal — different ownership shape from the one-shot
+        /// entries (those reclaim on the single firing).
+        fn aborg_fm_complete_stream(
+            prompt: *const c_char,
             max_tokens: usize,
             temperature: f64,
             use_temperature: i32,
@@ -645,6 +757,113 @@ mod ffi {
             .ok_or_else(|| BridgeError::InvalidPayload("OK code but null buffer".into()))?;
         String::from_utf8(bytes).map_err(|e| BridgeError::InvalidPayload(format!("utf8: {e}")))
     }
+
+    // ── Streaming completion ─────────────────────────────────────
+    //
+    // The streaming entry's callback contract differs from the
+    // one-shot ones above:
+    //
+    //   - **Chunk**:   `(ptr, len > 0, code = 0)` — one UTF-8
+    //                  fragment delivered to the receiver.
+    //   - **EOS**:     `(ptr = null, len = 0, code = 0)` — model
+    //                  signalled end-of-stream cleanly.
+    //   - **Error**:   `(ptr = null, len = 0, code != 0)` — no
+    //                  more callbacks will follow.
+    //
+    // The `ctx` pointer is a leaked `Box<UnboundedSender>`. The
+    // callback derefs it on chunk firings (no ownership change);
+    // on EOS or error it reclaims the Box via `Box::from_raw`,
+    // which drops the sender and closes the receiver's stream.
+
+    use tokio::sync::mpsc;
+
+    /// FFI callback for the streaming entry. Forwards each chunk
+    /// to the unbounded channel; on terminal callbacks (EOS or
+    /// error) reclaims the boxed sender to close the stream.
+    extern "C" fn on_stream(ctx: *mut c_void, ptr: *const c_char, len: usize, code: i32) {
+        let tx_ptr = ctx.cast::<mpsc::UnboundedSender<Result<String, BridgeError>>>();
+        let is_data = code == 0 && !ptr.is_null() && len > 0;
+        let is_eos = code == 0 && ptr.is_null() && len == 0;
+        let is_error = code != 0;
+
+        if is_data {
+            // SAFETY: Swift hands us a UTF-8 buffer that lives
+            // until the callback returns. Copy out before
+            // returning so the receiver doesn't dangle.
+            let slice = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), len) };
+            let msg = match std::str::from_utf8(slice) {
+                Ok(s) => Ok(s.to_owned()),
+                Err(e) => Err(BridgeError::InvalidPayload(format!("utf8 chunk: {e}"))),
+            };
+            // SAFETY: ctx is a valid Box<Sender> per contract;
+            // we don't take ownership here — Swift will fire
+            // again with EOS / error.
+            let tx_ref = unsafe { &*tx_ptr };
+            let _ = tx_ref.send(msg);
+            return;
+        }
+
+        if is_error {
+            // Push the error chunk via a fresh deref, then drop
+            // the sender below.
+            let tx_ref = unsafe { &*tx_ptr };
+            let _ = tx_ref.send(Err(BridgeError::from_code(code)));
+        }
+
+        if is_eos || is_error {
+            // Reclaim ownership and drop. Receiver gets None
+            // (clean EOS) or has already received the error
+            // chunk above and then gets None.
+            let _: Box<mpsc::UnboundedSender<Result<String, BridgeError>>> =
+                unsafe { Box::from_raw(tx_ptr) };
+        }
+        // Any other shape (null ptr but non-zero len etc.) is a
+        // Swift contract bug — silently ignore on this side, the
+        // Swift logError already wrote to stderr.
+    }
+
+    pub(super) fn complete_stream_impl(
+        prompt: &str,
+        options: &super::GenerationOptions,
+    ) -> std::pin::Pin<Box<dyn futures::Stream<Item = Result<String, BridgeError>> + Send + 'static>>
+    {
+        use futures::stream::{self, StreamExt as _};
+        use tokio_stream::wrappers::UnboundedReceiverStream;
+
+        // Convert prompt to CString up-front so the early-return
+        // (NUL-in-input) path yields a clean one-shot error
+        // stream instead of panicking inside the FFI call.
+        let c_prompt = match CString::new(prompt) {
+            Ok(c) => c,
+            Err(e) => {
+                let err = BridgeError::NulInInput(format!("prompt: {e}"));
+                return stream::once(async move { Err(err) }).boxed();
+            }
+        };
+        let (tx, rx) = mpsc::unbounded_channel::<Result<String, BridgeError>>();
+        let ctx = Box::into_raw(Box::new(tx)).cast::<c_void>();
+        let (temperature, use_temperature) = split_temperature(options);
+        // SAFETY: ctx pairs with on_stream; Swift fires the
+        // callback at least once (EOS or error guaranteed by
+        // the bridge contract). The CString lives until the
+        // synchronous return from the FFI call below; Swift
+        // copies the bytes via `String(validatingCString:)`
+        // before kicking off its Task.
+        unsafe {
+            aborg_fm_complete_stream(
+                c_prompt.as_ptr(),
+                options.max_tokens,
+                temperature,
+                use_temperature,
+                ctx,
+                on_stream,
+            );
+        }
+        // Drop c_prompt at the end of this scope — Swift has
+        // already copied.
+        drop(c_prompt);
+        UnboundedReceiverStream::new(rx).boxed()
+    }
 }
 
 #[cfg(test)]
@@ -759,5 +978,82 @@ mod tests {
         let o = GenerationOptions::default();
         assert!(o.max_tokens > 0, "default should have some token budget");
         assert_eq!(o.temperature, None);
+    }
+
+    /// On a host where the bridge isn't compiled in, the
+    /// stream returns exactly one `Err(BridgeUnavailable)` then
+    /// ends. On a host where it IS compiled in we accept either
+    /// at-least-one chunk or a typed unavailability / generation
+    /// error — same contract shape as `complete()`'s smoke test.
+    #[tokio::test]
+    async fn complete_stream_returns_typed_error_when_unavailable() {
+        use futures::StreamExt as _;
+        let stream = complete_stream("Say hi.", &GenerationOptions::new(32));
+        tokio::pin!(stream);
+        let mut had_chunk = false;
+        let mut typed_error_seen = false;
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(_chunk) => had_chunk = true,
+                Err(
+                    BridgeError::BridgeUnavailable
+                    | BridgeError::AppleIntelligenceDisabled
+                    | BridgeError::DeviceNotEligible
+                    | BridgeError::ModelUnavailable(_)
+                    | BridgeError::GenerationFailed(_)
+                    | BridgeError::NulInInput(_),
+                ) => {
+                    typed_error_seen = true;
+                }
+                Err(other) => panic!("unexpected error: {other:?}"),
+            }
+        }
+        assert!(
+            had_chunk || typed_error_seen,
+            "stream must yield at least one chunk OR a typed error"
+        );
+    }
+
+    /// `complete_structured_typed` must follow the same contract
+    /// as `complete_structured` on unavailable hosts. On a built
+    /// host with the model reachable we accept either a decoded
+    /// `T` or a typed bridge error.
+    #[tokio::test]
+    async fn complete_structured_typed_returns_typed_error_when_unavailable() {
+        #[derive(serde::Deserialize)]
+        struct Greet {
+            greeting: String,
+        }
+        let schema = r#"{
+            "type": "object",
+            "properties": { "greeting": { "type": "string" } },
+            "required": ["greeting"]
+        }"#;
+        let r = complete_structured_typed::<Greet>(
+            "Say hi as JSON.",
+            schema,
+            &GenerationOptions::new(64),
+        )
+        .await;
+        match r {
+            Ok(g) => {
+                // If the model is reachable in CI, we accept any
+                // non-empty greeting. Body content isn't asserted
+                // because the model output isn't deterministic
+                // here.
+                let _ = g.greeting;
+            }
+            Err(
+                BridgeError::BridgeUnavailable
+                | BridgeError::AppleIntelligenceDisabled
+                | BridgeError::DeviceNotEligible
+                | BridgeError::ModelUnavailable(_)
+                | BridgeError::GenerationFailed(_)
+                | BridgeError::SchemaParseFailure
+                | BridgeError::SchemaUnsupportedShape
+                | BridgeError::InvalidPayload(_),
+            ) => {}
+            Err(other) => panic!("unexpected error: {other:?}"),
+        }
     }
 }
