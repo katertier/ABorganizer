@@ -17,6 +17,10 @@ workspace = true
 # the PHC string format so encoded outputs round-trip
 # self-describingly (params + salt embedded).
 argon2     = { workspace = true }
+# blake3 — fast cryptographic hash for high-entropy API token
+# storage. See `auth::hash_api_token` for the "why fast for
+# random tokens, why slow for passwords" rationale.
+blake3     = { workspace = true }
 chrono     = { workspace = true }
 # Layered TOML + env config loader for `Tunables::load`. Pulled
 # in here (not in the daemon) so every binary that uses

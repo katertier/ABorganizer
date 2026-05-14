@@ -28,6 +28,7 @@ pub mod names;
 pub mod reports;
 pub mod router;
 pub mod state;
+pub mod tokens;
 
 pub use cleanup_targets::ExpiredPairingCodesTarget;
 pub use error::ApiError;

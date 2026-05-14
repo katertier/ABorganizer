@@ -30,6 +30,11 @@ pub fn build_router(state: ApiState) -> Router {
             delete(crate::library_roots::library_roots_delete),
         )
         .route(
+            "/tokens",
+            get(crate::tokens::tokens_list).post(crate::tokens::tokens_create),
+        )
+        .route("/tokens/{token_id}", delete(crate::tokens::tokens_revoke))
+        .route(
             "/library/pending_speech_installs",
             get(library_pending_speech_installs),
         )
@@ -68,11 +73,13 @@ pub fn build_router(state: ApiState) -> Router {
         // Auth middleware applied to ALL routes. The middleware
         // itself checks `crate::auth::PUBLIC_PATHS` to bypass
         // `/health` and `/version`; everything else needs a
-        // bearer token matching `tunables.security.admin_token`.
-        // Default-deny when no token is configured.
+        // bearer token that matches an active row in the
+        // `tokens` table (or the deprecated `admin_token` tunable
+        // when tokens table is still empty, as a one-cycle
+        // bootstrap compat).
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            crate::auth::require_admin_token,
+            crate::auth::require_token,
         ))
         .with_state(state)
 }

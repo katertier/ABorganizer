@@ -92,6 +92,7 @@ name = "ab-core"
 version = "0.1.0"
 dependencies = [
  "argon2",
+ "blake3",
  "chrono",
  "figment",
  "once_cell",
