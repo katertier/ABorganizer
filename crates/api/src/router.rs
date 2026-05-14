@@ -1191,7 +1191,7 @@ async fn books_patch(
     Path(book_id): Path<i64>,
     Json(req): Json<BooksPatchRequest>,
 ) -> Result<Json<BooksPatchResponse>, ApiError> {
-    use crate::edits::record_user_edit;
+    use crate::user_edits::record_user_edit;
     use ab_core::Field;
 
     // 0. Verify book exists. Cheap separate query so the 404

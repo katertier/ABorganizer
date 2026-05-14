@@ -46,7 +46,22 @@ pub struct ApplyCutParams<'a> {
     pub jingle_start_ms: i64,
     /// File-local offset where the jingle ends (ms).
     pub jingle_end_ms: i64,
-    /// Optional padding override; NULL = use the tunable default.
+    /// Chapter-shift padding override (NULL = tunable default).
+    ///
+    /// This is the millisecond margin SUBTRACTED from the
+    /// jingle-removal cut so chapter offsets shift by a slightly
+    /// smaller amount than the raw jingle length, avoiding
+    /// boundary clips when player UIs round to the nearest
+    /// chapter start. Per-row stored in
+    /// `book_file_audiologos.padding_ms`.
+    ///
+    /// **Not to be confused with** the future bookend-silence
+    /// padding (`head_silence_ms` / `tail_silence_ms`, ADR-0024
+    /// Revision 3) — that's synthetic silence INSERTED at the
+    /// new bookend after audio is cut, an audio-mutation
+    /// concept distinct from this chapter-shift one. Those
+    /// fields land alongside the audio-cut path (task #86 +
+    /// follow-up) and don't interact with `padding_ms` here.
     pub padding_ms: Option<i64>,
     /// String form of `ab_audiologo::Method` for the row.
     pub method: &'a str,
