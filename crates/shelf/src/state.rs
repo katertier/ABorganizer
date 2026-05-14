@@ -6,8 +6,10 @@
 //! directly: that would drag `ab-api`'s transitive deps
 //! (lofty, mp4ameta, etc.) into the shelf compile graph, which
 //! adds ~20 crates for zero functional benefit. The trade-off
-//! is that the auth middleware needs its own implementation
-//! when it lands — tracked as C1b.
+//! taken in slice C1b: the auth middleware re-implements
+//! orchestration here, but the token-lookup helpers themselves
+//! live in [`ab_db::tokens`] so the two surfaces share the
+//! actual DB code.
 
 use std::sync::Arc;
 

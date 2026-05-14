@@ -39,8 +39,6 @@
 //! for the low-entropy codes, plus a CLI surface. Per-user
 //! tokens land first; pairing layers on top.
 
-use std::sync::Arc;
-
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -189,7 +187,7 @@ pub async fn tokens_create(
     let hash = hash_api_token(&raw_token);
     let scopes_json = serde_json::to_string(&req.scopes)
         .map_err(|e| Error::Database(format!("scopes JSON encode: {e}")))?;
-    let now = unix_now_secs();
+    let now = ab_db::unix_now_secs();
     let expires_at: Option<i64> = if expires_in_days == 0 {
         None
     } else {
@@ -253,7 +251,7 @@ pub async fn tokens_revoke(
     State(state): State<ApiState>,
     Path(token_id): Path<i64>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let now = unix_now_secs();
+    let now = ab_db::unix_now_secs();
     let affected = sqlx::query!(
         "UPDATE tokens
             SET revoked_at = ?
@@ -281,13 +279,12 @@ pub async fn tokens_revoke(
 
 /// Look up a token by its raw bearer string.
 ///
-/// Returns `Some(row)` only when the token exists, has not been
-/// revoked, and has not expired. Updates `last_used_at` on a hit
-/// (best-effort — a failure to update doesn't reject the auth).
-///
-/// Surfaced as a free function so the auth middleware (which
-/// can't easily pull in `ApiError`-returning helpers) can call
-/// it directly.
+/// Thin wrapper around [`ab_db::lookup_by_raw_token`] — the
+/// underlying helper was hoisted into `ab-db` in slice C1b so
+/// the shelf auth middleware can call it without dragging the
+/// whole `ab-api` compile graph in. This wrapper preserves
+/// the `(state, raw)` shape every api-side caller already
+/// uses.
 ///
 /// # Errors
 ///
@@ -297,77 +294,19 @@ pub async fn lookup_by_raw_token(
     state: &ApiState,
     raw_token: &str,
 ) -> Result<Option<AuthenticatedToken>, Error> {
-    let hash = hash_api_token(raw_token);
-    let now = unix_now_secs();
-    let row = sqlx::query!(
-        r#"SELECT token_id   AS "token_id!: i64",
-                  user_id    AS "user_id!: i64",
-                  scopes     AS "scopes!: String",
-                  expires_at AS "expires_at?: i64",
-                  revoked_at AS "revoked_at?: i64"
-             FROM tokens
-            WHERE token_hash = ?"#,
-        hash,
+    ab_db::lookup_by_raw_token(
+        state.inner.library.pool(),
+        raw_token,
+        ab_db::unix_now_secs(),
     )
-    .fetch_optional(state.inner.library.pool())
     .await
-    .map_err(|e| Error::Database(format!("tokens lookup: {e}")))?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
-    if row.revoked_at.is_some() {
-        return Ok(None);
-    }
-    if row.expires_at.is_some_and(|exp| exp <= now) {
-        return Ok(None);
-    }
-
-    // Best-effort last_used_at update — async so we don't block
-    // the auth path. Failure is logged and ignored.
-    let pool = state.inner.library.pool().clone();
-    let token_id = row.token_id;
-    tokio::spawn(async move {
-        let r = sqlx::query!(
-            "UPDATE tokens SET last_used_at = ? WHERE token_id = ?",
-            now,
-            token_id,
-        )
-        .execute(&pool)
-        .await;
-        if let Err(e) = r {
-            tracing::warn!(
-                token_id,
-                error = %e,
-                "api.tokens.last_used_update_failed"
-            );
-        }
-    });
-
-    Ok(Some(AuthenticatedToken {
-        token_id: row.token_id,
-        user_id: row.user_id,
-        scopes: Arc::new(serde_json::from_str(&row.scopes).unwrap_or_default()),
-    }))
 }
 
-/// Result of a successful token lookup. The auth middleware
-/// stashes one of these into request extensions so downstream
-/// handlers can read `user_id` / `scopes` without re-hashing.
-///
-/// Cheap to clone — `scopes` is an `Arc`.
-#[derive(Debug, Clone)]
-pub struct AuthenticatedToken {
-    pub token_id: i64,
-    pub user_id: i64,
-    pub scopes: Arc<Vec<String>>,
-}
-
-fn unix_now_secs() -> i64 {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    i64::try_from(secs).unwrap_or(i64::MAX)
-}
+/// Re-export from `ab-db` — same struct that's stashed in
+/// request extensions on a successful lookup. The previous
+/// duplicate definition (this crate's own `AuthenticatedToken`)
+/// was removed in C1b once the helper moved down.
+pub use ab_db::AuthenticatedToken;
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
