@@ -30,6 +30,9 @@ chrono     = { workspace = true }
 figment    = { workspace = true }
 once_cell  = { workspace = true }
 serde      = { workspace = true }
+# B.2a: ai_cache.content size-capped deserialiser
+# (`deserialize_cache_content` in `cache` module).
+serde_json = { workspace = true }
 thiserror  = { workspace = true }
 toml       = { workspace = true }
 tracing    = { workspace = true }
@@ -37,6 +40,3 @@ uuid       = { workspace = true }
 
 [build-dependencies]
 toml = { workspace = true }
-
-[dev-dependencies]
-serde_json = { workspace = true }

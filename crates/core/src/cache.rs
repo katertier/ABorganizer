@@ -214,6 +214,117 @@ pub fn cache_keys_for_stage(stage: &str) -> Option<&'static [CacheKey]> {
     })
 }
 
+/// Hard cap on the size of any `ai_cache.content` payload before
+/// `serde_json::from_slice` is invoked. Slice B.2a (tracker #114).
+///
+/// Three motivations:
+///
+/// 1. **Defense-in-depth.** A malformed or maliciously-expanded
+///    cache row that exceeds normal extractor output should not
+///    feed an uncapped deserialiser — `serde_json` will dutifully
+///    parse a 4 GB JSON value into a multi-gigabyte tree and
+///    OOM the daemon.
+/// 2. **Bug detector.** Production payloads are well under 1 MB
+///    (full transcripts top out at a few hundred kB; LLM
+///    extractor outputs at a few kB). A cache row past this cap
+///    is almost certainly the result of a producer bug or
+///    schema-version mismatch, not legitimate growth.
+/// 3. **Predictable latency.** Bounding payload size bounds
+///    deserialisation time, which feeds the rest of the pipeline.
+///
+/// 32 `MiB` is comfortably above legitimate growth (~30× current
+/// max observed) and well below memory-pressure thresholds.
+/// Operators with unusual workloads can revisit this constant in
+/// a future tunable, but no production data has come close so
+/// far.
+pub const MAX_CACHE_BYTES: usize = 32 * 1024 * 1024;
+
+/// Error returned by [`deserialize_cache_content`] when the input
+/// exceeds [`MAX_CACHE_BYTES`] or fails to parse as JSON. The
+/// `oversized` variant carries the actual size so the caller can
+/// log usefully.
+#[derive(Debug)]
+pub enum CacheDeserializeError {
+    /// Payload size exceeded [`MAX_CACHE_BYTES`].
+    Oversized {
+        /// Actual byte length received.
+        actual: usize,
+        /// The cap that was exceeded.
+        cap: usize,
+    },
+    /// `serde_json` failed to parse the payload.
+    Json(serde_json::Error),
+}
+
+impl std::fmt::Display for CacheDeserializeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Oversized { actual, cap } => write!(
+                f,
+                "ai_cache.content payload {actual} bytes exceeds cap {cap}"
+            ),
+            Self::Json(e) => write!(f, "ai_cache.content JSON parse failed: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for CacheDeserializeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Json(e) => Some(e),
+            Self::Oversized { .. } => None,
+        }
+    }
+}
+
+impl From<serde_json::Error> for CacheDeserializeError {
+    fn from(e: serde_json::Error) -> Self {
+        Self::Json(e)
+    }
+}
+
+/// Deserialise an `ai_cache.content` payload into `T`, enforcing
+/// the [`MAX_CACHE_BYTES`] size cap first.
+///
+/// Every production reader of `ai_cache.content` must route through
+/// this helper instead of calling `serde_json::from_slice`
+/// directly. On size cap exceedance, returns
+/// [`CacheDeserializeError::Oversized`] without invoking the
+/// deserialiser — the caller logs + falls back to "no cache"
+/// semantics (re-run the producing stage).
+///
+/// # Errors
+///
+/// - [`CacheDeserializeError::Oversized`] if `bytes.len() >
+///   MAX_CACHE_BYTES`.
+/// - [`CacheDeserializeError::Json`] if the bytes are within the
+///   cap but fail to parse as `T`.
+///
+/// # Examples
+///
+/// ```
+/// # use ab_core::cache::deserialize_cache_content;
+/// # use serde::Deserialize;
+/// #[derive(Deserialize)]
+/// struct Payload { items: Vec<String> }
+///
+/// let bytes = br#"{"items":["a","b"]}"#;
+/// let p: Payload = deserialize_cache_content(bytes).unwrap();
+/// assert_eq!(p.items.len(), 2);
+/// ```
+pub fn deserialize_cache_content<T>(bytes: &[u8]) -> Result<T, CacheDeserializeError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    if bytes.len() > MAX_CACHE_BYTES {
+        return Err(CacheDeserializeError::Oversized {
+            actual: bytes.len(),
+            cap: MAX_CACHE_BYTES,
+        });
+    }
+    Ok(serde_json::from_slice(bytes)?)
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
@@ -343,5 +454,63 @@ mod tests {
         assert!(cache_keys_for_stage("not-a-real-stage").is_none());
         assert!(cache_keys_for_stage("").is_none());
         assert!(cache_keys_for_stage("EXTRACT-DNA-TAGS").is_none()); // case-sensitive
+    }
+
+    // ---- B.2a — MAX_CACHE_BYTES + deserialize_cache_content ----
+
+    #[derive(serde::Deserialize, Debug, PartialEq, Eq)]
+    struct SmallPayload {
+        items: Vec<String>,
+    }
+
+    #[test]
+    fn deserialize_cache_content_happy_path() {
+        let bytes = br#"{"items":["a","b","c"]}"#;
+        let p: SmallPayload = deserialize_cache_content(bytes).expect("parse");
+        assert_eq!(
+            p,
+            SmallPayload {
+                items: vec!["a".into(), "b".into(), "c".into()]
+            }
+        );
+    }
+
+    #[test]
+    fn deserialize_cache_content_rejects_oversized_without_parsing() {
+        // Payload of (MAX_CACHE_BYTES + 1) bytes is rejected
+        // BEFORE serde_json runs — verifies the cap is the
+        // first gate.
+        let oversized = vec![b' '; MAX_CACHE_BYTES + 1];
+        let err = deserialize_cache_content::<serde_json::Value>(&oversized)
+            .expect_err("must reject oversized payload");
+        match err {
+            CacheDeserializeError::Oversized { actual, cap } => {
+                assert_eq!(actual, MAX_CACHE_BYTES + 1);
+                assert_eq!(cap, MAX_CACHE_BYTES);
+            }
+            CacheDeserializeError::Json(_) => panic!("must reject by size, not parse"),
+        }
+    }
+
+    #[test]
+    fn deserialize_cache_content_allows_at_exact_cap() {
+        // A payload exactly at MAX_CACHE_BYTES is allowed past
+        // the size gate (the cap is `>`, not `>=`); whether it
+        // parses is a separate matter.
+        let mut bytes = Vec::with_capacity(MAX_CACHE_BYTES);
+        bytes.push(b'"');
+        bytes.resize(MAX_CACHE_BYTES - 1, b'a');
+        bytes.push(b'"');
+        assert_eq!(bytes.len(), MAX_CACHE_BYTES);
+        let parsed: Result<String, _> = deserialize_cache_content(&bytes);
+        // At-cap content parses fine as a quoted string.
+        parsed.expect("at-cap payload should parse");
+    }
+
+    #[test]
+    fn deserialize_cache_content_propagates_json_error() {
+        let bad = br#"{"items":not_json}"#;
+        let err = deserialize_cache_content::<SmallPayload>(bad).expect_err("invalid JSON");
+        assert!(matches!(err, CacheDeserializeError::Json(_)));
     }
 }

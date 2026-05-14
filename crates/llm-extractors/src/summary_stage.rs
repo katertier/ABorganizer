@@ -276,9 +276,10 @@ async fn load_full_transcript(library: &LibraryDb, book_id: BookId) -> Result<Op
     let Some(bytes) = row.content else {
         return Ok(None);
     };
-    let cached: CachedTranscript = match serde_json::from_slice(&bytes) {
+    let cached: CachedTranscript = match ab_core::cache::deserialize_cache_content(&bytes) {
         Ok(c) => c,
         Err(e) => {
+            // B.2a: covers JSON parse failures + oversized payloads.
             tracing::warn!(book_id = id, error = %e, "fm.summary.transcript_unparseable");
             return Ok(None);
         }
