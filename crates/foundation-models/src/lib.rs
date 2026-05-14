@@ -458,9 +458,15 @@ pub fn complete_stream(
     }
     #[cfg(not(aborg_fm_bridge))]
     {
+        // `use` lifted above the `let _` to satisfy clippy's
+        // `items_after_statements`. This path only compiles on
+        // hosts where the Swift bridge isn't built (non-macOS,
+        // no swiftc, framework missing); we still need to
+        // produce a stream of the same shape as the bridge
+        // impl returns.
+        use futures::stream::{self, StreamExt as _};
         let _ = (prompt, options);
         // One-shot error stream: yield Err(BridgeUnavailable), end.
-        use futures::stream::{self, StreamExt as _};
         stream::once(async move { Err(BridgeError::BridgeUnavailable) }).boxed()
     }
 }
