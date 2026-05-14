@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT head_lands_in_silence AS \"head!: i64\",\n                  tail_lands_in_silence AS \"tail!: i64\"\n           FROM book_file_audiologos\n           WHERE file_id = ? AND kind = 'intro' AND status = 'applied'",
+  "describe": {
+    "columns": [
+      {
+        "name": "head!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "tail!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "aeab692acafaa153eaabefc10569d0f7a3cc230a659a7cb74d67b93c226ce995"
+}

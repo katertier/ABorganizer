@@ -69,6 +69,31 @@ pub struct ApplyCutParams<'a> {
     pub audiologo_id: Option<i64>,
     /// Per-row confidence (0.0..=1.0).
     pub confidence: f64,
+    /// Synthetic leading silence (ms) to prepend before the cut
+    /// output when [`Self::head_lands_in_silence`] is `false`.
+    /// Default 500 (ACX lower bound) per ADR-0024 Revision 3.
+    /// Audio-mutation slice 4B.x.2 honors this; today it's
+    /// persisted for forward-compatibility only.
+    pub head_silence_ms: u32,
+    /// Synthetic trailing silence (ms) to append after the cut
+    /// output when [`Self::tail_lands_in_silence`] is `false`.
+    /// Default 1500 (ACX lower bound) per ADR-0024 Revision 3.
+    /// Audio-mutation slice 4B.x.2 honors this; today it's
+    /// persisted for forward-compatibility only.
+    pub tail_silence_ms: u32,
+    /// Whether the detector reports the cut's head boundary
+    /// already lands in natural silence. When `true`,
+    /// [`Self::head_silence_ms`] is skipped (the existing silence
+    /// is the pause). When `false`, slice 4B.x.2 prepends the
+    /// synthetic silence. Defaults to `false` (conservative "always
+    /// pad") until slice 4B.x.3 flips it from detector logic.
+    pub head_lands_in_silence: bool,
+    /// Whether the detector reports the cut's tail boundary
+    /// already lands in natural silence. Mirror of
+    /// [`Self::head_lands_in_silence`]; same default + same
+    /// rollout note. Persisted to
+    /// `book_file_audiologos.tail_lands_in_silence` (migration 023).
+    pub tail_lands_in_silence: bool,
 }
 
 /// Result of a successful [`apply_audiologo_cut`].
@@ -159,12 +184,20 @@ pub async fn insert_audiologo_row(
     tx: &mut SqliteConnection,
     p: &ApplyCutParams<'_>,
 ) -> Result<i64, ApiError> {
+    // Cast bools to i64 for the SQLite INTEGER columns (migration
+    // 023 — `head_lands_in_silence` / `tail_lands_in_silence`).
+    // Defaults are stored explicitly rather than relying on the
+    // schema DEFAULT so the column value reflects the caller's
+    // (or stage's) intent at insert time.
+    let head_in_silence = i64::from(p.head_lands_in_silence);
+    let tail_in_silence = i64::from(p.tail_lands_in_silence);
     let insert = sqlx::query!(
         r#"INSERT INTO book_file_audiologos
            (file_id, kind, jingle_start_ms, jingle_end_ms,
             padding_ms, method, audiologo_id, confidence,
+            head_lands_in_silence, tail_lands_in_silence,
             status, applied_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'applied',
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'applied',
                    strftime('%s','now'))"#,
         p.file_id,
         p.kind,
@@ -174,6 +207,8 @@ pub async fn insert_audiologo_row(
         p.method,
         p.audiologo_id,
         p.confidence,
+        head_in_silence,
+        tail_in_silence,
     )
     .execute(&mut *tx)
     .await

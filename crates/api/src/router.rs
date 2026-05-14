@@ -2198,6 +2198,15 @@ async fn books_audiologo_cut(
             method: ab_audiologo::Method::Manual.as_str(),
             audiologo_id: None, // deferred fingerprint insert
             confidence: 1.0,
+            // Manual cuts default to "always pad" — operator
+            // hasn't told us the boundary lands in natural
+            // silence. Per-row override could be exposed via the
+            // POST body in a later slice if operators want to
+            // skip synthetic silence on hand-tuned cuts.
+            head_silence_ms: 500,
+            tail_silence_ms: 1500,
+            head_lands_in_silence: false,
+            tail_lands_in_silence: false,
         },
     )
     .await?;
