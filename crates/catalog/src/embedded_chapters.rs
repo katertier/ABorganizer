@@ -28,11 +28,14 @@
 //! "Part N" entry covering their full range (matches the
 //! merge-chapters behaviour `ABtagger` established).
 //!
-//! # What this stage does NOT handle
+//! # MP3 dispatch
 //!
-//! MP3 `CHAP` frames (`ID3v2` chapter atoms). `Lofty` supports those
-//! but `mp4ameta` doesn't, so they'd need a separate path through
-//! the same stage. Follow-up slice.
+//! MP3 files carry chapters as `ID3v2` `CHAP` frames, not MP4
+//! atoms. We dispatch on the file extension: `.mp3` goes through
+//! [`crate::mp3_chap`] (hand-rolled CHAP decoder over lofty's
+//! `Frame::Binary` fallback — lofty 0.24 doesn't know the `CHAP`
+//! frame shape, but exposes the body bytes). Everything else
+//! goes through `mp4ameta`.
 
 use async_trait::async_trait;
 
@@ -154,11 +157,21 @@ async fn fetch_book_files(library: &ab_db::LibraryDb, book_id: BookId) -> Result
         .collect())
 }
 
-/// Read `chpl` (chapter list) chapters from one MP4 file, with
-/// fallback to the chapter-track. Returns `(start_ms, title)`
-/// tuples in file-local time. Non-MP4 files and read errors
-/// return an empty vector — they're not fatal.
+/// Read chapters from one audio file. Dispatches on extension:
+/// `.mp3` goes through [`crate::mp3_chap`] (`ID3v2` `CHAP` frames);
+/// everything else (`.m4b`, `.m4a`, `.mp4`) goes through
+/// `mp4ameta` and reads `chpl` (chapter list) first, falling
+/// back to the chapter-track. Returns `(start_ms, title)` tuples
+/// in file-local time. Unreadable / extension-less files return
+/// an empty vector — they're not fatal.
 fn read_chapters_from_file(path: &std::path::Path) -> Vec<(u64, String)> {
+    let is_mp3 = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("mp3"));
+    if is_mp3 {
+        return crate::mp3_chap::read_chapters_from_mp3(path);
+    }
     let tag = match mp4ameta::Tag::read_from_path(path) {
         Ok(t) => t,
         Err(e) => {

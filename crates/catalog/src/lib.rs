@@ -23,6 +23,7 @@ pub mod embedded_chapters;
 pub mod enrich;
 pub mod franchise;
 pub mod identity;
+pub mod mp3_chap;
 
 pub use audible::AudibleClient;
 pub use audible_search::AudibleSearchStage;

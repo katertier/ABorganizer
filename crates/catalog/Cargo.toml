@@ -18,6 +18,11 @@ ab-pipeline = { workspace = true }
 # For Stage::requires() typed dependencies on tag-read.
 ab-tag-read = { workspace = true }
 async-trait = { workspace = true }
+# Used for MP3 CHAP-frame access: lofty parses the ID3v2 tag,
+# surfaces CHAP as `Frame::Binary` (the spec frame is not in
+# lofty's typed set), and `mp3_chap` hand-rolls the chapter
+# decode on the binary body.
+lofty       = { workspace = true }
 mp4ameta    = { workspace = true }
 reqwest     = { workspace = true }
 serde       = { workspace = true }
