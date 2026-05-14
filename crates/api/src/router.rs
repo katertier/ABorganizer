@@ -747,6 +747,13 @@ struct BooksQuery {
     limit: Option<u32>,
     /// Page offset.
     offset: Option<u32>,
+    /// When `true`, soft-deleted books (those with
+    /// `books.deleted_at IS NOT NULL`) appear in the response.
+    /// Default `false` — most callers want the active library.
+    /// See migration 024 + slice #102 for the soft-delete
+    /// semantics.
+    #[serde(default)]
+    include_deleted: bool,
 }
 
 /// Raw row shape pulled from the dynamic `books_list` SQL.
@@ -817,6 +824,12 @@ async fn books_list(
            FROM books b
            WHERE 1 = 1 ",
     );
+    // Soft-delete filter (migration 024). Default: hide
+    // soft-deleted; opt-in via `?include_deleted=true` so
+    // operators can audit / restore them.
+    if !q.include_deleted {
+        qb.push(" AND b.deleted_at IS NULL ");
+    }
     if let Some(needle) = q.q.as_deref().filter(|s| !s.is_empty()) {
         qb.push(" AND b.title LIKE ")
             .push_bind(format!("%{needle}%"));
@@ -934,6 +947,13 @@ struct BookDetailResponse {
     abridged: Option<bool>,
     explicit: Option<bool>,
     audiologo_status: String,
+    /// Soft-delete timestamp (`books.deleted_at`). `null` for
+    /// active books; unix-seconds when soft-deleted (slice #102,
+    /// migration 024). The list endpoint hides soft-deleted
+    /// rows by default; the detail endpoint always returns the
+    /// row regardless of state so callers can render a
+    /// "restore this book" UI without a second roundtrip.
+    deleted_at: Option<i64>,
 
     // Joined.
     author: Option<String>,
@@ -983,6 +1003,7 @@ async fn books_get(
               b.abridged,
               b.explicit,
               b.audiologo_status,
+              b.deleted_at,
               b.summary_spoiler_free AS summary,
               b.story_arc_json,
               b.setting,
@@ -1085,6 +1106,7 @@ async fn books_get(
         abridged: core.abridged.map(|v| v != 0),
         explicit: core.explicit.map(|v| v != 0),
         audiologo_status: core.audiologo_status,
+        deleted_at: core.deleted_at,
         author: core.author,
         narrators: core.narrators,
         publisher: core.publisher,
@@ -1381,57 +1403,53 @@ async fn books_patch(
 #[derive(Deserialize)]
 struct BooksDeleteQuery {
     /// Per ADR-0029 § "Truly-irreversible operations", `force`
-    /// is the second-tier opt-in for the unrecoverable variant
-    /// (here: hard delete that cascades through every per-book
-    /// FK). v1 ONLY supports `force=true`; soft-delete defers
-    /// to a follow-up slice that adds a `books.deleted_at`
-    /// column + filters every read query.
+    /// is the second-tier opt-in for the unrecoverable variant.
+    /// Without `force`, the handler soft-deletes (reversible by
+    /// flipping `books.deleted_at` back to NULL — a future
+    /// `restore` endpoint will surface this). With `force=true`,
+    /// the row is hard-deleted with CASCADE.
     #[serde(default)]
     force: bool,
 }
 
-/// `DELETE /api/v1/books/{book_id}` — hard delete with cascade.
+/// `DELETE /api/v1/books/{book_id}` — soft-delete by default,
+/// hard-delete with `?force=true`.
 ///
-/// API.md's plan is soft-delete (default) + `?force=true` for
-/// hard delete. v1 ships only the hard-delete half. Without
-/// `?force=true` returns **400 `BadRequest`** with an explicit
-/// message pointing at the deferred soft-delete plan; this
-/// fails-loud rather than silently soft-deleting via missing
-/// schema.
+/// **Soft delete** (no `force`, the default): sets
+/// `books.deleted_at = unix-now`. Row stays in the database,
+/// FKs intact; the list endpoint hides it (unless
+/// `?include_deleted=true`); the dispatcher stops scheduling
+/// new pipeline work for it. A future restore endpoint can
+/// flip `deleted_at` back to NULL.
 ///
-/// With `?force=true`:
-/// - **204 `NoContent`** on success. Every `ON DELETE CASCADE`
-///   FK on `books.book_id` clears in the same transaction
-///   (`book_field_provenance`, `book_files`, `chapters`,
-///   `book_narrator`, `book_series`, `book_tags`, `characters`).
-///   `mass_edit_history` rows survive with orphaned `target_id`
-///   — that's the audit-trail-preservation design.
-/// - **404 `NotFound`** when `book_id` doesn't exist.
+/// **Hard delete** (`?force=true`): drops the row outright.
+/// Every `ON DELETE CASCADE` FK on `books.book_id` clears in
+/// the same transaction (`book_field_provenance`, `book_files`,
+/// `chapters`, `book_narrator`, `book_series`, `book_tags`,
+/// `characters`). `mass_edit_history` rows survive with
+/// orphaned `target_id` — that's the audit-trail-preservation
+/// design.
 ///
-/// On-disk files in `book_files.file_path` are NOT removed
-/// here — that's a separate cleanup concern (future
-/// `OrphanBookFilesTarget` per the cleanup-future-targets
-/// memo). Operators who want to reclaim disk space after a
-/// delete must currently `rm` the files themselves or wait
-/// for the future cleanup target.
+/// Both paths return **204 `NoContent`** on success and **404
+/// `NotFound`** when the book doesn't exist. The soft path is
+/// idempotent: a second soft-delete on an already-soft-deleted
+/// row returns 204 with no further changes (`deleted_at` not
+/// overwritten — preserves the original deletion timestamp).
+///
+/// On-disk audio files in `book_files.file_path` are NOT
+/// removed by either path — that's a separate cleanup concern
+/// (future `OrphanBookFilesTarget` per the
+/// cleanup-future-targets memo).
 async fn books_delete(
     State(state): State<ApiState>,
     Path(book_id): Path<i64>,
     axum::extract::Query(q): axum::extract::Query<BooksDeleteQuery>,
 ) -> Result<StatusCode, ApiError> {
-    if !q.force {
-        return Err(ApiError::BadRequest(
-            "DELETE /books/{id} requires `?force=true` in v1 (soft-delete \
-             is the future default per API.md; not yet implemented)"
-                .to_owned(),
-        ));
-    }
-
     let pool = state.inner.library.pool();
 
     // Cheap existence check up front so 404 doesn't surface as
-    // "0 rows affected by DELETE" — distinguishes a missing
-    // book from a concurrent delete race.
+    // "0 rows affected" — distinguishes a missing book from a
+    // concurrent delete race.
     let exists = sqlx::query!(
         r#"SELECT EXISTS(SELECT 1 FROM books WHERE book_id = ?) AS "exists!: i64""#,
         book_id,
@@ -1447,12 +1465,37 @@ async fn books_delete(
         return Err(ApiError::NotFound(format!("book {book_id}")));
     }
 
-    sqlx::query!("DELETE FROM books WHERE book_id = ?", book_id)
+    if q.force {
+        sqlx::query!("DELETE FROM books WHERE book_id = ?", book_id)
+            .execute(pool)
+            .await
+            .map_err(|e| {
+                ApiError::Internal(ab_core::Error::Database(format!("books_delete hard: {e}")))
+            })?;
+        tracing::info!(book_id, "api.books.deleted_force");
+    } else {
+        // Soft-delete. `WHERE deleted_at IS NULL` preserves the
+        // ORIGINAL deletion timestamp on re-call — idempotent
+        // per the doc.
+        let now = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs()),
+        )
+        .unwrap_or(i64::MAX);
+        sqlx::query!(
+            "UPDATE books SET deleted_at = ? WHERE book_id = ? AND deleted_at IS NULL",
+            now,
+            book_id,
+        )
         .execute(pool)
         .await
-        .map_err(|e| ApiError::Internal(ab_core::Error::Database(format!("books_delete: {e}"))))?;
+        .map_err(|e| {
+            ApiError::Internal(ab_core::Error::Database(format!("books_delete soft: {e}")))
+        })?;
+        tracing::info!(book_id, deleted_at = now, "api.books.soft_deleted");
+    }
 
-    tracing::info!(book_id, "api.books.deleted_force");
     Ok(StatusCode::NO_CONTENT)
 }
 
