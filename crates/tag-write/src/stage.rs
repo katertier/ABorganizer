@@ -145,7 +145,7 @@ impl TagWriteEarlyStage {
                 // is misconfigured isn't acceptable.
                 let http = reqwest::Client::new();
                 Self {
-                    cover: crate::cover::CoverClient::with_parts(http, defaults.cover_max_bytes),
+                    cover: ab_covers::CoverClient::with_parts(http, defaults.cover_max_bytes),
                 }
             }
         }
@@ -528,7 +528,7 @@ impl TagWriteFinalStage {
                 tracing::warn!(error = %e, "tag-write.final.cover_client_build_failed_using_fallback");
                 let http = reqwest::Client::new();
                 Self {
-                    cover: crate::cover::CoverClient::with_parts(http, defaults.cover_max_bytes),
+                    cover: ab_covers::CoverClient::with_parts(http, defaults.cover_max_bytes),
                 }
             }
         }

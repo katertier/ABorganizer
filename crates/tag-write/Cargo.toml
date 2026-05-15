@@ -13,6 +13,12 @@ workspace = true
 
 [dependencies]
 ab-core       = { workspace = true }
+# Cover-art fetch + pixel-bomb guard moved to `ab-covers` in
+# slice B.15 (ADR-0030). tag-write re-exports `CoverClient` +
+# `CoverFetchError` for back-compat; tag-write callers + the
+# `TagWriteEarlyStage` fallback in `stage.rs` route through
+# `ab_covers::*`.
+ab-covers     = { workspace = true }
 ab-db         = { workspace = true }
 ab-pipeline   = { workspace = true }
 async-trait   = { workspace = true }
@@ -20,10 +26,6 @@ async-trait   = { workspace = true }
 # through `lofty::tag::Tag::save_to`-style APIs; the typed
 # `ItemKey` mapping is symmetric with what tag-read pulls.
 lofty         = { workspace = true }
-# Cover-art fetch (C3a). Streamed download with a hard size
-# cap so a misbehaving CDN can't OOM the daemon. `futures` is
-# the StreamExt source for `bytes_stream().next()`.
-futures       = { workspace = true }
 reqwest       = { workspace = true }
 sqlx          = { workspace = true }
 thiserror     = { workspace = true }
@@ -36,6 +38,5 @@ uuid          = { workspace = true }
 
 [dev-dependencies]
 tempfile      = { workspace = true }
-# Tiny in-process HTTP server for cover-fetcher tests.
 tokio         = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
 tokio-util    = { workspace = true }
