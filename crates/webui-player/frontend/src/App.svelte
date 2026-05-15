@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { HOST } from "./lib/host.js";
+    import { HOST } from "./lib/shared/host.js";
     import Library from "./routes/Library.svelte";
     import Setup from "./routes/Setup.svelte";
     import Player from "./routes/Player.svelte";

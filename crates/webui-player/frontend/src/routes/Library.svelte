@@ -1,6 +1,6 @@
 <script lang="ts">
     import { onMount } from "svelte";
-    import { apiGet } from "../lib/api.js";
+    import { apiGet } from "../lib/shared/api.js";
 
     type Book = {
         book_id: number;

@@ -44,9 +44,10 @@ frontend/
 │   ├── App.svelte        # Top-level component + hash router
 │   ├── app.css           # Global resets + base typography
 │   ├── lib/
-│   │   ├── host.ts       # Host-detection contract (ADR-0040)
-│   │   ├── api.ts        # `fetch` helpers with bearer-token glue
-│   │   └── player/
+│   │   ├── shared/       # CROSS-APP — host-detection + API client.
+│   │   │   ├── host.ts   # Host-detection contract (ADR-0040).
+│   │   │   └── api.ts    # `fetch` helpers with bearer-token glue.
+│   │   └── player/       # PLAYER-ONLY — engine adapter.
 │   │       └── engine.ts # PlayerEngine adapter (browser vs. menubar)
 │   └── routes/
 │       ├── Library.svelte # Book list (calls GET /books)
@@ -69,6 +70,22 @@ frontend/
 
 Each step is its own slice; this scaffolding is step 1's
 foundation only.
+
+## Shared frontend modules (`src/lib/shared/`)
+
+`src/lib/shared/` is the **cross-application** TypeScript module
+shared with any future Svelte frontend in this workspace (the
+planned `webui-config` rewrite from Askama, plus any sibling
+apps that ship later).
+
+The factor exists today even with only one consumer (the player
+SPA) per the schema-as-if-planned-from-day-one rule (2026-05-15
+retrospective, item #6): when a second Svelte app lands, it
+imports from this location via a relative path — never copies.
+
+If a third consumer appears, promote `shared/` to a top-level
+`frontend/shared/` Bun workspace package + introduce a Vite
+path alias. Defer that move until the third consumer is real.
 
 ## Not part of the Rust build
 
