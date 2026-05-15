@@ -25,6 +25,7 @@
 #![allow(missing_docs)] // scaffold-stage
 
 pub mod cleanup;
+pub(crate) mod output_resolve;
 pub mod stage;
 
 pub use cleanup::PostTranscodeSourcesTarget;
