@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE book_files SET companion_paired_count = MAX(0, companion_paired_count - 1) WHERE book_id = ? AND is_active = 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "dd525c14a2361982dc13a4ed695e98ced0c74b565348f7b4b42e477c15906094"
+}

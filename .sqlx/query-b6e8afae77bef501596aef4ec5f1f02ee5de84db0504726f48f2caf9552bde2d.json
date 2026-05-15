@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO book_companions (path, format, parse_tier, content_hash, bytes, discovered_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(path) DO UPDATE SET format = excluded.format, parse_tier = excluded.parse_tier, content_hash = excluded.content_hash, bytes = excluded.bytes RETURNING companion_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "companion_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b6e8afae77bef501596aef4ec5f1f02ee5de84db0504726f48f2caf9552bde2d"
+}

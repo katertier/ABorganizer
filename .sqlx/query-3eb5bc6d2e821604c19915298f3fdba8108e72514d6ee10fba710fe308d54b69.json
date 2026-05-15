@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE book_companions SET book_id = NULL WHERE companion_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "3eb5bc6d2e821604c19915298f3fdba8108e72514d6ee10fba710fe308d54b69"
+}
