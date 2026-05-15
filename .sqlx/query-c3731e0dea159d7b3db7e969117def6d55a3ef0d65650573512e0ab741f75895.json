@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n            f.rowid AS \"book_id!: i64\",\n            b.title AS \"title!: String\",\n            f.rank  AS \"rank!: f64\"\n         FROM books_fts f\n         INNER JOIN books b ON b.book_id = f.rowid\n         WHERE f.books_fts MATCH ?\n           AND b.deleted_at IS NULL\n         ORDER BY f.rank\n         LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "book_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "title!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "rank!: f64",
+        "ordinal": 2,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "c3731e0dea159d7b3db7e969117def6d55a3ef0d65650573512e0ab741f75895"
+}

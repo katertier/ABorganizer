@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE books SET title = 'The Way of Kings' WHERE book_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "987a10e0c8826faa75b4a9d6075644fbca92cbdf44c69da1a5e5bacf4729b737"
+}

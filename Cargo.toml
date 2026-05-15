@@ -29,6 +29,7 @@ members = [
     "crates/archive",
     "crates/companion",
     "crates/covers",
+    "crates/search",
     "crates/tag-read",
     "crates/tag-write",
     "bins/aborg",
@@ -193,6 +194,7 @@ ab-journal     = { path = "crates/journal" }
 ab-archive     = { path = "crates/archive" }
 ab-companion   = { path = "crates/companion" }
 ab-covers      = { path = "crates/covers" }
+ab-search      = { path = "crates/search" }
 ab-tag-read    = { path = "crates/tag-read" }
 ab-tag-write   = { path = "crates/tag-write" }
 

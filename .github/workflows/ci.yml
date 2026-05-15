@@ -135,10 +135,16 @@ jobs:
           # few tables (e.g. `meta`) are declared in both schemas with
           # the same shape; production runs them against separate DBs
           # and stays strict — this rewrite never touches source files.
+          #
+          # FTS5 is required by migration 030 (books_fts). The macOS
+          # system `sqlite3` binary doesn't carry FTS5 — use the
+          # Homebrew-provided one which does (and is what sqlx-cli +
+          # the bundled `libsqlite3-sys` build against).
+          SQLITE=$(brew --prefix sqlite)/bin/sqlite3
           rm -f /tmp/aborg-prep.db
           for migration in crates/db/migrations/library/*.sql crates/db/migrations/ephemeral/*.sql; do
             sed -E 's/CREATE (UNIQUE )?(TABLE|INDEX) /CREATE \1\2 IF NOT EXISTS /g; s/INSERT INTO /INSERT OR IGNORE INTO /g' \
-              "$migration" | sqlite3 /tmp/aborg-prep.db
+              "$migration" | "$SQLITE" /tmp/aborg-prep.db
           done
       - name: Verify `.sqlx/` is up to date
         env:
