@@ -75,12 +75,13 @@ impl Stage for ChapterWinnerStage {
     }
 
     fn requires(&self) -> &'static [StageId] {
-        // Both chapter-writing stages need to have finished
-        // (regardless of whether they each found anything) before
-        // we know what sources are available to choose between.
+        // Every chapter-writing stage needs to have finished
+        // (regardless of whether each found anything) before we
+        // know what sources are available to choose between.
         &[
             crate::chapters::STAGE_ID,
             crate::embedded_chapters::STAGE_ID,
+            crate::cue_chapters::STAGE_ID,
         ]
     }
 
@@ -218,6 +219,7 @@ mod tests {
             &[
                 crate::chapters::STAGE_ID,
                 crate::embedded_chapters::STAGE_ID,
+                crate::cue_chapters::STAGE_ID,
             ]
         );
     }
