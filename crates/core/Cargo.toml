@@ -28,7 +28,6 @@ chrono     = { workspace = true }
 # `aborg-daemon`, and future `aborg-tools` invocations all read
 # `config.toml` + AB_* env identically.
 figment    = { workspace = true }
-once_cell  = { workspace = true }
 # Filesystem-jail validation for trust-zoned paths (ADR-0049).
 # Marker types live in `path_jail::types`; we wire them onto
 # our trust zones in `path_jail` module.

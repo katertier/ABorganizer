@@ -78,9 +78,7 @@ argon2         = { version = "0.5", features = ["std"] }
 askama         = "0.12"
 async-trait    = "0.1"
 axum           = { version = "0.8", features = ["macros", "http2", "ws"] }
-axum-server    = { version = "0.8", features = ["tls-rustls"] }
 blake3         = "1.8"
-bytes          = "1.7"
 chrono         = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 clap           = { version = "4.6", features = ["derive", "env", "string"] }
 fd-lock        = "4.0"
@@ -95,7 +93,6 @@ globset        = "0.4"
 # -> impl Stream` over an mpsc::UnboundedReceiver fed by the
 # Swift FFI streaming callback.
 tokio-stream   = "0.1"
-hex            = "0.4"
 # Pure-Rust image decode + resize. Used by `ab-covers` for the
 # pixel-bomb defence (`decode_checked`) + multi-size thumbnail
 # resize. Feature set targeted at audiobook cover formats:
@@ -146,11 +143,8 @@ symphonia      = { version = "0.6", default-features = false, features = ["mp3",
 # fingerprinting (not the audiologo RMS thumbprint, which is its
 # own crate).
 rusty-chromaprint = "0.3"
-mime           = "0.3"
 mime_guess     = "2.0"
 nix            = { version = "0.29", features = ["signal", "fs"] }
-once_cell      = "1.20"
-rand           = "0.8"
 regex          = "1.10"
 reqwest        = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 ring           = "0.17"
@@ -162,7 +156,6 @@ ring           = "0.17"
 roxmltree      = "0.21"
 # (rusqlite removed: workspace standardised on sqlx for SQLite access.
 # See `docs/POLICIES.md` "One SQL crate per workspace" + ADR-0004.)
-secrecy        = { version = "0.10", features = ["serde"] }
 serde          = { version = "1.0", features = ["derive"] }
 serde_json     = "1.0"
 sqlx           = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "sqlite", "macros", "migrate", "chrono"] }
@@ -176,7 +169,6 @@ tokio          = { version = "1.52", features = ["rt-multi-thread", "macros", "f
 tokio-util     = { version = "0.7", features = ["rt"] }
 toml           = "0.8"
 tower          = { version = "0.5", features = ["util"] }
-tower-http     = { version = "0.6", features = ["cors", "trace", "compression-gzip", "fs", "set-header"] }
 tracing        = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 url            = "2.5"
@@ -211,7 +203,6 @@ path_jail      = { version = "0.3", features = ["secure-open"] }
 # LZMA (rarely used). The deflate-flate2-zlib-rs path is shared
 # transitively with safe_unzip.
 zip            = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
-zstd           = "0.13"
 
 # Internal crates (use neutral names inside the workspace; one place if
 # we ever publish them).

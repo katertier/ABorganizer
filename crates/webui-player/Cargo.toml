@@ -6,7 +6,7 @@ rust-version = { workspace = true }
 license      = { workspace = true }
 authors      = { workspace = true }
 repository   = { workspace = true }
-description  = "Player + library browser web UI (Svelte 5, built with Bun, served as static assets via tower-http)."
+description  = "Player + library browser web UI (Svelte 5, built with Bun, served as static assets)."
 
 [lints]
 workspace = true
@@ -14,5 +14,4 @@ workspace = true
 [dependencies]
 ab-core     = { workspace = true }
 axum        = { workspace = true }
-tower-http  = { workspace = true }
 tracing     = { workspace = true }
