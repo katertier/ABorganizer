@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"n!: i64\"\n         FROM books b\n         INNER JOIN media_progress mp ON mp.book_id = b.book_id\n         WHERE b.deleted_at IS NULL\n           AND b.reading_status = 'finished'\n           AND mp.last_listened_at >= ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "n!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e52a00cff66adf27b3fc89babf13d45cbc12576b8cecc753f5fff5a5ce2be72f"
+}

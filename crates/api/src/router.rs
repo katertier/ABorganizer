@@ -140,6 +140,8 @@ pub fn build_router(state: ApiState) -> Router {
             "/saved_queries/{id}/count",
             get(crate::saved_queries::saved_queries_count),
         )
+        .route("/stats", get(crate::stats::stats_get))
+        .route("/stats/breakdown", get(crate::stats::breakdown_get))
         // Auth middleware applied to ALL routes. The middleware
         // itself checks `crate::auth::PUBLIC_PATHS` to bypass
         // `/health` and `/version`; everything else needs a

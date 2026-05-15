@@ -34,6 +34,7 @@ pub mod reports;
 pub mod router;
 pub mod saved_queries;
 pub mod state;
+pub mod stats;
 pub mod tokens;
 pub mod user_edits;
 

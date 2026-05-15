@@ -31,6 +31,7 @@ ab-pipeline     = { workspace = true }
 ab-progress     = { workspace = true }
 ab-query        = { workspace = true }
 ab-saved-queries = { workspace = true }
+ab-stats        = { workspace = true }
 ab-scan         = { workspace = true }
 ab-transcript   = { workspace = true }
 ab-speech       = { workspace = true }

@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n            COUNT(*) AS \"total!: i64\",\n            SUM(CASE WHEN reading_status = 'want_to_read'\n                THEN 1 ELSE 0 END) AS \"unread!: i64\",\n            SUM(CASE WHEN reading_status = 'reading'\n                THEN 1 ELSE 0 END) AS \"reading!: i64\",\n            SUM(CASE WHEN reading_status = 'finished'\n                THEN 1 ELSE 0 END) AS \"finished!: i64\",\n            SUM(CASE WHEN reading_status = 'dnf'\n                THEN 1 ELSE 0 END) AS \"dnf!: i64\"\n         FROM books WHERE deleted_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "total!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "unread!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "reading!: i64",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "finished!: i64",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "dnf!: i64",
+        "ordinal": 4,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "1ee1bbffff940b6ee840a427ed7d0a614779db99f8110a783aa459d8aee0d986"
+}
