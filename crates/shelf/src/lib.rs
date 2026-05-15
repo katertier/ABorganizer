@@ -26,9 +26,10 @@
 //! shared via [`ab_db::lookup_by_raw_token`]). Only
 //! `/healthcheck` and `/api/info` bypass auth.
 //!
-//! HTTP Range support is still pending — `stream_file` serves
-//! the whole file regardless of `Range:` header. Tracked as a
-//! follow-up slice.
+//! HTTP `Range:` support shipped in slice C1b-range — see
+//! [`files`] for the RFC 7233 semantics (`bytes=N-M` /
+//! `bytes=N-` / `bytes=-N`, 416 on unsatisfiable, `Accept-Ranges:
+//! bytes` advertisement).
 
 #![allow(missing_docs)] // scaffold
 
