@@ -11,7 +11,7 @@
 //! picks the winning description value first; only then can we
 //! detect what language it's in. Folding into consensus itself
 //! would mix two concerns (winner-picking + NL detection). A
-//! separate `requires=["consensus"]` stage keeps both simple.
+//! separate `requires=["promote-consensus"]` stage keeps both simple.
 //!
 //! ## Idempotency
 //!

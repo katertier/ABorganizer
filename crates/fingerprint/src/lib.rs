@@ -59,7 +59,7 @@ use ab_pipeline::{Stage, StageContext, StageId, StageOutcome};
 
 /// Typed stage identifier for this stage. Imported by dependents
 /// in their `Stage::requires()` impls.
-pub const STAGE_ID: StageId = StageId::new("fingerprint");
+pub const STAGE_ID: StageId = StageId::new("fingerprint-book");
 
 /// Window length per fingerprint (seconds). Chromaprint v2 is tuned
 /// for ~30s; shorter windows give noisier hashes.

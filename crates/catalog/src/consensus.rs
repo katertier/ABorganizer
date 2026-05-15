@@ -81,7 +81,7 @@ const PROMOTABLE_FIELDS: &[Field] = &[
 ];
 
 /// Typed identifier for this stage.
-pub const STAGE_ID: StageId = StageId::new("consensus");
+pub const STAGE_ID: StageId = StageId::new("promote-consensus");
 
 #[async_trait]
 impl Stage for ConsensusStage {
@@ -532,14 +532,14 @@ mod tests {
             library: lib,
             ephemeral: eph,
             cancel: tokio_util::sync::CancellationToken::new(),
-            stage_name: "consensus",
+            stage_name: "promote-consensus",
         }
     }
 
     #[tokio::test]
     async fn stage_metadata_matches_pipeline_expectations() {
         let stage = ConsensusStage::new();
-        assert_eq!(stage.name(), "consensus");
+        assert_eq!(stage.name(), "promote-consensus");
         assert_eq!(stage.requires(), &[crate::enrich::STAGE_ID]);
     }
 

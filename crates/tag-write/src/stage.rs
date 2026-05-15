@@ -78,7 +78,7 @@ const TAG_WRITE_EARLY_REQUIRES: &[StageId] = &[StageId::new("tag-read")];
 /// dependency" error at daemon startup — a fast failure.
 const TAG_WRITE_FINAL_REQUIRES: &[StageId] = &[
     StageId::new("tag-read"),
-    StageId::new("consensus"),
+    StageId::new("promote-consensus"),
     StageId::new("extract-summary-spoiler-free"),
     StageId::new("extract-story-arc"),
     StageId::new("extract-characters"),
@@ -798,7 +798,7 @@ mod tests {
             s.requires(),
             &[
                 StageId::new("tag-read"),
-                StageId::new("consensus"),
+                StageId::new("promote-consensus"),
                 StageId::new("extract-summary-spoiler-free"),
                 StageId::new("extract-story-arc"),
                 StageId::new("extract-characters"),

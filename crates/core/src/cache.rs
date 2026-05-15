@@ -209,11 +209,11 @@ pub fn cache_keys_for_stage(stage: &str) -> Option<&'static [CacheKey]> {
         // pipeline_progress rows the retry endpoint clears,
         // but no cache-side cleanup.
         "tag-read"
-        | "fingerprint"
+        | "fingerprint-book"
         | "audible-search"
         | "audnexus-enrich"
         | "audnexus-chapters"
-        | "consensus"
+        | "promote-consensus"
         | "identity-resolve"
         | "embedded-chapters"
         | "chapter-pick-winner"
@@ -444,9 +444,9 @@ mod tests {
         // signal for "registered, but no caches to clear".
         for stage in [
             "tag-read",
-            "fingerprint",
+            "fingerprint-book",
             "audnexus-enrich",
-            "consensus",
+            "promote-consensus",
             "identity-resolve",
             "chapter-pick-winner",
             "detect-description-lang",
