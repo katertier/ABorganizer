@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT MAX(end_ms) AS \"max?: i64\"\n             FROM chapters\n            WHERE book_id = ? AND source = 'embedded'",
+  "describe": {
+    "columns": [
+      {
+        "name": "max?: i64",
+        "ordinal": 0,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "19695584531931a72784ef20c269b623b03ef66a30af12983d1f35a5bf8f2546"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE chapters\n                  SET start_ms = start_ms - ?, end_ms = end_ms - ?\n                WHERE book_id = (SELECT book_id FROM book_files WHERE file_id = ?)\n                  AND start_ms >= ?\n                  AND source != 'embedded'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "e05f7b97e8204b6d2ce956babd2436799e6dac86a51e83f43b99b2ac07c04ab0"
+}

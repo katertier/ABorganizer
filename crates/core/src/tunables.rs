@@ -395,6 +395,28 @@ pub struct AudiologoTunables {
     pub intro_padding_ms: u32,
     /// Padding after an outro cut (ms).
     pub outro_padding_ms: u32,
+
+    // ── Apply-cut classification (ADR-0024 Revision 4) ────────
+    //
+    // Slice 4E reads this when deciding whether `source =
+    // 'embedded'` chapter rows should participate in the
+    // chapter-shift on audiologo apply. If
+    // `MAX(end_ms WHERE source='embedded')` for the book is
+    // within this tolerance of `SUM(book_files.duration_ms)`,
+    // embedded chapters are classified as **full-with-jingles**
+    // (default — shift applies). If within tolerance of
+    // `SUM(duration_ms) - cut_ms`, classified as
+    // **pre-stripped** (a prior processor like Libation or
+    // AAXtoMP3 already cut the jingle and rewrote chpl) and the
+    // shift skips embedded rows for that book. Otherwise
+    // classified as **ambiguous** — also skipped, with a
+    // warning logged for operator review.
+    //
+    // Default 1500 ms — one chapter boundary's worth of slop
+    // for re-encoded books. Lower if false-positive "ambiguous"
+    // warnings are noisy; higher to be more permissive.
+    /// Embedded-chapter coverage classification tolerance (ms).
+    pub embedded_class_tolerance_ms: u64,
 }
 
 impl Default for AudiologoTunables {
@@ -413,6 +435,7 @@ impl Default for AudiologoTunables {
             transcript_only_min_confidence: 0.0,
             intro_padding_ms: 250,
             outro_padding_ms: 250,
+            embedded_class_tolerance_ms: 1500,
         }
     }
 }
