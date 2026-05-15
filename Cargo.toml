@@ -27,6 +27,7 @@ members = [
     "crates/stats",
     "crates/journal",
     "crates/archive",
+    "crates/covers",
     "crates/tag-read",
     "crates/tag-write",
     "bins/aborg",
@@ -91,6 +92,15 @@ globset        = "0.4"
 # Swift FFI streaming callback.
 tokio-stream   = "0.1"
 hex            = "0.4"
+# Pure-Rust image decode + resize. Used by `ab-covers` for the
+# pixel-bomb defence (`decode_checked`) + multi-size thumbnail
+# resize. Feature set targeted at audiobook cover formats:
+#   * png  — Audnexus / Audible CDN responses + embedded MP4 art
+#   * jpeg — common embedded ID3 picture + CDN format
+#   * webp — newer Audible CDN variants
+# Other formats (gif / tiff / bmp / heif) fall through; the
+# probe step rejects them with a typed error before decode.
+image          = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 # Pure-Rust audio tag + property reader. Used by the tag-read stage
 # for duration/bitrate/codec probing + ID3/MP4-atom tag extraction.
 # Pinned to a current minor; verify API on each minor bump.
@@ -180,6 +190,7 @@ ab-saved-queries = { path = "crates/saved-queries" }
 ab-stats       = { path = "crates/stats" }
 ab-journal     = { path = "crates/journal" }
 ab-archive     = { path = "crates/archive" }
+ab-covers      = { path = "crates/covers" }
 ab-tag-read    = { path = "crates/tag-read" }
 ab-tag-write   = { path = "crates/tag-write" }
 

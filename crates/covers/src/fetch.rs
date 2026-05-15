@@ -1,9 +1,12 @@
-//! Cover-art HTTP fetcher (ADR-0028, slice C3a).
+//! Cover-art HTTP fetcher.
 //!
-//! `books.cover_url` is sourced from the catalog enrich path
-//! (Audnexus / Audible CDNs). To embed the image into the file's
-//! tag, we have to fetch the bytes first. This module owns that
-//! HTTP path with:
+//! Moved from `ab-tag-write` in slice B.15 (ADR-0030) so that
+//! every consumer of cover bytes — tag-write, shelf, the future
+//! menubar app for Finder folder icons — reaches one place. The
+//! behaviour is unchanged from the tag-write version; only the
+//! crate boundary moved.
+//!
+//! Guarantees:
 //!
 //! - A reusable `reqwest::Client` configured with the project's
 //!   user agent + a per-request timeout from `HttpClientTunables`.
@@ -16,11 +19,6 @@
 //!   `book_field_provenance` row in place for a retry) vs. fatal
 //!   payload issues (the URL itself is wrong; logging that and
 //!   carrying on is the only sensible action).
-//!
-//! The fetched bytes are returned raw; embedding via lofty's
-//! `Picture::new_unchecked` happens in `crate::write`. The split
-//! keeps this module sync-blocking-free (pure async / I/O) and
-//! `write` sync-only (no runtime needed).
 
 use std::time::Duration;
 
@@ -30,29 +28,20 @@ use reqwest::Client;
 /// Typed cover-fetch failure surfaces.
 #[derive(Debug, thiserror::Error)]
 pub enum CoverFetchError {
-    /// `reqwest::Client::build` failed at construction. Almost
-    /// always a TLS-stack configuration bug rather than a
-    /// per-request issue; surfaced as a fatal error.
+    /// `reqwest::Client::build` failed at construction.
     #[error("cover client build: {0}")]
     ClientBuild(String),
-    /// The URL didn't parse or returned a non-success HTTP
-    /// status. The book's `cover_url` is probably wrong (URL
-    /// drift on the catalog side); log + skip is the operator
-    /// flow.
+    /// URL parse / non-success HTTP status / transport failure.
     #[error("cover request: {0}")]
     Request(String),
-    /// The remote claimed a payload larger than
-    /// `cover_max_bytes` (Content-Length pre-check) OR streamed
-    /// more than the cap during the read (runtime guard). The
-    /// cover is dropped; tag-write proceeds with the other
-    /// fields.
+    /// The remote claimed (or streamed) a payload larger than
+    /// `cover_max_bytes`.
     #[error("cover payload too large (max {max_bytes} bytes)")]
     TooLarge {
         /// The configured cap.
         max_bytes: u64,
     },
-    /// The fetched body was empty. An empty cover row is treated
-    /// as no-op rather than embed-an-empty-picture.
+    /// The fetched body was empty.
     #[error("cover payload was empty")]
     Empty,
 }
@@ -69,11 +58,8 @@ impl CoverClient {
     ///
     /// # Errors
     ///
-    /// Returns [`CoverFetchError::ClientBuild`] if `reqwest`'s
-    /// TLS stack refuses to initialise. In practice this means
-    /// a corrupt rustls cert store, which is fatal for the
-    /// whole pipeline — surfaced so the stage's `run()` can
-    /// log + skip rather than panic.
+    /// Returns [`CoverFetchError::ClientBuild`] if `reqwest`'s TLS
+    /// stack refuses to initialise.
     pub fn new(tunables: &HttpClientTunables) -> Result<Self, CoverFetchError> {
         let ua = format!(
             "{}/{}",
@@ -91,10 +77,8 @@ impl CoverClient {
         })
     }
 
-    /// Fetch the bytes at `url`. Streams the response, accumulating
-    /// chunks into a `Vec<u8>` while enforcing the per-fetch byte
-    /// cap. Returns the raw bytes on success — caller embeds via
-    /// lofty.
+    /// Fetch the bytes at `url`. Streams the response, enforcing
+    /// the per-fetch byte cap.
     ///
     /// # Errors
     ///
@@ -126,10 +110,6 @@ impl CoverClient {
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| CoverFetchError::Request(format!("read chunk: {e}")))?;
-            #[allow(
-                clippy::cast_possible_truncation,
-                reason = "byte counts fit u64 trivially"
-            )]
             let new_total = bytes.len() as u64 + chunk.len() as u64;
             if new_total > self.max_bytes {
                 return Err(CoverFetchError::TooLarge {
@@ -151,11 +131,11 @@ impl CoverClient {
         self.max_bytes
     }
 
-    /// Inject a pre-built client + byte cap directly. Used by
-    /// the fallback in [`crate::stage::TagWriteEarlyStage::new`]
-    /// when `reqwest::Client::builder` fails — we still want a
-    /// usable struct so the daemon boots; downstream fetches
-    /// surface their own errors.
+    /// Inject a pre-built client + byte cap directly. Used by the
+    /// fallback in `ab_tag_write::TagWriteEarlyStage::new` when
+    /// `reqwest::Client::builder` fails — we still want a usable
+    /// struct so the daemon boots; downstream fetches surface
+    /// their own errors.
     #[must_use]
     pub const fn with_parts(http: Client, max_bytes: u64) -> Self {
         Self { http, max_bytes }
@@ -171,10 +151,6 @@ mod tests {
     use tokio::io::AsyncWriteExt as _;
     use tokio::net::TcpListener;
 
-    /// Spin up a one-shot HTTP/1.1 server that serves the given
-    /// bytes once with a fixed status + content-length. Returns
-    /// the URL pointing at it. The task self-terminates after
-    /// one accept.
     async fn one_shot_server(
         status_line: &'static str,
         body: Vec<u8>,
@@ -186,8 +162,6 @@ mod tests {
 
         tokio::spawn(async move {
             let (mut sock, _) = listener.accept().await.expect("accept");
-            // Read + discard the request headers up to the
-            // double-CRLF.
             let mut buf = vec![0u8; 1024];
             let _ = tokio::io::AsyncReadExt::read(&mut sock, &mut buf).await;
 
@@ -225,7 +199,6 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_payload_over_content_length_cap() {
-        // Server claims 4096-byte content; cap is 16.
         let body = vec![0u8; 4096];
         let url = one_shot_server("200 OK", body, true).await;
         let client = CoverClient::new(&tiny_tunables(16)).expect("client");
@@ -238,8 +211,6 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_payload_when_streamed_over_cap_without_content_length() {
-        // No Content-Length header → fall through to runtime
-        // guard. 4 KB body, 16-byte cap.
         let body = vec![0xAA; 4096];
         let url = one_shot_server("200 OK", body, false).await;
         let client = CoverClient::new(&tiny_tunables(16)).expect("client");

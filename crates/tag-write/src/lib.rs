@@ -50,13 +50,15 @@
 
 pub(crate) mod abridged;
 pub mod cleanup;
-pub mod cover;
 pub mod stage;
 pub mod winners;
 pub mod write;
 
 pub use cleanup::MassEditHistoryRetentionTarget;
-pub use cover::{CoverClient, CoverFetchError};
+// Cover surface lives in `ab-covers` (ADR-0030 / slice B.15).
+// Re-export at the original path so existing `ab_tag_write::CoverClient`
+// callers compile unchanged.
+pub use ab_covers::{CoverClient, CoverFetchError};
 
 /// Provenance-source convention for tags written via the web UI's
 /// metadata-edit endpoint (`PATCH /api/v1/books/{id}`).

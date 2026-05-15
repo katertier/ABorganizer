@@ -113,7 +113,7 @@ impl WriteReport {
 /// differs from the current value, and save back.
 ///
 /// `cover_bytes` is the pre-fetched cover-art payload (when
-/// any). The stage calls [`crate::cover::CoverClient::fetch`]
+/// any). The stage calls [`ab_covers::CoverClient::fetch`]
 /// once before this loop so multi-file books reuse the same
 /// HTTP fetch. `None` means "no cover URL winner / fetch
 /// failed / fetch disabled" — `Field::CoverUrl` then falls
