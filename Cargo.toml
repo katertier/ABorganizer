@@ -131,12 +131,17 @@ mp4ameta       = "0.13"
 #   * flac      — FLAC codec + container
 #   * ogg       — Ogg container
 #   * vorbis    — Vorbis codec (the .ogg case)
+#   * all-meta  — id3v1 / id3v2 / ape standalone metadata readers
+#                 (recommended even with default-features = false
+#                 to improve probe detection).
+#   * opt-simd  — SIMD codec paths.
 #
-# Formats with no decoder in symphonia 0.5 (notably `.opus`, `.aax`,
-# `.wma`) fall through the decode path, get logged, and are skipped
-# by the fingerprint stage. Other pipeline stages (tag-read,
+# 0.6 dropped `mp3`, `aac`, `isomp4` from the default feature set;
+# we list them explicitly. Formats with no decoder (notably `.opus`,
+# `.aax`, `.wma`) fall through the decode path, get logged, and are
+# skipped by the fingerprint stage. Other pipeline stages (tag-read,
 # audiologo via separate codepath) aren't affected.
-symphonia      = { version = "0.5", features = ["mp3", "aac", "isomp4", "flac", "ogg", "vorbis"] }
+symphonia      = { version = "0.6", default-features = false, features = ["mp3", "aac", "isomp4", "flac", "ogg", "vorbis", "all-meta", "opt-simd"] }
 # Pure-Rust AcoustID-compatible chromaprint. Whole-book identity
 # fingerprinting (not the audiologo RMS thumbprint, which is its
 # own crate).
