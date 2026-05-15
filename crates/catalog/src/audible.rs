@@ -224,6 +224,51 @@ impl AudibleClient {
         Ok(all)
     }
 
+    /// Fetch the `chapter_info` subset of Audible's content-
+    /// metadata response (ADR-0050 § 3).
+    ///
+    /// Calls `GET /1.0/content/{asin}/metadata` with
+    /// `response_groups=chapter_info` against the given region's
+    /// host. Returns `Ok(None)` when Audible delivers the
+    /// envelope without the nested `chapter_info` block (common
+    /// for unshipped chapter timings); the caller routes that to
+    /// "fall back to acoustic detection only" per ADR-0024.
+    ///
+    /// # Errors
+    ///
+    /// [`ab_core::Error::Network`] on transport failure, unknown
+    /// region, non-success status, or JSON parse failure.
+    pub async fn fetch_chapter_info(
+        &self,
+        region: &str,
+        asin: &str,
+    ) -> Result<Option<crate::chapter_info::ChapterInfo>> {
+        let host = host_for_region(region).ok_or_else(|| {
+            ab_core::Error::Network(format!("audible chapter_info: unknown region `{region}`"))
+        })?;
+        let resp = self
+            .http
+            .get(format!("{host}/1.0/content/{asin}/metadata"))
+            .query(&[("response_groups", "chapter_info")])
+            .send()
+            .await
+            .map_err(|e| {
+                ab_core::Error::Network(format!("audible chapter_info [{region}/{asin}]: {e}"))
+            })?;
+        if !resp.status().is_success() {
+            return Err(ab_core::Error::Network(format!(
+                "audible chapter_info [{region}/{asin}]: HTTP {}",
+                resp.status()
+            )));
+        }
+        let body = resp.text().await.map_err(|e| {
+            ab_core::Error::Network(format!("audible chapter_info read [{region}/{asin}]: {e}"))
+        })?;
+        crate::chapter_info::parse_response(&body).map_err(|e| {
+            ab_core::Error::Network(format!("audible chapter_info parse [{region}/{asin}]: {e}"))
+        })
+    }
+
     /// Underlying HTTP client.
     #[must_use]
     pub const fn http(&self) -> &Client {
@@ -323,5 +368,68 @@ mod tests {
         assert_eq!(host_for_region("uk"), Some("https://api.audible.co.uk"));
         assert_eq!(host_for_region("au"), Some("https://api.audible.com.au"));
         assert_eq!(host_for_region("jp"), Some("https://api.audible.co.jp"));
+    }
+
+    /// Real-Audible integration test for `fetch_chapter_info`.
+    ///
+    /// Skipped in CI (no mock infra by operator direction —
+    /// `#[ignore]` keeps the harness available locally without
+    /// burning Audible API budget on every PR). Run explicitly:
+    ///
+    /// ```bash
+    /// cargo test -p ab-catalog --test '*' -- --ignored
+    /// # or
+    /// cargo test -p ab-catalog audible::tests::fetch_chapter_info \
+    ///     -- --ignored --nocapture
+    /// ```
+    ///
+    /// ASIN `B017V4IM1G` (Brandon Sanderson, *The Way of Kings*)
+    /// is chosen because it's a published US-region book that
+    /// has shipped chapter timings (so `chapter_info` is present
+    /// and `is_accurate` is `true`). If Audible ever drops the
+    /// timings or the ASIN becomes unavailable, swap to another
+    /// stable US-region book.
+    #[tokio::test]
+    #[ignore = "hits real api.audible.com — run explicitly via --ignored"]
+    async fn fetch_chapter_info_live_returns_present_for_known_asin() {
+        use super::AudibleClient;
+        use ab_core::tunables::HttpClientTunables;
+
+        let client = AudibleClient::new(&HttpClientTunables::default());
+        let result = client
+            .fetch_chapter_info("us", "B017V4IM1G")
+            .await
+            .expect("fetch ok");
+
+        let ci = result.expect("chapter_info present on this ASIN");
+        assert!(
+            ci.runtime_ms.unwrap_or(0) > 0,
+            "expected non-zero runtime, got {:?}",
+            ci.runtime_ms
+        );
+        // Brand durations may be 0 on some books — only assert
+        // the field is decodable, not its exact value. For
+        // diagnostic output during `--nocapture` runs, the
+        // assertion-failure path above produces all needed
+        // context.
+    }
+
+    /// Unknown region returns `ab_core::Error::Network`, not a
+    /// silent skip. No network call.
+    #[tokio::test]
+    async fn fetch_chapter_info_unknown_region_errors() {
+        use super::AudibleClient;
+        use ab_core::tunables::HttpClientTunables;
+
+        let client = AudibleClient::new(&HttpClientTunables::default());
+        let err = client
+            .fetch_chapter_info("zz", "B000000000")
+            .await
+            .expect_err("unknown region must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown region"),
+            "expected unknown-region message, got {msg}"
+        );
     }
 }
