@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n            COALESCE(SUM(CASE WHEN b.reading_status = 'finished'\n                THEN b.duration_ms ELSE 0 END), 0) AS \"hours_all_time_ms!: i64\",\n            COALESCE(SUM(CASE WHEN b.reading_status = 'finished'\n                AND mp.last_listened_at >= ?\n                THEN b.duration_ms ELSE 0 END), 0) AS \"hours_year_ms!: i64\",\n            COALESCE(AVG(CASE WHEN b.reading_status = 'finished'\n                THEN b.duration_ms END), 0) AS \"avg_finished_ms!: f64\"\n         FROM books b\n         LEFT JOIN media_progress mp ON mp.book_id = b.book_id\n         WHERE b.deleted_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "hours_all_time_ms!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "hours_year_ms!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "avg_finished_ms!: f64",
+        "ordinal": 2,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "c63ff9d65206e0c56618224c97da96d5f02273547510a6059aa7c90be1bea00d"
+}

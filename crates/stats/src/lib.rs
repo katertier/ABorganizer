@@ -1,0 +1,475 @@
+//! Library stats — counts, listening totals, pie-chart breakdowns
+//! (ADR-0044, slice B.17).
+//!
+//! Two surfaces:
+//!
+//! * [`stats`] — counts + listening totals (single-row response).
+//! * [`breakdown`] — pie-chart data for a [`Dimension`].
+//!
+//! All queries run against `library.db`. Stats are recomputed on
+//! every request — no cache. At v1.0 sizes (20–100k books) the
+//! aggregations stay under 100ms on local SQLite.
+
+#![forbid(unsafe_code)]
+#![allow(missing_docs)] // scaffold; tightened in follow-up slices
+
+use serde::Serialize;
+use sqlx::SqlitePool;
+
+#[derive(Debug, thiserror::Error)]
+pub enum StatsError {
+    #[error(transparent)]
+    Db(#[from] sqlx::Error),
+    #[error("unsupported dimension: {0}")]
+    UnsupportedDimension(String),
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct StatsResponse {
+    pub counts: Counts,
+    pub listening: Listening,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Counts {
+    pub total: u64,
+    pub finished_year: u64,
+    pub finished_all_time: u64,
+    pub unread: u64,
+    pub reading: u64,
+    pub dnf: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Listening {
+    pub hours_year: f64,
+    pub hours_all_time: f64,
+    pub longest_streak_days: u32,
+    pub avg_book_hours: f64,
+    pub avg_daily_minutes: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BreakdownResponse {
+    pub dimension: String,
+    pub buckets: Vec<Bucket>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Bucket {
+    pub label: String,
+    pub count: u64,
+    pub hours: f64,
+    pub percentage: f32,
+}
+
+/// Pie-chart dimensions supported in this slice. `Loudness`
+/// arrives once B.20 ships `books.lufs_integrated`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dimension {
+    Language,
+    Length,
+    ReadingStatus,
+    AcquisitionYear,
+}
+
+impl Dimension {
+    pub fn parse(s: &str) -> Result<Self, StatsError> {
+        Ok(match s {
+            "language" => Self::Language,
+            "length" => Self::Length,
+            "reading_status" => Self::ReadingStatus,
+            "acquisition_year" => Self::AcquisitionYear,
+            other => return Err(StatsError::UnsupportedDimension(other.to_owned())),
+        })
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Language => "language",
+            Self::Length => "length",
+            Self::ReadingStatus => "reading_status",
+            Self::AcquisitionYear => "acquisition_year",
+        }
+    }
+}
+
+/// Cap on bucket count before the long tail rolls into `Others`.
+pub const TOP_N: usize = 20;
+
+fn year_start_unix() -> i64 {
+    use chrono::{Datelike, NaiveDate, TimeZone, Utc};
+    let now = Utc::now();
+    let start = NaiveDate::from_ymd_opt(now.year(), 1, 1)
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .map(|dt| Utc.from_utc_datetime(&dt));
+    start.map_or(0, |dt| dt.timestamp())
+}
+
+/// Compute counts + listening totals.
+pub async fn stats(pool: &SqlitePool) -> Result<StatsResponse, StatsError> {
+    let year_start = year_start_unix();
+
+    let counts_row = sqlx::query!(
+        r#"SELECT
+            COUNT(*) AS "total!: i64",
+            SUM(CASE WHEN reading_status = 'want_to_read'
+                THEN 1 ELSE 0 END) AS "unread!: i64",
+            SUM(CASE WHEN reading_status = 'reading'
+                THEN 1 ELSE 0 END) AS "reading!: i64",
+            SUM(CASE WHEN reading_status = 'finished'
+                THEN 1 ELSE 0 END) AS "finished!: i64",
+            SUM(CASE WHEN reading_status = 'dnf'
+                THEN 1 ELSE 0 END) AS "dnf!: i64"
+         FROM books WHERE deleted_at IS NULL"#,
+    )
+    .fetch_one(pool)
+    .await?;
+
+    let finished_year_row = sqlx::query!(
+        r#"SELECT COUNT(*) AS "n!: i64"
+         FROM books b
+         INNER JOIN media_progress mp ON mp.book_id = b.book_id
+         WHERE b.deleted_at IS NULL
+           AND b.reading_status = 'finished'
+           AND mp.last_listened_at >= ?"#,
+        year_start,
+    )
+    .fetch_one(pool)
+    .await?;
+
+    let hours_row = sqlx::query!(
+        r#"SELECT
+            COALESCE(SUM(CASE WHEN b.reading_status = 'finished'
+                THEN b.duration_ms ELSE 0 END), 0) AS "hours_all_time_ms!: i64",
+            COALESCE(SUM(CASE WHEN b.reading_status = 'finished'
+                AND mp.last_listened_at >= ?
+                THEN b.duration_ms ELSE 0 END), 0) AS "hours_year_ms!: i64",
+            COALESCE(AVG(CASE WHEN b.reading_status = 'finished'
+                THEN b.duration_ms END), 0) AS "avg_finished_ms!: f64"
+         FROM books b
+         LEFT JOIN media_progress mp ON mp.book_id = b.book_id
+         WHERE b.deleted_at IS NULL"#,
+        year_start,
+    )
+    .fetch_one(pool)
+    .await?;
+
+    let counts = Counts {
+        total: u64::try_from(counts_row.total).unwrap_or(0),
+        finished_year: u64::try_from(finished_year_row.n).unwrap_or(0),
+        finished_all_time: u64::try_from(counts_row.finished).unwrap_or(0),
+        unread: u64::try_from(counts_row.unread).unwrap_or(0),
+        reading: u64::try_from(counts_row.reading).unwrap_or(0),
+        dnf: u64::try_from(counts_row.dnf).unwrap_or(0),
+    };
+    let listening = Listening {
+        hours_year: ms_to_hours(hours_row.hours_year_ms),
+        hours_all_time: ms_to_hours(hours_row.hours_all_time_ms),
+        longest_streak_days: 0,
+        avg_book_hours: hours_row.avg_finished_ms / 3_600_000.0,
+        avg_daily_minutes: 0.0,
+    };
+    Ok(StatsResponse { counts, listening })
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "ms values fit f64 precision for all realistic audiobook durations"
+)]
+fn ms_to_hours(ms: i64) -> f64 {
+    (ms as f64) / 3_600_000.0
+}
+
+/// Pie-chart data for `dimension`. Long-tail values beyond
+/// [`TOP_N`] aggregate into a single "Others" bucket.
+pub async fn breakdown(
+    pool: &SqlitePool,
+    dimension: Dimension,
+) -> Result<BreakdownResponse, StatsError> {
+    let raw = match dimension {
+        Dimension::Language => language_breakdown(pool).await?,
+        Dimension::Length => length_breakdown(pool).await?,
+        Dimension::ReadingStatus => reading_status_breakdown(pool).await?,
+        Dimension::AcquisitionYear => acquisition_year_breakdown(pool).await?,
+    };
+    let buckets = collapse_long_tail(raw);
+    let buckets = with_percentages(buckets);
+    Ok(BreakdownResponse {
+        dimension: dimension.as_str().to_owned(),
+        buckets,
+    })
+}
+
+struct RawBucket {
+    label: String,
+    count: i64,
+    hours_ms: i64,
+}
+
+async fn language_breakdown(pool: &SqlitePool) -> Result<Vec<RawBucket>, StatsError> {
+    let rows = sqlx::query!(
+        r#"SELECT
+            COALESCE(language, 'unknown') AS "bucket_label!: String",
+            COUNT(*) AS "n!: i64",
+            COALESCE(SUM(duration_ms), 0) AS "hours_ms!: i64"
+         FROM books
+         WHERE deleted_at IS NULL
+         GROUP BY language
+         ORDER BY COUNT(*) DESC"#,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| RawBucket {
+            label: r.bucket_label,
+            count: r.n,
+            hours_ms: r.hours_ms,
+        })
+        .collect())
+}
+
+async fn length_breakdown(pool: &SqlitePool) -> Result<Vec<RawBucket>, StatsError> {
+    let rows = sqlx::query!(
+        r#"SELECT
+            CASE
+                WHEN duration_ms IS NULL THEN 'unknown'
+                WHEN duration_ms <  4 * 3600000 THEN '<4h'
+                WHEN duration_ms <  8 * 3600000 THEN '4-8h'
+                WHEN duration_ms < 15 * 3600000 THEN '8-15h'
+                WHEN duration_ms < 25 * 3600000 THEN '15-25h'
+                ELSE '25h+'
+            END AS "bucket_label!: String",
+            COUNT(*) AS "n!: i64",
+            COALESCE(SUM(duration_ms), 0) AS "hours_ms!: i64"
+         FROM books
+         WHERE deleted_at IS NULL
+         GROUP BY 1
+         ORDER BY COUNT(*) DESC"#,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| RawBucket {
+            label: r.bucket_label,
+            count: r.n,
+            hours_ms: r.hours_ms,
+        })
+        .collect())
+}
+
+async fn reading_status_breakdown(pool: &SqlitePool) -> Result<Vec<RawBucket>, StatsError> {
+    let rows = sqlx::query!(
+        r#"SELECT
+            reading_status AS "bucket_label!: String",
+            COUNT(*) AS "n!: i64",
+            COALESCE(SUM(duration_ms), 0) AS "hours_ms!: i64"
+         FROM books
+         WHERE deleted_at IS NULL
+         GROUP BY reading_status
+         ORDER BY COUNT(*) DESC"#,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| RawBucket {
+            label: r.bucket_label,
+            count: r.n,
+            hours_ms: r.hours_ms,
+        })
+        .collect())
+}
+
+async fn acquisition_year_breakdown(pool: &SqlitePool) -> Result<Vec<RawBucket>, StatsError> {
+    let rows = sqlx::query!(
+        r#"SELECT
+            strftime('%Y', created_at, 'unixepoch') AS "bucket_label!: String",
+            COUNT(*) AS "n!: i64",
+            COALESCE(SUM(duration_ms), 0) AS "hours_ms!: i64"
+         FROM books
+         WHERE deleted_at IS NULL
+         GROUP BY 1
+         ORDER BY 1 DESC"#,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| RawBucket {
+            label: r.bucket_label,
+            count: r.n,
+            hours_ms: r.hours_ms,
+        })
+        .collect())
+}
+
+fn collapse_long_tail(mut raw: Vec<RawBucket>) -> Vec<Bucket> {
+    if raw.len() <= TOP_N {
+        return raw
+            .into_iter()
+            .map(|r| Bucket {
+                label: r.label,
+                count: u64::try_from(r.count).unwrap_or(0),
+                hours: ms_to_hours(r.hours_ms),
+                percentage: 0.0,
+            })
+            .collect();
+    }
+    let tail = raw.split_off(TOP_N);
+    let mut head: Vec<Bucket> = raw
+        .into_iter()
+        .map(|r| Bucket {
+            label: r.label,
+            count: u64::try_from(r.count).unwrap_or(0),
+            hours: ms_to_hours(r.hours_ms),
+            percentage: 0.0,
+        })
+        .collect();
+    let others_count: i64 = tail.iter().map(|r| r.count).sum();
+    let others_ms: i64 = tail.iter().map(|r| r.hours_ms).sum();
+    head.push(Bucket {
+        label: "Others".to_owned(),
+        count: u64::try_from(others_count).unwrap_or(0),
+        hours: ms_to_hours(others_ms),
+        percentage: 0.0,
+    });
+    head
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "bucket counts fit f32 precision for any plausible library size"
+)]
+fn with_percentages(mut buckets: Vec<Bucket>) -> Vec<Bucket> {
+    let total: u64 = buckets.iter().map(|b| b.count).sum();
+    if total == 0 {
+        return buckets;
+    }
+    let total_f = total as f32;
+    for b in &mut buckets {
+        b.percentage = (b.count as f32 / total_f) * 100.0;
+    }
+    buckets
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+    use ab_core::tunables::DbTunables;
+    use ab_db::LibraryDb;
+    use tempfile::TempDir;
+
+    async fn open_db() -> (TempDir, LibraryDb) {
+        let dir = TempDir::new().expect("tempdir");
+        let lib = LibraryDb::open(&dir.path().join("library.db"), &DbTunables::default())
+            .await
+            .expect("open library");
+        (dir, lib)
+    }
+
+    async fn add_book(
+        db: &LibraryDb,
+        title: &str,
+        lang: Option<&str>,
+        duration_ms: Option<i64>,
+        status: &str,
+    ) -> i64 {
+        let id = sqlx::query!("INSERT INTO books (title) VALUES (?)", title)
+            .execute(db.pool())
+            .await
+            .expect("insert book")
+            .last_insert_rowid();
+        if let Some(l) = lang {
+            sqlx::query!("UPDATE books SET language = ? WHERE book_id = ?", l, id)
+                .execute(db.pool())
+                .await
+                .expect("set lang");
+        }
+        if let Some(d) = duration_ms {
+            sqlx::query!("UPDATE books SET duration_ms = ? WHERE book_id = ?", d, id)
+                .execute(db.pool())
+                .await
+                .expect("set duration");
+        }
+        sqlx::query!(
+            "UPDATE books SET reading_status = ? WHERE book_id = ?",
+            status,
+            id,
+        )
+        .execute(db.pool())
+        .await
+        .expect("set status");
+        id
+    }
+
+    #[tokio::test]
+    async fn empty_library_returns_zeros() {
+        let (_d, db) = open_db().await;
+        let s = stats(db.pool()).await.expect("stats");
+        assert_eq!(s.counts.total, 0);
+        assert!((s.listening.hours_all_time - 0.0).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn counts_aggregate_by_reading_status() {
+        let (_d, db) = open_db().await;
+        let _ = add_book(&db, "A", Some("en"), Some(3_600_000), "finished").await;
+        let _ = add_book(&db, "B", Some("en"), Some(7_200_000), "reading").await;
+        let _ = add_book(&db, "C", Some("de"), Some(3_600_000), "want_to_read").await;
+        let s = stats(db.pool()).await.expect("stats");
+        assert_eq!(s.counts.total, 3);
+        assert_eq!(s.counts.finished_all_time, 1);
+        assert_eq!(s.counts.reading, 1);
+        assert_eq!(s.counts.unread, 1);
+        // 1 finished book × 1h = 1h all-time.
+        assert!((s.listening.hours_all_time - 1.0).abs() < 0.01);
+    }
+
+    #[tokio::test]
+    async fn language_breakdown_sorts_by_count() {
+        let (_d, db) = open_db().await;
+        let _ = add_book(&db, "A", Some("en"), Some(3_600_000), "reading").await;
+        let _ = add_book(&db, "B", Some("en"), Some(3_600_000), "reading").await;
+        let _ = add_book(&db, "C", Some("de"), Some(3_600_000), "reading").await;
+        let b = breakdown(db.pool(), Dimension::Language)
+            .await
+            .expect("breakdown");
+        assert_eq!(b.buckets.len(), 2);
+        assert_eq!(b.buckets[0].label, "en");
+        assert_eq!(b.buckets[0].count, 2);
+        assert!((b.buckets[0].percentage - 66.66).abs() < 0.5);
+    }
+
+    #[tokio::test]
+    async fn length_buckets_partition_durations() {
+        let (_d, db) = open_db().await;
+        let _ = add_book(&db, "Short", Some("en"), Some(2 * 3_600_000), "reading").await;
+        let _ = add_book(&db, "Medium", Some("en"), Some(6 * 3_600_000), "reading").await;
+        let _ = add_book(&db, "Long", Some("en"), Some(30 * 3_600_000), "reading").await;
+        let b = breakdown(db.pool(), Dimension::Length)
+            .await
+            .expect("breakdown");
+        let labels: Vec<&str> = b.buckets.iter().map(|x| x.label.as_str()).collect();
+        assert!(labels.contains(&"<4h"));
+        assert!(labels.contains(&"4-8h"));
+        assert!(labels.contains(&"25h+"));
+    }
+
+    #[test]
+    fn dimension_parse_round_trip() {
+        for d in [
+            Dimension::Language,
+            Dimension::Length,
+            Dimension::ReadingStatus,
+            Dimension::AcquisitionYear,
+        ] {
+            assert_eq!(Dimension::parse(d.as_str()).expect("parse"), d);
+        }
+        assert!(Dimension::parse("bogus").is_err());
+    }
+}

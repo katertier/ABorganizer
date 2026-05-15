@@ -16,6 +16,7 @@ dependencies = [
  "ab-progress",
  "ab-scan",
  "ab-speech",
+ "ab-stats",
  "ab-tag-read",
  "ab-transcode",
  "ab-transcript",
@@ -285,6 +286,21 @@ dependencies = [
  "ab-core",
  "serde",
  "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ab-stats"
+version = "0.1.0"
+dependencies = [
+ "ab-core",
+ "ab-db",
+ "chrono",
+ "serde",
+ "sqlx",
  "tempfile",
  "thiserror",
  "tokio",

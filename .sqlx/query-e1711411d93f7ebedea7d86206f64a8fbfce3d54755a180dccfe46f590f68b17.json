@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n            CASE\n                WHEN duration_ms IS NULL THEN 'unknown'\n                WHEN duration_ms <  4 * 3600000 THEN '<4h'\n                WHEN duration_ms <  8 * 3600000 THEN '4-8h'\n                WHEN duration_ms < 15 * 3600000 THEN '8-15h'\n                WHEN duration_ms < 25 * 3600000 THEN '15-25h'\n                ELSE '25h+'\n            END AS \"bucket_label!: String\",\n            COUNT(*) AS \"n!: i64\",\n            COALESCE(SUM(duration_ms), 0) AS \"hours_ms!: i64\"\n         FROM books\n         WHERE deleted_at IS NULL\n         GROUP BY 1\n         ORDER BY COUNT(*) DESC",
+  "describe": {
+    "columns": [
+      {
+        "name": "bucket_label!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "n!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "hours_ms!: i64",
+        "ordinal": 2,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "e1711411d93f7ebedea7d86206f64a8fbfce3d54755a180dccfe46f590f68b17"
+}

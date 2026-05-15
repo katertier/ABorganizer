@@ -21,6 +21,7 @@ members = [
     "crates/scan",
     "crates/progress",
     "crates/background",
+    "crates/stats",
     "crates/tag-read",
     "crates/tag-write",
     "bins/aborg",
@@ -161,6 +162,7 @@ ab-seed        = { path = "crates/seed" }
 ab-scan        = { path = "crates/scan" }
 ab-progress    = { path = "crates/progress" }
 ab-background  = { path = "crates/background" }
+ab-stats       = { path = "crates/stats" }
 ab-tag-read    = { path = "crates/tag-read" }
 ab-tag-write   = { path = "crates/tag-write" }
 

@@ -1,0 +1,25 @@
+[package]
+name         = "ab-stats"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+authors      = { workspace = true }
+repository   = { workspace = true }
+description  = "Library stats aggregations (counts + listening totals + pie-chart breakdowns). ADR-0044."
+
+[lints]
+workspace = true
+
+[dependencies]
+ab-core   = { workspace = true }
+ab-db     = { workspace = true }
+chrono    = { workspace = true }
+serde     = { workspace = true }
+sqlx      = { workspace = true }
+thiserror = { workspace = true }
+tracing   = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio    = { workspace = true, features = ["macros", "rt-multi-thread"] }
