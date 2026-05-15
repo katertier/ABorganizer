@@ -364,6 +364,21 @@ pub struct AudiologoTunables {
     pub fp_full_min_confidence: f32,
     /// Auto-apply floor for `Method::FingerprintBookend`.
     pub fp_bookend_min_confidence: f32,
+    /// Length of the head + tail needles for `Method::FingerprintBookend`
+    /// detection, in seconds. The detector slices each audiologo's
+    /// full fingerprint at this length from the start (head) and
+    /// from the end (tail), then tries to match both — bookend
+    /// jingles share stable openings + closings even when the
+    /// middle voice line varies per book. 5.0 s is the
+    /// shortest reliably-identifying window for chromaprint at
+    /// the workspace's `preset_test1` config.
+    pub fp_bookend_needle_secs: f64,
+    /// Max gap between the matched head and tail, in seconds.
+    /// Audiologos longer than this gap suggest the middle has
+    /// drifted too far for the bookend to be a reliable signal.
+    /// 60 s is the empirical ceiling on real-world audiobook
+    /// jingles (most cluster under 30 s).
+    pub fp_bookend_max_gap_secs: f64,
     /// Auto-apply floor for `Method::FingerprintAndTranscript`.
     /// Set to 0.0 to keep the tier as candidate-only.
     pub fp_and_transcript_min_confidence: f32,
@@ -392,6 +407,8 @@ impl Default for AudiologoTunables {
             cut_headroom_secs: 0.3,
             fp_full_min_confidence: 0.85,
             fp_bookend_min_confidence: 0.80,
+            fp_bookend_needle_secs: 5.0,
+            fp_bookend_max_gap_secs: 60.0,
             fp_and_transcript_min_confidence: 0.0,
             transcript_only_min_confidence: 0.0,
             intro_padding_ms: 250,

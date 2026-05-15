@@ -239,6 +239,15 @@ struct BestHit {
     audiologo: AudiologoCandidate,
     pos: ab_fingerprint::MatchPos,
     confidence: f32,
+    /// Which detection tier produced this hit. Drives the
+    /// `method` column on the persisted candidate row + the
+    /// auto-apply confidence floor in 4B.5.
+    method: crate::Method,
+    /// Bookend hits compute `(jingle_start_ms, jingle_end_ms)`
+    /// from head + tail positions directly. Tier-1 full-match
+    /// hits leave this `None` and let the caller derive end-ms
+    /// from `audiologo.duration_ms`.
+    end_ms_override: Option<(u64, u64)>,
 }
 
 /// Chromaprint hash-position to milliseconds factor for the
@@ -284,6 +293,8 @@ async fn detect_window(
     end_ms: u64,
     audiologos: &[AudiologoCandidate],
     item_dur_ms: u64,
+    bookend_needle_secs: f64,
+    bookend_max_gap_secs: f64,
 ) -> Result<Option<i64>> {
     // 1. Decode the window via AVAssetReader.
     let samples = match ab_audio::read_samples_window_typed(
@@ -340,8 +351,9 @@ async fn detect_window(
         return Ok(None);
     }
 
-    // 3. Slide-match each audiologo; track the best hit above
-    //    its row-specific threshold.
+    // 3a. Tier 1 (FingerprintFull): slide-match each audiologo's
+    //     full fingerprint; track the best hit above its
+    //     row-specific threshold.
     let mut best: Option<BestHit> = None;
     for audiologo in audiologos {
         let Some(pos) = ab_fingerprint::slide_match(&window_fp, &audiologo.fingerprint) else {
@@ -354,7 +366,61 @@ async fn detect_window(
                 audiologo: audiologo.clone(),
                 pos,
                 confidence: conf,
+                method: crate::Method::FingerprintFull,
+                end_ms_override: None,
             });
+        }
+    }
+
+    // 3b. Tier 2 (FingerprintBookend): when Tier 1 misses, slice
+    //     each audiologo's fingerprint into head + tail needles
+    //     and try a bookend match. Useful when the jingle's
+    //     middle voice line varies per book but the bookends
+    //     stay stable (publisher catalogues do this routinely).
+    if best.is_none() {
+        let needle_hashes = secs_to_hash_count(bookend_needle_secs, item_dur_ms);
+        let max_gap_hashes = secs_to_hash_count(bookend_max_gap_secs, item_dur_ms);
+        for audiologo in audiologos {
+            if audiologo.fingerprint.len() < needle_hashes * 2 {
+                // Audiologo too short to split into non-overlapping bookends.
+                continue;
+            }
+            let head_needle = &audiologo.fingerprint[..needle_hashes];
+            let tail_start = audiologo.fingerprint.len() - needle_hashes;
+            let tail_needle = &audiologo.fingerprint[tail_start..];
+            let Some((head_pos, tail_pos)) = ab_fingerprint::slide_match_bookend(
+                &window_fp,
+                head_needle,
+                tail_needle,
+                Some(max_gap_hashes),
+            ) else {
+                continue;
+            };
+            // Bookend confidence: the weaker of the two ends.
+            // A strong head + weak tail isn't a strong bookend.
+            let head_conf =
+                ab_fingerprint::confidence_from_hamming(head_pos.hamming, head_needle.len());
+            let tail_conf =
+                ab_fingerprint::confidence_from_hamming(tail_pos.hamming, tail_needle.len());
+            let conf = head_conf.min(tail_conf);
+            if conf >= audiologo.match_threshold
+                && best.as_ref().is_none_or(|b| conf > b.confidence)
+            {
+                // Cut range spans the matched head start through
+                // the matched tail end.
+                let head_offset_ms = (head_pos.hash_offset as u64).saturating_mul(item_dur_ms);
+                let tail_end_hashes = tail_pos.hash_offset + tail_needle.len();
+                let tail_end_offset_ms = (tail_end_hashes as u64).saturating_mul(item_dur_ms);
+                let jingle_start = start_ms.saturating_add(head_offset_ms);
+                let jingle_end = start_ms.saturating_add(tail_end_offset_ms);
+                best = Some(BestHit {
+                    audiologo: audiologo.clone(),
+                    pos: head_pos,
+                    confidence: conf,
+                    method: crate::Method::FingerprintBookend,
+                    end_ms_override: Some((jingle_start, jingle_end)),
+                });
+            }
         }
     }
 
@@ -370,9 +436,16 @@ async fn detect_window(
     };
 
     // 4. Convert hash-position offset → ms-since-file-start.
-    let jingle_offset_ms = (hit.pos.hash_offset as u64).saturating_mul(item_dur_ms);
-    let jingle_start_ms = start_ms.saturating_add(jingle_offset_ms);
-    let jingle_end_ms = jingle_start_ms.saturating_add(hit.audiologo.duration_ms);
+    //    Bookend hits carry an explicit `(start, end)` already
+    //    computed from head + tail positions; full-match hits
+    //    derive end from the audiologo's persisted duration.
+    let (jingle_start_ms, jingle_end_ms) = if let Some(range) = hit.end_ms_override {
+        range
+    } else {
+        let jingle_offset_ms = (hit.pos.hash_offset as u64).saturating_mul(item_dur_ms);
+        let start = start_ms.saturating_add(jingle_offset_ms);
+        (start, start.saturating_add(hit.audiologo.duration_ms))
+    };
 
     // 5. Persist as `candidate`. 4B.5 promotes high-confidence
     //    auto-applying-Method rows to `applied` + does the
@@ -387,6 +460,7 @@ async fn detect_window(
         jingle_end_ms,
         hit.audiologo.audiologo_id,
         hit.confidence,
+        hit.method,
     )
     .await?;
     bump_audiologo_match_count(&ctx.library, hit.audiologo.audiologo_id).await?;
@@ -396,6 +470,7 @@ async fn detect_window(
         file_id = file.file_id,
         kind = %kind,
         audiologo_id = hit.audiologo.audiologo_id,
+        method = hit.method.as_str(),
         confidence = hit.confidence,
         hash_offset = hit.pos.hash_offset,
         hamming = hit.pos.hamming,
@@ -405,6 +480,20 @@ async fn detect_window(
     );
 
     Ok(Some(hit.audiologo.audiologo_id))
+}
+
+/// Convert a tunable's seconds value into a hash count for the
+/// chromaprint preset in use. Floors at 1 so a too-tight tunable
+/// can't produce a zero-length needle (which `slide_match`
+/// would reject anyway).
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn secs_to_hash_count(secs: f64, item_dur_ms: u64) -> usize {
+    if item_dur_ms == 0 {
+        return 1;
+    }
+    let ms = (secs.max(0.0) * 1000.0) as u64;
+    let hashes = (ms / item_dur_ms).max(1);
+    usize::try_from(hashes).unwrap_or(usize::MAX)
 }
 
 /// Insert a fresh `book_file_audiologos` candidate row.
@@ -420,9 +509,10 @@ async fn insert_candidate_row(
     jingle_end_ms: u64,
     audiologo_id: i64,
     confidence: f32,
+    method: crate::Method,
 ) -> Result<()> {
     let kind_str = kind.as_str();
-    let method_str = crate::Method::FingerprintFull.as_str();
+    let method_str = method.as_str();
     let status_str = Status::Candidate.as_str();
     let start_i64 = i64::try_from(jingle_start_ms).unwrap_or(i64::MAX);
     let end_i64 = i64::try_from(jingle_end_ms).unwrap_or(i64::MAX);
@@ -626,6 +716,8 @@ impl Stage for DetectAudiologoStage {
                     self.intro_window_ms,
                     &intros,
                     item_dur_ms,
+                    self.tunables.fp_bookend_needle_secs,
+                    self.tunables.fp_bookend_max_gap_secs,
                 )
                 .await?;
                 if hit.is_some() {
@@ -651,6 +743,8 @@ impl Stage for DetectAudiologoStage {
                                 outro_end,
                                 &outros,
                                 item_dur_ms,
+                                self.tunables.fp_bookend_needle_secs,
+                                self.tunables.fp_bookend_max_gap_secs,
                             )
                             .await?;
                             if hit.is_some() {
@@ -1109,9 +1203,18 @@ mod tests {
         .await
         .expect("seed audiologo");
 
-        insert_candidate_row(&ctx.library, 10, Kind::Intro, 250, 4_750, 42, 0.92)
-            .await
-            .expect("insert");
+        insert_candidate_row(
+            &ctx.library,
+            10,
+            Kind::Intro,
+            250,
+            4_750,
+            42,
+            0.92,
+            crate::Method::FingerprintFull,
+        )
+        .await
+        .expect("insert");
 
         let (file_id, kind, start, end, audiologo_id, conf, status, method): (
             i64,
