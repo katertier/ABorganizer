@@ -8,23 +8,21 @@
 //!    the summary and arc stages: characters' names +
 //!    descriptions stay in the book's native language
 //!    regardless of `library_locale` (ADR-0019).
-//! 3. Builds a prompt asking for up to `characters_max`
-//!    characters with name + optional aliases + role +
-//!    spoiler-free description + `is_pov` + six optional
-//!    trait fields (species, condition, occupation, age,
-//!    gender, affiliation). The schema constraint forces
+//! 3. Builds a prompt asking for the book's full named cast,
+//!    each with name + optional aliases + role + spoiler-free
+//!    description + `is_pov` + six optional trait fields
+//!    (species, condition, occupation, age, gender,
+//!    affiliation). The schema constraint forces
 //!    `{characters: [...], characters_lang}` shape with `age`
 //!    drawn from a closed five-bracket enum
 //!    (`child`/`teen`/`adult`/`elderly`/`immortal`).
 //! 4. Self-checks: `characters_lang` matches `books.language`
 //!    (primary subtag); on mismatch warn + skip promotion.
-//! 5. Truncates to `characters_max` defensively (the prompt
-//!    states the cap but the model can overrun).
-//! 6. Replaces the book's rows in `characters` — DELETE then
+//! 5. Replaces the book's rows in `characters` — DELETE then
 //!    INSERT, taking advantage of the `UNIQUE(book_id, name)`
 //!    constraint. Idempotency is on the cache row, not the
 //!    table rows.
-//! 7. Caches the raw response in `ai_cache` keyed
+//! 6. Caches the raw response in `ai_cache` keyed
 //!    `(book_id, "characters")` with `locale = books.language`
 //!    and the current `extractor_version`.
 //!
@@ -151,7 +149,6 @@ impl Stage for ExtractCharactersStage {
             &transcript,
             &book_lang,
             PromptShape {
-                max_characters: self.tunables.characters_max,
                 desc_words_low: self.tunables.character_desc_target_words_low,
                 desc_words_high: self.tunables.character_desc_target_words_high,
             },
@@ -164,7 +161,7 @@ impl Stage for ExtractCharactersStage {
         };
 
         // 4. Parse + validate.
-        let mut parsed = parse_characters(&raw, book_id)?;
+        let parsed = parse_characters(&raw, book_id)?;
         if !validate_response(&parsed, &book_lang, book_id) {
             write_cache(
                 &ctx.library,
@@ -177,18 +174,7 @@ impl Stage for ExtractCharactersStage {
             return Ok(StageOutcome::Skipped);
         }
 
-        // 5. Defensive truncation.
-        if parsed.characters.len() > self.tunables.characters_max {
-            tracing::info!(
-                book_id = book_id.0,
-                got = parsed.characters.len(),
-                cap = self.tunables.characters_max,
-                "fm.characters.truncated"
-            );
-            parsed.characters.truncate(self.tunables.characters_max);
-        }
-
-        // 6. Promote (replace book's rows) + write cache.
+        // 5. Promote (replace book's rows) + write cache.
         promote_characters(&ctx.library, book_id, &parsed.characters, &book_lang).await?;
         write_cache(
             &ctx.library,
@@ -270,8 +256,6 @@ pub struct Character {
 /// Shape parameters for [`build_prompt`].
 #[derive(Debug, Clone, Copy)]
 pub struct PromptShape {
-    /// Soft cap on the number of characters.
-    pub max_characters: usize,
     /// Target floor for per-character `description` word count.
     pub desc_words_low: usize,
     /// Target cap for per-character `description` word count.
@@ -499,7 +483,6 @@ pub fn build_prompt(transcript: &str, book_locale: &str, shape: PromptShape) -> 
         transcript
     };
     let PromptShape {
-        max_characters,
         desc_words_low,
         desc_words_high,
     } = shape;
@@ -509,8 +492,8 @@ library browse view. Read the TRANSCRIPT below and produce a list of the most \
 important characters.\n\
 \n\
 Rules:\n\
-1. Output at most {max_characters} characters. Cover principals first; include \
-recurring secondaries if budget allows; do NOT include one-line walk-ons.\n\
+1. Output the book's full named cast. Cover principals first; include \
+recurring secondaries; do NOT include one-line walk-ons.\n\
 2. `name` is the canonical name as it appears in the book.\n\
 3. `aliases` is an optional list of nicknames / titles / alternate forms \
 seen in the text. Omit when there are none; do not invent.\n\
@@ -561,17 +544,16 @@ mod tests {
 
     fn default_shape() -> PromptShape {
         PromptShape {
-            max_characters: 12,
             desc_words_low: 20,
             desc_words_high: 40,
         }
     }
 
     #[test]
-    fn build_prompt_includes_locale_caps_and_transcript() {
+    fn build_prompt_includes_locale_words_and_transcript() {
         let p = build_prompt("Once upon a time…", "de", default_shape());
         assert!(p.contains("`de`"));
-        assert!(p.contains("at most 12 characters"));
+        assert!(p.contains("full named cast"));
         assert!(p.contains("20-40 word"));
         assert!(p.contains("Once upon a time"));
         assert!(p.contains("locale=de"));

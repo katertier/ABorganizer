@@ -16,9 +16,6 @@
 //! 4. Self-checks the response:
 //!    - `arc_lang` must match `books.language` (primary
 //!      subtag) — otherwise log warn + skip promotion.
-//!    - `arc` length must fall in
-//!      `[arc_target_steps_low, arc_target_steps_high]`;
-//!      out-of-range = warn + skip promotion.
 //!    - Step numbers must be `1..=arc.len()` in order; reject
 //!      otherwise so consumers don't have to defend against
 //!      gaps or duplicates.
@@ -151,8 +148,6 @@ impl Stage for ExtractStoryArcStage {
 
         // 3. Call the bridge.
         let shape = PromptShape {
-            target_steps_low: self.tunables.arc_target_steps_low,
-            target_steps_high: self.tunables.arc_target_steps_high,
             step_words_low: self.tunables.arc_step_target_words_low,
             step_words_high: self.tunables.arc_step_target_words_high,
         };
@@ -168,7 +163,7 @@ impl Stage for ExtractStoryArcStage {
 
         // 4. Parse + validate.
         let parsed = parse_arc(&raw, book_id)?;
-        let valid = validate_response(&parsed, &book_lang, book_id, &shape);
+        let valid = validate_response(&parsed, &book_lang, book_id);
         if !valid {
             write_cache(
                 &ctx.library,
@@ -223,16 +218,11 @@ fn parse_arc(raw: &str, book_id: BookId) -> Result<ArcResponse> {
     }
 }
 
-/// Run the three self-checks (locale, step count, step
-/// numbering). Returns `true` when the response is safe to
-/// promote; the caller still writes the cache row either way
-/// so re-runs at the same `extractor_version` are idempotent.
-fn validate_response(
-    parsed: &ArcResponse,
-    book_lang: &str,
-    book_id: BookId,
-    shape: &PromptShape,
-) -> bool {
+/// Run the two self-checks (locale, step numbering). Returns
+/// `true` when the response is safe to promote; the caller
+/// still writes the cache row either way so re-runs at the
+/// same `extractor_version` are idempotent.
+fn validate_response(parsed: &ArcResponse, book_lang: &str, book_id: BookId) -> bool {
     let locale_ok = parsed.arc_lang.eq_ignore_ascii_case(book_lang)
         || primary_subtag(&parsed.arc_lang) == primary_subtag(book_lang);
     if !locale_ok {
@@ -241,18 +231,6 @@ fn validate_response(
             expected = %book_lang,
             got = %parsed.arc_lang,
             "fm.arc.locale_mismatch"
-        );
-        return false;
-    }
-
-    let step_count = parsed.arc.len();
-    if step_count < shape.target_steps_low || step_count > shape.target_steps_high {
-        tracing::warn!(
-            book_id = book_id.0,
-            got = step_count,
-            low = shape.target_steps_low,
-            high = shape.target_steps_high,
-            "fm.arc.step_count_out_of_range"
         );
         return false;
     }
@@ -451,15 +429,11 @@ async fn write_cache(
 
 /// Shape parameters for [`build_prompt`].
 ///
-/// Bundled into a struct to stay under the workspace's 5-arg
-/// ceiling on `build_prompt`. All four fields come from
+/// Bundled into a struct so future per-beat word-count tunables
+/// don't add positional args. Both fields come from
 /// `LlmTunables`; defaults live in `LlmTunables::default()`.
 #[derive(Debug, Clone, Copy)]
 pub struct PromptShape {
-    /// Target floor for `arc.len()`.
-    pub target_steps_low: usize,
-    /// Target cap for `arc.len()`.
-    pub target_steps_high: usize,
     /// Target floor for per-beat `summary` word count.
     pub step_words_low: usize,
     /// Target cap for per-beat `summary` word count.
@@ -490,8 +464,6 @@ pub fn build_prompt(transcript: &str, book_locale: &str, shape: PromptShape) -> 
         transcript
     };
     let PromptShape {
-        target_steps_low,
-        target_steps_high,
         step_words_low,
         step_words_high,
     } = shape;
@@ -503,9 +475,9 @@ audiobook for a library browse view. Read the TRANSCRIPT below and produce \
 a narrative arc.\n\
 \n\
 Rules:\n\
-1. Output exactly {target_steps_low}-{target_steps_high} beats. Each beat \
+1. Output as many beats as the book's structure calls for. Each beat \
 covers one structural movement (setup, inciting incident, rising action, \
-climax, resolution, etc.). Use whichever beat-count gives the cleanest \
+climax, resolution, etc.). Use whatever beat-count gives the cleanest \
 shape for THIS book.\n\
 2. Number `step` from 1 to N in order; do not skip or duplicate numbers.\n\
 3. `label` is a short (1-4 word) name for the beat in the book's language. \
@@ -541,18 +513,15 @@ mod tests {
 
     fn default_shape() -> PromptShape {
         PromptShape {
-            target_steps_low: 5,
-            target_steps_high: 7,
             step_words_low: 30,
             step_words_high: 50,
         }
     }
 
     #[test]
-    fn build_prompt_includes_locale_caps_and_transcript() {
+    fn build_prompt_includes_locale_words_and_transcript() {
         let p = build_prompt("Once upon a time…", "de", default_shape());
         assert!(p.contains("`de`"), "BCP-47 tag must appear in the prompt");
-        assert!(p.contains("5-7 beats"));
         assert!(p.contains("30-50 words"));
         assert!(p.contains("Once upon a time"));
         assert!(p.contains("locale=de"));
