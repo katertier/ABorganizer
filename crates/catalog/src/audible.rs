@@ -71,6 +71,11 @@ pub const fn host_for_region(region: &str) -> Option<&'static str> {
 /// disambiguation: title, author, runtime, language.
 const SEARCH_RESPONSE_GROUPS: &str = "product_desc,product_attrs,contributors";
 
+/// Hard cap on Android-screen author-bibliography pagination.
+/// At ~50 books per page that's ≥ 500 books — well above any
+/// real author catalog. Mirrors Libex's posture.
+const ANDROID_AUTHOR_MAX_PAGES: u32 = 10;
+
 /// User-Agent string mirroring the Audible iOS app (ADR-0050 § 5).
 ///
 /// Audible's public-but-undocumented JSON API tolerates many UAs
@@ -224,6 +229,115 @@ impl AudibleClient {
         Ok(all)
     }
 
+    /// Fetch every book ASIN by an author via Audible's Android
+    /// app screen endpoint (ADR-0050 § 2).
+    ///
+    /// Calls
+    /// `GET /1.0/screens/audible-android-author-detail/{asin}?tabId=titles&applicationType=Android_App&surface=Android&session_id=<uuid>&local_time=<iso8601>&response_groups=always-returned`
+    /// and walks `pageSectionContinuationToken` until exhausted.
+    /// 10-page hard cap mirrors Libex's posture (≥ 500 books for
+    /// the typical 50-per-page response — more than any real
+    /// author's catalog).
+    ///
+    /// `session_id` is a fresh `uuid::Uuid::new_v4().simple()`
+    /// per call. The endpoint isn't authenticated; the
+    /// `session_id` is screen-load telemetry, not security-
+    /// relevant (per ADR-0050 § 5 threat-model note).
+    ///
+    /// # Errors
+    ///
+    /// [`ab_core::Error::Network`] on transport, unknown region,
+    /// non-success status, JSON parse, or session-id generation
+    /// failure. Returns partial results from prior pages on the
+    /// first failing page is **not** the policy: we discard
+    /// accumulated ASINs and surface the failure so the caller's
+    /// retry doesn't blend a stale-and-fresh result.
+    pub async fn fetch_author_books_via_screen(
+        &self,
+        region: &str,
+        author_asin: &str,
+    ) -> Result<Vec<String>> {
+        let host = host_for_region(region).ok_or_else(|| {
+            ab_core::Error::Network(format!("audible android author: unknown region `{region}`"))
+        })?;
+
+        let session_id = uuid::Uuid::new_v4().simple().to_string();
+        let mut all: Vec<String> = Vec::new();
+        let mut continuation: Option<String> = None;
+
+        for page in 0..ANDROID_AUTHOR_MAX_PAGES {
+            let now_iso = chrono::Utc::now().to_rfc3339();
+            let mut query: Vec<(&str, &str)> = vec![
+                ("tabId", "titles"),
+                ("author_asin", author_asin),
+                ("title_source", "all"),
+                ("session_id", &session_id),
+                ("applicationType", "Android_App"),
+                ("local_time", now_iso.as_str()),
+                ("response_groups", "always-returned"),
+                ("surface", "Android"),
+            ];
+            if let Some(token) = &continuation {
+                query.push(("pageSectionContinuationToken", token.as_str()));
+            }
+
+            let url = format!("{host}/1.0/screens/audible-android-author-detail/{author_asin}");
+            let resp = self
+                .http
+                .get(&url)
+                .query(&query)
+                .send()
+                .await
+                .map_err(|e| {
+                    ab_core::Error::Network(format!(
+                        "audible android author p{page} [{region}/{author_asin}]: {e}"
+                    ))
+                })?;
+            if !resp.status().is_success() {
+                return Err(ab_core::Error::Network(format!(
+                    "audible android author p{page} [{region}/{author_asin}]: HTTP {}",
+                    resp.status()
+                )));
+            }
+            let body: AndroidAuthorScreen = resp.json().await.map_err(|e| {
+                ab_core::Error::Network(format!(
+                    "audible android author parse p{page} [{region}/{author_asin}]: {e}"
+                ))
+            })?;
+
+            // Walk sections: find the one with both rows + a
+            // pagination token (per Libex's traversal). Other
+            // sections (recommendations etc.) are skipped. The
+            // `for` consumes by value so pagination moves out
+            // without a clone.
+            let mut page_continuation: Option<String> = None;
+            for section in body.sections {
+                let Some(model) = section.model else {
+                    continue;
+                };
+                if model.rows.is_empty() || section.pagination.is_none() {
+                    continue;
+                }
+                for item in model.rows {
+                    if let Some(meta) = item.product_metadata {
+                        if !meta.asin.is_empty() && !all.iter().any(|a| a == &meta.asin) {
+                            all.push(meta.asin);
+                        }
+                    }
+                }
+                page_continuation = section.pagination;
+                break;
+            }
+
+            match page_continuation {
+                Some(next) => continuation = Some(next),
+                None => break, // last page
+            }
+        }
+
+        Ok(all)
+    }
+
     /// Fetch the `chapter_info` subset of Audible's content-
     /// metadata response (ADR-0050 § 3).
     ///
@@ -316,6 +430,45 @@ pub struct AudibleContributor {
 struct SearchResponse {
     #[serde(default)]
     products: Vec<AudibleProduct>,
+}
+
+/// Subset of the Android author-detail screen response we walk
+/// for ASIN extraction (ADR-0050 § 2). The full response is much
+/// richer (recommendation sections, social proof, etc.); we
+/// deserialize only the bits the traversal needs.
+#[derive(Debug, Deserialize)]
+struct AndroidAuthorScreen {
+    #[serde(default)]
+    sections: Vec<AndroidAuthorSection>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AndroidAuthorSection {
+    #[serde(default)]
+    model: Option<AndroidSectionModel>,
+    /// Continuation token for the next page within this section.
+    /// `None` on the last page of a paginated section, or on
+    /// sections that aren't paginated at all (recommendations).
+    #[serde(default)]
+    pagination: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AndroidSectionModel {
+    #[serde(default)]
+    rows: Vec<AndroidAuthorRow>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AndroidAuthorRow {
+    #[serde(default)]
+    product_metadata: Option<AndroidProductMetadata>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AndroidProductMetadata {
+    #[serde(default)]
+    asin: String,
 }
 
 #[cfg(test)]
@@ -424,6 +577,62 @@ mod tests {
         let client = AudibleClient::new(&HttpClientTunables::default());
         let err = client
             .fetch_chapter_info("zz", "B000000000")
+            .await
+            .expect_err("unknown region must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown region"),
+            "expected unknown-region message, got {msg}"
+        );
+    }
+
+    /// Real-Audible integration test for
+    /// `fetch_author_books_via_screen` (ADR-0050 § 2).
+    ///
+    /// Skipped in CI by `#[ignore]`. Run via:
+    ///
+    /// ```bash
+    /// cargo test -p ab-catalog audible::tests::fetch_author_books_via_screen \
+    ///     -- --ignored --nocapture
+    /// ```
+    ///
+    /// Brandon Sanderson's author ASIN on the US store is
+    /// `B000APZOQA`. He has 100+ titles, so a passing run
+    /// exercises the continuation-token walk over multiple
+    /// pages. If the ASIN ever rotates, swap to another
+    /// stable high-output author.
+    #[tokio::test]
+    #[ignore = "hits real api.audible.com — run explicitly via --ignored"]
+    async fn fetch_author_books_via_screen_live_returns_many_asins() {
+        use super::AudibleClient;
+        use ab_core::tunables::HttpClientTunables;
+
+        let client = AudibleClient::new(&HttpClientTunables::default());
+        let asins = client
+            .fetch_author_books_via_screen("us", "B000APZOQA")
+            .await
+            .expect("fetch ok");
+        assert!(
+            asins.len() >= 20,
+            "expected ≥ 20 ASINs for Brandon Sanderson, got {}",
+            asins.len()
+        );
+        // ASIN shape: 10 alphanumeric chars per Audible convention.
+        for asin in &asins {
+            assert_eq!(asin.len(), 10, "ASIN `{asin}` should be exactly 10 chars");
+        }
+    }
+
+    /// Unknown region returns `ab_core::Error::Network`, not a
+    /// silent skip. No network call.
+    #[tokio::test]
+    async fn fetch_author_books_via_screen_unknown_region_errors() {
+        use super::AudibleClient;
+        use ab_core::tunables::HttpClientTunables;
+
+        let client = AudibleClient::new(&HttpClientTunables::default());
+        let err = client
+            .fetch_author_books_via_screen("zz", "B000000000")
             .await
             .expect_err("unknown region must error");
         let msg = err.to_string();
