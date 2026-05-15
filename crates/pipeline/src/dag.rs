@@ -215,7 +215,7 @@ mod tests {
     // Test-only stage IDs. Declared as `const` so the slice
     // literals below can reference them statically.
     const SCAN: StageId = StageId::new("scan");
-    const FP: StageId = StageId::new("fingerprint");
+    const FP: StageId = StageId::new("fingerprint-book");
     const TR: StageId = StageId::new("tag-read");
     const A: StageId = StageId::new("a");
     const B: StageId = StageId::new("b");
@@ -224,12 +224,12 @@ mod tests {
     fn linear_dag_orders_correctly() {
         let stages: Vec<Arc<dyn Stage>> = vec![
             Arc::new(S("scan", &[])),
-            Arc::new(S("fingerprint", &[SCAN])),
+            Arc::new(S("fingerprint-book", &[SCAN])),
             Arc::new(S("tag-read", &[FP])),
         ];
         let dag = Dag::build(stages).expect("valid");
         let order: Vec<&str> = dag.iter_topo().map(|(n, _)| n).collect();
-        assert_eq!(order, vec!["scan", "fingerprint", "tag-read"]);
+        assert_eq!(order, vec!["scan", "fingerprint-book", "tag-read"]);
         let _ = TR;
     }
 

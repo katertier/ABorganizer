@@ -57,7 +57,7 @@ async fn fresh_ctx(dir: &std::path::Path) -> (StageContext, LibraryDb) {
         library: lib.clone(),
         ephemeral: eph,
         cancel: CancellationToken::new(),
-        stage_name: "consensus",
+        stage_name: "promote-consensus",
     };
     (ctx, lib)
 }

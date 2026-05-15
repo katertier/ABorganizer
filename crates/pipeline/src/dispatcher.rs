@@ -366,7 +366,7 @@ fn intern_stage_name(s: &str) -> &'static str {
 /// in-line A.2 path still works.)
 const KNOWN_STAGE_NAMES: &[&str] = &[
     "tag-read",
-    "fingerprint",
+    "fingerprint-book",
     "catalog-audnexus",
     "catalog-google-books",
     "transcribe-samples",
@@ -517,8 +517,8 @@ mod tests {
 
     /// Build a tiny DAG using stages that ARE in
     /// `KNOWN_STAGE_NAMES` so the dispatcher's intern-lookup
-    /// recognises them. Using "tag-read" and "fingerprint" as
-    /// the stand-ins.
+    /// recognises them. Using "tag-read" and "fingerprint-book"
+    /// as the stand-ins.
     fn dag_tagread_then_fingerprint() -> Arc<Dag> {
         const TAG_READ: StageId = StageId::new("tag-read");
         let stages: Vec<Arc<dyn Stage>> = vec![
@@ -527,7 +527,7 @@ mod tests {
                 deps: &[],
             }),
             Arc::new(TestStage {
-                name_str: "fingerprint",
+                name_str: "fingerprint-book",
                 deps: &[TAG_READ],
             }),
         ];
@@ -560,7 +560,7 @@ mod tests {
         let book = insert_active_book(&lib, "done-already").await;
         // Both stages already terminal; nothing to dispatch.
         seed_progress(&eph, book, "tag-read", "succeeded").await;
-        seed_progress(&eph, book, "fingerprint", "succeeded").await;
+        seed_progress(&eph, book, "fingerprint-book", "succeeded").await;
         let dag = dag_tagread_then_fingerprint();
         let (tx, _rx) = mpsc::channel::<Job>(8);
 
@@ -572,8 +572,8 @@ mod tests {
 
     #[tokio::test]
     async fn sweep_dispatches_second_stage_when_first_done() {
-        // tag-read=succeeded, fingerprint=no row → dispatcher
-        // must submit fingerprint.
+        // tag-read=succeeded, fingerprint-book=no row →
+        // dispatcher must submit fingerprint-book.
         let (lib, eph, _tmp) = fresh_dbs().await;
         let book = insert_active_book(&lib, "halfway").await;
         seed_progress(&eph, book, "tag-read", "succeeded").await;
@@ -585,7 +585,7 @@ mod tests {
             .expect("sweep");
         assert_eq!(n, 1);
         let job = rx.try_recv().expect("got a job");
-        assert_eq!(job.stage.as_str(), "fingerprint");
+        assert_eq!(job.stage.as_str(), "fingerprint-book");
     }
 
     #[tokio::test]
