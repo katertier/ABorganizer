@@ -37,6 +37,9 @@ use walkdir::WalkDir;
 use ab_core::{BookId, Error, Result};
 use ab_db::LibraryDb;
 
+pub mod companion_scan;
+pub use companion_scan::{CompanionScanReport, scan_companions};
+
 /// Audio file extensions recognised by the scanner. Matched
 /// case-insensitively.
 pub const AUDIO_EXTENSIONS: &[&str] = &["m4b", "m4a", "mp3", "flac", "opus", "ogg", "aax"];

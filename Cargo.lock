@@ -342,6 +342,7 @@ dependencies = [
 name = "ab-scan"
 version = "0.1.0"
 dependencies = [
+ "ab-companion",
  "ab-core",
  "ab-db",
  "blake3",
