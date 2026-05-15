@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE operation_journal\n            SET progress = 'reversed'\n            WHERE op_id = ? AND progress = 'done'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "2141540bbe7bb62e4c5ebdc9a5ff3040f265cd23d7f71de28d3ecfa29081c02a"
+}
