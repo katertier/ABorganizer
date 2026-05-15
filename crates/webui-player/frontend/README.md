@@ -1,11 +1,13 @@
-# Player UI (Svelte 5 + Bun)
+# aborg-frontend (Svelte 5 + Vite + TS)
 
-The player UI lives here. `bun install && bun run build` produces a
-static bundle in `../static/` which `ab-webui-player` serves.
+Single Svelte 5 codebase serving two hosts (ADR-0040):
 
-This directory is **not** part of the Rust build. It's a separate
-JavaScript project. CI runs `bun run build` before `cargo build` to
-populate `../static/`; for local dev, run it once manually.
+- Browser SPA at `https://localhost:8429/`
+- macOS menubar app's WKWebView embed (`?host=menubar` or via
+  the `window.webkit.messageHandlers` probe)
+
+The bundle builds to `../static/` so `ab-webui-player` (the Rust
+crate) serves it as the daemon's static-asset surface.
 
 ## Setup
 
@@ -13,7 +15,6 @@ populate `../static/`; for local dev, run it once manually.
 # Install Bun (one-time per machine)
 curl -fsSL https://bun.sh/install | bash
 
-# Install deps + build
 cd crates/webui-player/frontend
 bun install
 bun run build
@@ -22,18 +23,56 @@ bun run build
 ## Development
 
 ```bash
-bun run dev     # hot-reload server on http://localhost:5173
+bun run dev
 ```
 
-The dev server proxies API requests to the daemon at the default
-port (`8429`).
+Dev server runs on `http://localhost:5173`. `/api/*` requests are
+proxied to the daemon at `:8429`. The daemon's CORS allow-list
+includes the Vite default port for this flow.
 
-## Files in scope for this directory
+## Layout
 
-- `package.json` — Bun manifest, dev/build scripts
-- `svelte.config.js` — Svelte compiler config
-- `vite.config.js` — Vite + Bun bundler config
-- `src/` — Svelte components, TypeScript modules
-- `index.html` — entry point template
+```
+frontend/
+├── index.html            # Vite entry
+├── package.json          # Bun manifest + dev/build scripts
+├── svelte.config.js      # Svelte preprocessor (TS in script blocks)
+├── tsconfig.json         # Strict TS + Svelte plugin
+├── vite.config.ts        # Vite + Svelte plugin + dev proxy
+├── src/
+│   ├── main.ts           # Svelte 5 mount entry point
+│   ├── App.svelte        # Top-level component + hash router
+│   ├── app.css           # Global resets + base typography
+│   ├── lib/
+│   │   ├── host.ts       # Host-detection contract (ADR-0040)
+│   │   ├── api.ts        # `fetch` helpers with bearer-token glue
+│   │   └── player/
+│   │       └── engine.ts # PlayerEngine adapter (browser vs. menubar)
+│   └── routes/
+│       ├── Library.svelte # Book list (calls GET /books)
+│       ├── Player.svelte  # Player engine scaffold
+│       └── Setup.svelte   # First-use guidance placeholder
+└── .gitignore
+```
 
-`node_modules/` and `dist/` are gitignored.
+## Slice cadence (ADR-0040 build order)
+
+1. **Layout + routes + data flow** (this slice) — placeholder
+   styling, hash-based routing, host detection, player-engine
+   adapter shape. Real CRUD round-trips with the daemon API
+   wired in.
+2. **Modular extension** — per-host branches, bundle-only
+   features in menubar embed, Now Playing integration, AirPlay
+   button, Siri registration.
+3. **Polish** — icons, logo, custom design language, animation,
+   colour palette. Land last.
+
+Each step is its own slice; this scaffolding is step 1's
+foundation only.
+
+## Not part of the Rust build
+
+This directory is a separate JavaScript project. CI runs
+`bun run build` before `cargo build` to populate `../static/`;
+for local dev, run it once manually (see Setup above).
+`node_modules/`, `dist/`, and Bun lockfiles are gitignored.
