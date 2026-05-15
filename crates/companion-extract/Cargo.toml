@@ -1,0 +1,16 @@
+[package]
+name         = "ab-companion-extract"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+authors      = { workspace = true }
+repository   = { workspace = true }
+description  = "Pure-function name-dictionary extraction from EPUB body HTML (ADR-0043 § C.4). Strips HTML via scraper, tokenises via unicode-segmentation, keeps capitalised non-sentence-initial tokens + multi-token capitalised sequences with frequency >= 3."
+
+[lints]
+workspace = true
+
+[dependencies]
+scraper              = { workspace = true }
+unicode-segmentation = { workspace = true }
