@@ -38,7 +38,7 @@ pub mod stats;
 pub mod tokens;
 pub mod user_edits;
 
-pub use cleanup_targets::ExpiredPairingCodesTarget;
+pub use cleanup_targets::{ExpiredPairingCodesTarget, StaleCompanionHintsTarget};
 pub use error::ApiError;
 pub use router::build_router;
 pub use state::ApiState;

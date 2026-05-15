@@ -563,6 +563,13 @@ fn build_cleanup_registry(tunables: &Tunables) -> CleanupRegistry {
         // for the book. Permanent no-op for books with no
         // transcode output.
         Arc::new(ab_transcode::PostTranscodeSourcesTarget::new()),
+        // Db: prune `companion_nearby_books` rows older than
+        // 90 days (ADR-0043 / tracker #124). Junction hints
+        // that the operator hasn't resolved by then are
+        // almost certainly stale; the 7-day UI dimming
+        // backstop already de-emphasises them visually before
+        // the row gets removed.
+        Arc::new(ab_api::StaleCompanionHintsTarget),
     ];
     CleanupRegistry::new(targets)
 }

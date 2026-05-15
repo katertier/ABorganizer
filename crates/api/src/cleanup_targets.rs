@@ -115,6 +115,100 @@ impl CleanupTarget for ExpiredPairingCodesTarget {
     }
 }
 
+/// Prunes `companion_nearby_books` junction rows older than 90
+/// days (ADR-0043 § "CASCADE + retention", tracker #124).
+///
+/// Why 90 days: the UI dims the `❓` indicator after 7 days
+/// (display backstop) but keeps the data so an operator-curated
+/// pair-up still works. After 90 days the data is almost
+/// certainly stale — either the operator decided the companion
+/// was a true orphan or moved the audiobook elsewhere. The DB
+/// cleanup avoids accumulating multi-million junction rows on a
+/// 100k-book library with a long history of moves.
+///
+/// `force = true` ignores the 90-day gate. `age_seconds` from
+/// the standard `Policy` is also ignored here — the threshold
+/// is feature-specific, not the global disk-pressure ratchet.
+/// `companion_nearby_books.discovered_at` is unix seconds.
+pub struct StaleCompanionHintsTarget;
+
+/// Junction-hint retention threshold. Pinned at 90 days per
+/// ADR-0043; configurable via tunables in a follow-up slice when
+/// operator demand surfaces.
+const STALE_COMPANION_HINTS_AGE_SECS: i64 = 90 * 86_400;
+
+#[async_trait]
+impl CleanupTarget for StaleCompanionHintsTarget {
+    fn category(&self) -> Category {
+        Category::Db
+    }
+
+    fn name(&self) -> &'static str {
+        "stale-companion-hints"
+    }
+
+    async fn report(&self, ctx: &CleanupCtx, policy: &Policy) -> Result<CleanupReport> {
+        let cutoff = stale_hints_cutoff(policy);
+        let count = if policy.force {
+            sqlx::query_scalar!("SELECT COUNT(*) FROM companion_nearby_books")
+                .fetch_one(ctx.library.pool())
+                .await
+                .map_err(|e| Error::Database(format!("count companion_nearby_books: {e}")))?
+        } else {
+            sqlx::query_scalar!(
+                "SELECT COUNT(*) FROM companion_nearby_books WHERE discovered_at < ?",
+                cutoff,
+            )
+            .fetch_one(ctx.library.pool())
+            .await
+            .map_err(|e| Error::Database(format!("count companion_nearby_books: {e}")))?
+        };
+        Ok(CleanupReport {
+            category: Category::Db,
+            name: self.name().to_owned(),
+            items: u64::try_from(count).unwrap_or(0),
+            bytes: 0,
+        })
+    }
+
+    async fn apply(&self, ctx: &CleanupCtx, policy: &Policy) -> Result<CleanupReport> {
+        let cutoff = stale_hints_cutoff(policy);
+        let affected = if policy.force {
+            sqlx::query!("DELETE FROM companion_nearby_books")
+                .execute(ctx.library.pool())
+                .await
+                .map_err(|e| Error::Database(format!("delete companion_nearby_books: {e}")))?
+                .rows_affected()
+        } else {
+            sqlx::query!(
+                "DELETE FROM companion_nearby_books WHERE discovered_at < ?",
+                cutoff,
+            )
+            .execute(ctx.library.pool())
+            .await
+            .map_err(|e| Error::Database(format!("delete companion_nearby_books: {e}")))?
+            .rows_affected()
+        };
+        tracing::info!(
+            target = self.name(),
+            deleted = affected,
+            force = policy.force,
+            "api.cleanup.applied"
+        );
+        Ok(CleanupReport {
+            category: Category::Db,
+            name: self.name().to_owned(),
+            items: affected,
+            bytes: 0,
+        })
+    }
+}
+
+/// Cut-off timestamp for "is this junction-hint stale?"
+fn stale_hints_cutoff(_policy: &Policy) -> i64 {
+    unix_now_secs().saturating_sub(STALE_COMPANION_HINTS_AGE_SECS)
+}
+
 /// Seconds since the Unix epoch. Saturates on the clock-skew edge
 /// case (`UNIX_EPOCH` somehow in the future), matching the rest of
 /// the codebase's defensive convention.
@@ -233,6 +327,128 @@ mod tests {
         let now = unix_now_secs();
         seed_code(&ctx, "OLD-PEND", now - 3600, false).await;
         let target = ExpiredPairingCodesTarget;
+        let policy = Policy {
+            age_seconds: 86_400,
+            force: false,
+            apply: true,
+        };
+        let first = target.apply(&ctx, &policy).await.expect("first apply");
+        assert_eq!(first.items, 1);
+        let second = target.apply(&ctx, &policy).await.expect("second apply");
+        assert_eq!(second.items, 0, "second apply must be a no-op");
+    }
+
+    async fn seed_companion(ctx: &CleanupCtx, path: &str) -> i64 {
+        // Insert the book the companion will reference + the
+        // companion row itself. Returns the companion_id so the
+        // test can attach junction-hint rows.
+        sqlx::query("INSERT INTO books (book_id, title) VALUES (1, 'placeholder')")
+            .execute(ctx.library.pool())
+            .await
+            .expect("seed book");
+        sqlx::query(
+            "INSERT INTO book_companions \
+             (path, format, parse_tier, content_hash, bytes, discovered_at) \
+             VALUES (?, 'pdf', 'document', 'deadbeef', 100, 0)",
+        )
+        .bind(path)
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed companion");
+        sqlx::query_scalar::<_, i64>("SELECT last_insert_rowid()")
+            .fetch_one(ctx.library.pool())
+            .await
+            .expect("last rowid")
+    }
+
+    async fn seed_hint(ctx: &CleanupCtx, companion_id: i64, book_id: i64, discovered_at: i64) {
+        sqlx::query(
+            "INSERT INTO companion_nearby_books (companion_id, book_id, discovered_at) \
+             VALUES (?, ?, ?)",
+        )
+        .bind(companion_id)
+        .bind(book_id)
+        .bind(discovered_at)
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed hint");
+    }
+
+    #[tokio::test]
+    async fn stale_hints_report_counts_only_old_rows() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        let companion_id = seed_companion(&ctx, "/lib/x.pdf").await;
+        let now = unix_now_secs();
+        // 100 days old → stale; 30 days old → fresh.
+        sqlx::query("INSERT INTO books (book_id, title) VALUES (2, 'b2')")
+            .execute(ctx.library.pool())
+            .await
+            .expect("seed book2");
+        seed_hint(&ctx, companion_id, 1, now - (100 * 86_400)).await;
+        seed_hint(&ctx, companion_id, 2, now - (30 * 86_400)).await;
+        let target = StaleCompanionHintsTarget;
+        let report = target
+            .report(&ctx, &Policy::dry_run(86_400))
+            .await
+            .expect("report");
+        assert_eq!(report.items, 1, "only the 100-day-old hint is stale");
+        assert_eq!(report.category, Category::Db);
+    }
+
+    #[tokio::test]
+    async fn stale_hints_apply_deletes_old_only() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        let companion_id = seed_companion(&ctx, "/lib/x.pdf").await;
+        sqlx::query("INSERT INTO books (book_id, title) VALUES (2, 'b2')")
+            .execute(ctx.library.pool())
+            .await
+            .expect("seed book2");
+        let now = unix_now_secs();
+        seed_hint(&ctx, companion_id, 1, now - (100 * 86_400)).await;
+        seed_hint(&ctx, companion_id, 2, now - (30 * 86_400)).await;
+        let target = StaleCompanionHintsTarget;
+        let policy = Policy {
+            age_seconds: 86_400,
+            force: false,
+            apply: true,
+        };
+        let report = target.apply(&ctx, &policy).await.expect("apply");
+        assert_eq!(report.items, 1);
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM companion_nearby_books")
+            .fetch_one(ctx.library.pool())
+            .await
+            .expect("count after apply");
+        assert_eq!(remaining, 1, "fresh hint survives");
+    }
+
+    #[tokio::test]
+    async fn stale_hints_force_deletes_everything() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        let companion_id = seed_companion(&ctx, "/lib/x.pdf").await;
+        sqlx::query("INSERT INTO books (book_id, title) VALUES (2, 'b2')")
+            .execute(ctx.library.pool())
+            .await
+            .expect("seed book2");
+        let now = unix_now_secs();
+        // both well under 90 days
+        seed_hint(&ctx, companion_id, 1, now - 100).await;
+        seed_hint(&ctx, companion_id, 2, now - 200).await;
+        let target = StaleCompanionHintsTarget;
+        let policy = Policy {
+            age_seconds: 86_400,
+            force: true,
+            apply: true,
+        };
+        let report = target.apply(&ctx, &policy).await.expect("force apply");
+        assert_eq!(report.items, 2, "force drops both hints");
+    }
+
+    #[tokio::test]
+    async fn stale_hints_apply_is_idempotent() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        let companion_id = seed_companion(&ctx, "/lib/x.pdf").await;
+        seed_hint(&ctx, companion_id, 1, unix_now_secs() - (100 * 86_400)).await;
+        let target = StaleCompanionHintsTarget;
         let policy = Policy {
             age_seconds: 86_400,
             force: false,
