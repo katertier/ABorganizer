@@ -85,6 +85,10 @@ pub struct Tunables {
     /// Background-task registry (ADR-0035) — scheduling tick
     /// interval, set `tick_secs = 0` to disable the loop.
     pub background: BackgroundTunables,
+
+    /// Loudness measurement + optional ReplayGain-style gain
+    /// on transcode (ADR-0041).
+    pub loudness: LoudnessTunables,
 }
 
 impl Default for Tunables {
@@ -109,6 +113,46 @@ impl Default for Tunables {
             cleanup: CleanupTunables::default(),
             security: SecurityTunables::default(),
             background: BackgroundTunables::default(),
+            loudness: LoudnessTunables::default(),
+        }
+    }
+}
+
+/// Loudness measurement + optional transcode gain (ADR-0041).
+///
+/// Schema columns `books.lufs_integrated` / `books.lufs_truepeak`
+/// are populated by the future `loudness-measure` stage (AVFoundation
+/// EBU R-128 via Swift FFI). Tunables ship now so saved-queries +
+/// transcode-gain can read them once measurements land. The stage
+/// itself is wired in a follow-up slice.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LoudnessTunables {
+    /// Target integrated loudness for the optional transcode-gain
+    /// pass, in LUFS. Audiobook common target: -18 LUFS (matches
+    /// Audible's published band). Set `apply_gain = false` to
+    /// disable the gain stage entirely and treat the measurement
+    /// as informational only.
+    pub target_lufs: f32,
+    /// True-peak ceiling in dBTP. The transcode-gain pass caps
+    /// gain so the post-gain true-peak stays at or below this
+    /// value. -1.0 dBTP is the common ceiling that survives
+    /// lossy re-encoding.
+    pub truepeak_ceiling_dbtp: f32,
+    /// Enable the optional ReplayGain-style gain pass on
+    /// transcode. False (default) — measurement only; the
+    /// `lufs_*` columns get populated but no gain is applied.
+    /// Flip to `true` to apply uniform loudness across the
+    /// library at transcode time.
+    pub apply_gain: bool,
+}
+
+impl Default for LoudnessTunables {
+    fn default() -> Self {
+        Self {
+            target_lufs: -18.0,
+            truepeak_ceiling_dbtp: -1.0,
+            apply_gain: false,
         }
     }
 }
