@@ -16,6 +16,7 @@
 pub mod audible;
 pub mod audible_search;
 pub mod audnexus;
+pub mod chapter_info;
 pub mod chapter_winner;
 pub mod chapters;
 pub mod consensus;
