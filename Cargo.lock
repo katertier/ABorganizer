@@ -519,6 +519,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ab-transcript-correct"
+version = "0.1.0"
+dependencies = [
+ "strsim",
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "ab-webui-config"
 version = "0.1.0"
 dependencies = [

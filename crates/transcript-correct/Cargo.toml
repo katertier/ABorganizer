@@ -1,0 +1,21 @@
+[package]
+name         = "ab-transcript-correct"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+authors      = { workspace = true }
+repository   = { workspace = true }
+description  = "Pure-function Levenshtein-correct an audio transcript using an EPUB name dictionary (ADR-0043 § C.5). Replaces near-miss tokens with their canonical proper-noun spelling, preserves sentence-initial casing. Gating (abridged / language match / non-empty dict) lives in the calling pipeline stage; this crate is unconditional."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Normalised Levenshtein distance (MIT). Used per-token to score
+# candidate replacements against the C.4 name-dict; only the
+# closest match within the ADR-0043 § C.5 ratio (0.3) wins.
+strsim               = { workspace = true }
+# Same word-segmentation tokeniser as ab-companion-extract so
+# the surface forms align across C.4 and C.5.
+unicode-segmentation = { workspace = true }
