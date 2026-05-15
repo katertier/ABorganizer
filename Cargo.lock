@@ -240,6 +240,7 @@ dependencies = [
  "ab-pipeline",
  "ab-transcript",
  "async-trait",
+ "chrono",
  "serde",
  "serde_json",
  "sqlx",

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM book_content_warnings WHERE book_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "71dddc7a459c0f67cab33d893f77a9c0f346abe97234eeb7a083b172b1a3abe8"
+}

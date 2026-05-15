@@ -20,6 +20,7 @@ ab-pipeline          = { workspace = true }
 # For Stage::requires() typed dependency on transcribe-full.
 ab-transcript        = { workspace = true }
 async-trait          = { workspace = true }
+chrono               = { workspace = true }
 serde                = { workspace = true }
 serde_json           = { workspace = true }
 sqlx                 = { workspace = true }

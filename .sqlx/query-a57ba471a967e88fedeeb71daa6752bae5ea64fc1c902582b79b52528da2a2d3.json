@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "WITH RECURSIVE descendants(tag) AS ( SELECT child_tag FROM tag_hierarchy WHERE parent_tag = ? UNION SELECT th.child_tag FROM tag_hierarchy th JOIN descendants d ON th.parent_tag = d.tag ) SELECT tag FROM descendants WHERE tag = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "tag",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a57ba471a967e88fedeeb71daa6752bae5ea64fc1c902582b79b52528da2a2d3"
+}

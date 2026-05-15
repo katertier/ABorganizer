@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO book_content_warnings (book_id, label, severity, extracted_at) VALUES (?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "595abdc8e64305ce01126348ca750942f7bbbbd8dda3e9209f92376f78a77201"
+}
