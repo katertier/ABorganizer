@@ -12,6 +12,10 @@ description  = "Directory walker + audio-file enumeration. Produces BookId rows 
 workspace = true
 
 [dependencies]
+# C.2c: companion-file discovery + auto-pair geometry. The
+# integrator function `scan_companions` lives here so we keep
+# `ab-companion` DB-free.
+ab-companion = { workspace = true }
 ab-core   = { workspace = true }
 ab-db     = { workspace = true }
 blake3    = { workspace = true }
