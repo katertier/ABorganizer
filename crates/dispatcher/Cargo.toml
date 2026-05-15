@@ -1,0 +1,25 @@
+[package]
+name         = "ab-dispatcher"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+authors      = { workspace = true }
+repository   = { workspace = true }
+description  = "Conversational-dispatcher scaffolding — tool envelope, registry, dry-run posture. ADR-0032 (extends ADR-0018)."
+
+[lints]
+workspace = true
+
+[dependencies]
+ab-core   = { workspace = true }
+ab-query  = { workspace = true }
+async-trait = { workspace = true }
+serde     = { workspace = true }
+serde_json = { workspace = true }
+sqlx      = { workspace = true }
+thiserror = { workspace = true }
+tracing   = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
