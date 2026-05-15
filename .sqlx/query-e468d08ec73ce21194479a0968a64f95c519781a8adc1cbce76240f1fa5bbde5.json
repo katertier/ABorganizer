@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO background_task_state (\n             task_name, last_run_at, last_status, last_summary,\n             consecutive_failures\n         ) VALUES (?, ?, ?, ?, ?)\n         ON CONFLICT(task_name) DO UPDATE SET\n             last_run_at  = excluded.last_run_at,\n             last_status  = excluded.last_status,\n             last_summary = excluded.last_summary,\n             consecutive_failures = CASE WHEN ? = 1\n                 THEN background_task_state.consecutive_failures + ?\n                 ELSE 0\n             END",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "e468d08ec73ce21194479a0968a64f95c519781a8adc1cbce76240f1fa5bbde5"
+}
