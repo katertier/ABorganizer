@@ -148,6 +148,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ab-dispatcher"
+version = "0.1.0"
+dependencies = [
+ "ab-core",
+ "ab-query",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ab-fingerprint"
 version = "0.1.0"
 dependencies = [
