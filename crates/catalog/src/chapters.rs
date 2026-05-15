@@ -38,7 +38,7 @@
 //! source. This stage owns rows where `source = 'audnexus'` and
 //! clears-then-inserts them on each run (idempotent). Other
 //! sources (`embedded`, `cue`, `epub`, `transcript`, `silence`)
-//! co-exist; a future "chapter-pick-winner" step decides which
+//! co-exist; a future "pick-chapter-winner" step decides which
 //! source's chapters are surfaced to the player.
 
 use async_trait::async_trait;
@@ -78,7 +78,7 @@ impl AudnexusChaptersStage {
 }
 
 /// Typed identifier for this stage.
-pub const STAGE_ID: StageId = StageId::new("audnexus-chapters");
+pub const STAGE_ID: StageId = StageId::new("fetch-audnexus-chapters");
 
 #[async_trait]
 impl Stage for AudnexusChaptersStage {
@@ -87,7 +87,7 @@ impl Stage for AudnexusChaptersStage {
     }
 
     fn requires(&self) -> &'static [StageId] {
-        // audnexus-enrich populates `books.asin` (the join key
+        // enrich-from-audnexus populates `books.asin` (the join key
         // this stage uses). Without it we'd have no ASIN to look
         // up against the chapters endpoint.
         &[crate::enrich::STAGE_ID]
@@ -103,12 +103,12 @@ impl Stage for AudnexusChaptersStage {
         }
 
         let Some(asin) = fetch_book_asin(&ctx.library, book_id).await? else {
-            // No ASIN means audnexus-enrich didn't find a match.
+            // No ASIN means enrich-from-audnexus didn't find a match.
             // Nothing to look up.
             return Ok(StageOutcome::Skipped);
         };
 
-        // Walk regions the same way audnexus-enrich does so a
+        // Walk regions the same way enrich-from-audnexus does so a
         // book that only resolves in `de` (say) finds its chapters
         // in `de` too. Transport errors are warn-logged + skipped
         // per-region.
@@ -175,7 +175,7 @@ impl Stage for AudnexusChaptersStage {
             .pool()
             .begin()
             .await
-            .map_err(|e| Error::Database(format!("audnexus-chapters reset tx: {e}")))?;
+            .map_err(|e| Error::Database(format!("fetch-audnexus-chapters reset tx: {e}")))?;
         sqlx::query!(
             "DELETE FROM chapters WHERE book_id = ? AND source = ?",
             id,
@@ -183,7 +183,7 @@ impl Stage for AudnexusChaptersStage {
         )
         .execute(&mut *tx)
         .await
-        .map_err(|e| Error::Database(format!("audnexus-chapters reset chapters: {e}")))?;
+        .map_err(|e| Error::Database(format!("fetch-audnexus-chapters reset chapters: {e}")))?;
         sqlx::query!(
             "UPDATE books \
                 SET brand_intro_duration_ms = NULL, \
@@ -193,15 +193,19 @@ impl Stage for AudnexusChaptersStage {
         )
         .execute(&mut *tx)
         .await
-        .map_err(|e| Error::Database(format!("audnexus-chapters reset brand-durations: {e}")))?;
+        .map_err(|e| {
+            Error::Database(format!(
+                "fetch-audnexus-chapters reset brand-durations: {e}"
+            ))
+        })?;
         tx.commit()
             .await
-            .map_err(|e| Error::Database(format!("audnexus-chapters reset commit: {e}")))?;
+            .map_err(|e| Error::Database(format!("fetch-audnexus-chapters reset commit: {e}")))?;
         ab_pipeline::default_reset(STAGE_ID.as_str(), ctx, book_id).await
     }
 }
 
-/// Fetch the ASIN that audnexus-enrich promoted into `books.asin`.
+/// Fetch the ASIN that enrich-from-audnexus promoted into `books.asin`.
 async fn fetch_book_asin(library: &ab_db::LibraryDb, book_id: BookId) -> Result<Option<String>> {
     let id = book_id.0;
     let row = sqlx::query!("SELECT asin FROM books WHERE book_id = ?", id)
@@ -311,7 +315,7 @@ mod tests {
             library: lib,
             ephemeral: eph,
             cancel: tokio_util::sync::CancellationToken::new(),
-            stage_name: "audnexus-chapters",
+            stage_name: "fetch-audnexus-chapters",
         }
     }
 
@@ -319,7 +323,7 @@ mod tests {
     async fn stage_metadata_matches_pipeline_expectations() {
         let client = AudnexusClient::new(&HttpClientTunables::default());
         let stage = AudnexusChaptersStage::new(client, &NetworkTunables::default());
-        assert_eq!(stage.name(), "audnexus-chapters");
+        assert_eq!(stage.name(), "fetch-audnexus-chapters");
         assert_eq!(stage.requires(), &[crate::enrich::STAGE_ID]);
     }
 
@@ -480,7 +484,7 @@ mod tests {
         // the chained `default_reset` call clears it.
         sqlx::query(
             "INSERT INTO pipeline_progress (book_id, stage, status) \
-             VALUES (1, 'audnexus-chapters', 'succeeded')",
+             VALUES (1, 'fetch-audnexus-chapters', 'succeeded')",
         )
         .execute(ctx.ephemeral.pool())
         .await

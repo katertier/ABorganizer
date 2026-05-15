@@ -81,7 +81,7 @@ impl Stage for TranscribeHeadTailStage {
     }
 
     fn requires(&self) -> &'static [StageId] {
-        // tag-read writes the title/author/subtitle/description/
+        // read-tags writes the title/author/subtitle/description/
         // narrator provenance rows the pre-transcribe gate reads.
         // Without it the gate degrades to default_locale; with it
         // the engine usually picks the correct locale on the

@@ -12,11 +12,11 @@
 //!
 //! This stage never modifies the canonical `books` table directly —
 //! that's `commit`'s job after merging candidates from every source
-//! (tag-read, audnexus, audible, transcript).
+//! (read-tags, audnexus, audible, transcript).
 //!
 //! # Stage placement
 //!
-//! `tag-read` depends on `scan` having created the book +
+//! `read-tags` depends on `scan` having created the book +
 //! `book_files` rows. It's the first real pipeline stage (scan is a
 //! producer; see
 //! `ab-scan` crate docs).
@@ -41,7 +41,7 @@ pub const PROVENANCE_SOURCE: &str = "tag_file";
 /// Typed identifier for this stage. Imported by dependents in
 /// their `Stage::requires()` impls so a rename here surfaces
 /// at compile time everywhere it's referenced.
-pub const STAGE_ID: StageId = StageId::new("tag-read");
+pub const STAGE_ID: StageId = StageId::new("read-tags");
 
 /// Stage that probes book files with lofty.
 pub struct TagReadStage {
@@ -49,7 +49,7 @@ pub struct TagReadStage {
 }
 
 impl TagReadStage {
-    /// Build a tag-read stage with the supplied tunables.
+    /// Build a read-tags stage with the supplied tunables.
     pub const fn new(tunables: TagReadTunables) -> Self {
         Self { tunables }
     }
@@ -74,13 +74,13 @@ impl Stage for TagReadStage {
     async fn run(&self, ctx: &StageContext, book_id: BookId) -> Result<StageOutcome> {
         let files = fetch_book_files(&ctx.library, book_id).await?;
         if files.is_empty() {
-            tracing::debug!(book = %book_id, "tag-read.no_files");
+            tracing::debug!(book = %book_id, "read-tags.no_files");
             return Ok(StageOutcome::Skipped);
         }
 
         for (file_id, file_path) in files {
             if ctx.cancel.is_cancelled() {
-                return Err(Error::Invariant("tag-read cancelled"));
+                return Err(Error::Invariant("read-tags cancelled"));
             }
             process_one_file(&ctx.library, book_id, file_id, &file_path, &self.tunables).await;
         }
@@ -106,7 +106,7 @@ async fn fetch_book_files(
     )
     .fetch_all(library.pool())
     .await
-    .map_err(|e| Error::Database(format!("tag-read fetch files: {e}")))?;
+    .map_err(|e| Error::Database(format!("read-tags fetch files: {e}")))?;
     Ok(rows.into_iter().map(|r| (r.file_id, r.file_path)).collect())
 }
 
@@ -122,13 +122,13 @@ async fn process_one_file(
     let probe = match probe_with_lofty(file_path) {
         Ok(p) => p,
         Err(e) => {
-            tracing::warn!(book = %book_id, file = file_path, error = %e, "tag-read.probe_failed");
+            tracing::warn!(book = %book_id, file = file_path, error = %e, "read-tags.probe_failed");
             return;
         }
     };
 
     if let Err(e) = update_book_file_properties(library, file_id, &probe.properties).await {
-        tracing::warn!(book = %book_id, file = file_path, error = %e, "tag-read.write_properties_failed");
+        tracing::warn!(book = %book_id, file = file_path, error = %e, "read-tags.write_properties_failed");
     }
 
     if tunables.write_provenance {
@@ -148,7 +148,7 @@ async fn process_one_file(
                     book = %book_id,
                     field = %candidate.field,
                     error = %e,
-                    "tag-read.provenance_write_failed"
+                    "read-tags.provenance_write_failed"
                 );
             }
         }
@@ -242,7 +242,7 @@ fn tag_candidates_of(tagged: &lofty::file::TaggedFile) -> Vec<TagCandidate> {
     if let Some(language) = tag.get_string(ItemKey::Language) {
         // Normalise via the central language-code table so this
         // candidate is comparable to Audnexus / Audible / NL
-        // detector outputs (otherwise tag-read might write
+        // detector outputs (otherwise read-tags might write
         // "eng", Audnexus writes "English", and consensus
         // treats them as different values).
         if let Some(canonical) = ab_core::language_code::normalize(language) {
@@ -256,7 +256,7 @@ fn tag_candidates_of(tagged: &lofty::file::TaggedFile) -> Vec<TagCandidate> {
     }
     if let Some(genre) = tag.get_string(ItemKey::Genre) {
         // Same normalize-on-write pattern as language: route
-        // through the central `genre_code` table so tag-read
+        // through the central `genre_code` table so read-tags
         // ("Sci-Fi"), Audnexus ("Science Fiction"), and any
         // future source converge on the canonical slug
         // ("science-fiction"). Multi-value genre tags split on
@@ -336,7 +336,7 @@ async fn update_book_file_properties(
 /// Write a series candidate row sourced from the audio file's
 /// album tag. Tag-read can't supply a `series_asin` (the album
 /// tag is name-only) or a numeric `position` (the album tag is
-/// just a string); identity-resolve fills in the rest via
+/// just a string); resolve-identity fills in the rest via
 /// case-insensitive name match against `series` (and any
 /// `series.audible_id` if a higher-confidence source like
 /// Audnexus seeded the row).
@@ -429,7 +429,7 @@ mod tests {
             library,
             ephemeral,
             cancel: CancellationToken::new(),
-            stage_name: "tag-read",
+            stage_name: "read-tags",
         };
         let stage = TagReadStage::default();
         let outcome = stage
@@ -465,7 +465,7 @@ mod tests {
             library,
             ephemeral,
             cancel: CancellationToken::new(),
-            stage_name: "tag-read",
+            stage_name: "read-tags",
         };
         let stage = TagReadStage::default();
         let outcome = stage

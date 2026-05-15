@@ -104,9 +104,9 @@ async fn books_columns_match_provenance_winners() {
         // real `tag_meta` / `audible_search` / `audnexus_asin`
         // source values come from the corresponding stages.
         let stage = match *source {
-            s if s.starts_with("audnexus") => "audnexus-enrich",
-            "audible_search" => "audible-search",
-            _ => "tag-read",
+            s if s.starts_with("audnexus") => "enrich-from-audnexus",
+            "audible_search" => "search-audible",
+            _ => "read-tags",
         };
         sqlx::query(
             "INSERT INTO book_field_provenance \
@@ -215,7 +215,7 @@ async fn check_constraint_rejects_off_vocabulary_field() {
     .bind("not_a_field")
     .bind("anything")
     .bind("manual")
-    .bind("tag-read")
+    .bind("read-tags")
     .bind(0.5_f64)
     .execute(library.pool())
     .await;
@@ -273,7 +273,7 @@ async fn check_constraint_accepts_every_field_variant() {
         .bind(f.as_str())
         .bind("v")
         .bind("manual")
-        .bind("tag-read")
+        .bind("read-tags")
         .bind(0.5_f64)
         .execute(library.pool())
         .await;

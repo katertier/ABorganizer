@@ -64,7 +64,7 @@ impl Default for EmbeddedChaptersStage {
 }
 
 /// Typed identifier for this stage.
-pub const STAGE_ID: StageId = StageId::new("embedded-chapters");
+pub const STAGE_ID: StageId = StageId::new("read-embedded-chapters");
 
 #[async_trait]
 impl Stage for EmbeddedChaptersStage {
@@ -73,7 +73,7 @@ impl Stage for EmbeddedChaptersStage {
     }
 
     fn requires(&self) -> &'static [StageId] {
-        // tag-read populates `book_files.duration_ms`, which we
+        // read-tags populates `book_files.duration_ms`, which we
         // need to offset multi-file books' chapter positions and
         // to synthesize "Part N" entries for files with no
         // embedded chapters.
@@ -93,7 +93,7 @@ impl Stage for EmbeddedChaptersStage {
             let path = std::path::PathBuf::from(&f.file_path);
             let chapters = tokio::task::spawn_blocking(move || read_chapters_from_file(&path))
                 .await
-                .map_err(|e| Error::stage("embedded-chapters", format!("join: {e}")))?;
+                .map_err(|e| Error::stage("read-embedded-chapters", format!("join: {e}")))?;
             per_file.push(chapters);
         }
 
@@ -127,7 +127,7 @@ impl Stage for EmbeddedChaptersStage {
 /// needs.
 struct FileEntry {
     file_path: String,
-    /// Duration in milliseconds, or 0 if tag-read didn't read it
+    /// Duration in milliseconds, or 0 if read-tags didn't read it
     /// (in which case multi-file offset becomes incorrect — we
     /// can't help that without re-probing). Files with `0` get
     /// no synthesized "Part" entry.
@@ -261,7 +261,7 @@ struct MergedChapter {
 }
 
 /// Clear existing `source = 'embedded'` rows for this book and
-/// insert the merged set. Mirrors audnexus-chapters' idempotency.
+/// insert the merged set. Mirrors fetch-audnexus-chapters' idempotency.
 async fn write_embedded_chapters(
     library: &ab_db::LibraryDb,
     book_id: BookId,

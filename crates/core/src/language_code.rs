@@ -1,10 +1,10 @@
 //! Language code normalization.
 //!
 //! Every source that writes a `language` candidate to
-//! `book_field_provenance` (tag-read MP4/ID3, Audnexus, Audible,
+//! `book_field_provenance` (read-tags MP4/ID3, Audnexus, Audible,
 //! `NLLanguageRecognizer`) emits in a different format:
 //!
-//! - tag-read MP4 `©lng` / ID3 `TLAN`: ISO-639-2 (`"eng"`,
+//! - read-tags MP4 `©lng` / ID3 `TLAN`: ISO-639-2 (`"eng"`,
 //!   `"deu"`, `"fra"`)
 //! - Audnexus: usually full English name (`"English"`)
 //! - Audible API: ISO-639-3 or BCP-47

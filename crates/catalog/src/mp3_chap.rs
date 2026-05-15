@@ -4,7 +4,7 @@
 //! (chapter info) or `CTOC` (chapter table-of-contents); it
 //! surfaces unknown frames as [`lofty::id3::v2::BinaryFrame`]
 //! with the raw body bytes intact. This module hand-rolls the
-//! decoder on those bytes so the existing `embedded-chapters`
+//! decoder on those bytes so the existing `read-embedded-chapters`
 //! stage (slice 2H) can pick up MP3 chapter data in addition
 //! to the MP4 `chpl` / chapter-track support it already has.
 //!
@@ -53,7 +53,7 @@ use lofty::mpeg::MpegFile;
 /// Returns `(start_ms, title)` tuples sorted by `start_ms`.
 /// Files with no `ID3v2` tag, no CHAP frames, or unreadable
 /// frames return an empty vector — no error type; the
-/// embedded-chapters stage treats absent chapters as "this file
+/// read-embedded-chapters stage treats absent chapters as "this file
 /// simply doesn't contribute" rather than a fatal condition.
 ///
 /// Uses [`MpegFile::read_from`] directly (rather than the generic

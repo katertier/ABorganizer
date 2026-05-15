@@ -1,5 +1,5 @@
 // Integration tests for the series resolution path landed in
-// slice C5.6 (`identity-resolve` reads `book_series_candidate`
+// slice C5.6 (`resolve-identity` reads `book_series_candidate`
 // rows and writes `series` + `book_series` junction).
 //
 // `expect()` / `unwrap()` on setup is the standard integration-test
@@ -47,7 +47,7 @@ async fn fresh_ctx(dir: &std::path::Path) -> (StageContext, LibraryDb) {
         library: lib.clone(),
         ephemeral: eph,
         cancel: CancellationToken::new(),
-        stage_name: "identity-resolve",
+        stage_name: "resolve-identity",
     };
     (ctx, lib)
 }

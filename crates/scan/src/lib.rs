@@ -3,7 +3,7 @@
 //! # Pipeline placement
 //!
 //! Scan is the producer in the pipeline. It walks a directory tree
-//! and emits `BookId`s. Downstream stages (`tag-read`, `fingerprint`,
+//! and emits `BookId`s. Downstream stages (`read-tags`, `fingerprint`,
 //! `audiologo`, `commit`) consume those `BookId`s via the scheduler.
 //!
 //! # Slice 1D behaviour
@@ -22,7 +22,7 @@
 //!
 //! # What's still NOT here
 //!
-//! - File probe (duration / bitrate / codec) — `tag-read` stage.
+//! - File probe (duration / bitrate / codec) — `read-tags` stage.
 //! - Catalog enrichment — `enrich` stage (Theme 2).
 //! - Audiologo trim — Theme 3.
 //! - Watching for filesystem changes — daemon.rs has the watch

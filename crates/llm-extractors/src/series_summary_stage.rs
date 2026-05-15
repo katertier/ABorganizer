@@ -16,7 +16,7 @@
 //!
 //! The pipeline is per-book; adding a per-series queue would
 //! mean a new scheduler tier. Instead, every book that completes
-//! its own summary stage AND the identity-resolve stage triggers
+//! its own summary stage AND the resolve-identity stage triggers
 //! this stage; the inner per-series `extractor_version` check
 //! fast-skips when nothing changed. Re-running for each book in
 //! the series wastes a SELECT per book, which is cheap.
@@ -107,7 +107,7 @@ impl Stage for ExtractSeriesSummaryStage {
 
     fn requires(&self) -> &'static [StageId] {
         // Two inputs: the book's individual summary (3K.4) AND
-        // the series resolution result (C5.6 identity-resolve
+        // the series resolution result (C5.6 resolve-identity
         // path). Both must land before we can summarise the
         // series.
         &[

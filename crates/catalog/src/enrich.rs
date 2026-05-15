@@ -68,7 +68,7 @@ impl AudnexusEnrichStage {
 }
 
 /// Typed identifier for this stage.
-pub const STAGE_ID: StageId = StageId::new("audnexus-enrich");
+pub const STAGE_ID: StageId = StageId::new("enrich-from-audnexus");
 
 #[async_trait]
 impl Stage for AudnexusEnrichStage {
@@ -77,8 +77,8 @@ impl Stage for AudnexusEnrichStage {
     }
 
     fn requires(&self) -> &'static [StageId] {
-        // tag-read writes the tag-supplied ASIN candidate;
-        // audible-search writes a fallback ASIN candidate when no
+        // read-tags writes the tag-supplied ASIN candidate;
+        // search-audible writes a fallback ASIN candidate when no
         // tag value exists. We wait for BOTH so the lookup sees
         // whichever source supplied an ASIN.
         &[ab_tag_read::STAGE_ID, crate::audible_search::STAGE_ID]
@@ -160,7 +160,7 @@ impl Stage for AudnexusEnrichStage {
 }
 
 /// Pick the highest-confidence ASIN candidate from
-/// `book_field_provenance`. Most commonly populated by tag-read
+/// `book_field_provenance`. Most commonly populated by read-tags
 /// with the M4B `CatalogNumber` atom. Returns `None` if no
 /// candidate exists.
 async fn fetch_asin_candidate(
@@ -229,7 +229,7 @@ async fn write_scalar_provenance(
     }
     if let Some(v) = book.language.as_deref() {
         // Normalise via the central language-code table so this
-        // Audnexus candidate is comparable with tag-read /
+        // Audnexus candidate is comparable with read-tags /
         // Audible / NL detector outputs. Skip + warn on
         // unparseable input rather than polluting consensus.
         if let Some(canonical) = ab_core::language_code::normalize(v) {
@@ -260,7 +260,7 @@ async fn write_scalar_provenance(
     }
     // Genres + sub-genre tags. Each entry routes through the
     // central `genre_code::normalize` (slice 3D.1 pattern) so
-    // tag-read / Audible / future scrapers all converge on the
+    // read-tags / Audible / future scrapers all converge on the
     // same canonical slug. Audnexus's per-genre ASIN goes into
     // `external_id` so the future genre-resolve step can join
     // against the `genres.audible_id` column.
@@ -318,7 +318,7 @@ async fn insert_scalar(
 
 /// Write one provenance row per Audnexus contributor (author or
 /// narrator). The contributor's Audnexus ASIN (when present) goes
-/// into the `external_id` column so identity-resolve can match
+/// into the `external_id` column so resolve-identity can match
 /// against `authors.audible_id` / `narrators.audible_id`.
 async fn write_contributor_provenance(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -372,7 +372,7 @@ async fn write_contributor_provenance(
 /// "1.0a", "2-3" for boxed sets). This writer parses the simple
 /// numeric cases via `f64::from_str`; on parse failure the
 /// candidate row is still written (name resolves via
-/// identity-resolve) but `position` stays NULL. The parse
+/// resolve-identity) but `position` stays NULL. The parse
 /// failure logs a single warn so we can monitor unusual values.
 async fn write_series_candidates(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -528,7 +528,7 @@ mod tests {
     async fn stage_metadata_matches_pipeline_expectations() {
         let client = AudnexusClient::new(&HttpClientTunables::default());
         let stage = AudnexusEnrichStage::new(client, &NetworkTunables::default());
-        assert_eq!(stage.name(), "audnexus-enrich");
+        assert_eq!(stage.name(), "enrich-from-audnexus");
         assert_eq!(
             stage.requires(),
             &[ab_tag_read::STAGE_ID, crate::audible_search::STAGE_ID]
@@ -582,7 +582,7 @@ mod tests {
             .await
             .expect("open ephemeral"),
             cancel: tokio_util::sync::CancellationToken::new(),
-            stage_name: "audnexus-enrich",
+            stage_name: "enrich-from-audnexus",
         };
         let outcome = stage
             .run(&ctx, BookId(1))
@@ -612,7 +612,7 @@ mod tests {
             .await
             .expect("open ephemeral"),
             cancel: tokio_util::sync::CancellationToken::new(),
-            stage_name: "audnexus-enrich",
+            stage_name: "enrich-from-audnexus",
         };
         let outcome = stage
             .run(&ctx, BookId(1))

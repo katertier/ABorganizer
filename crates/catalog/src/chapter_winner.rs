@@ -1,6 +1,6 @@
 //! Chapter source winner picker.
 //!
-//! Two stages (`audnexus-chapters` and `embedded-chapters`) can
+//! Two stages (`fetch-audnexus-chapters` and `read-embedded-chapters`) can
 //! both populate `chapters` for the same book — Audnexus when
 //! Audible has a `ToC` for the book's ASIN, embedded when the M4B
 //! files carry `chpl` or chapter-track atoms. Without a tiebreaker
@@ -66,7 +66,7 @@ impl Default for ChapterWinnerStage {
 }
 
 /// Typed identifier for this stage.
-pub const STAGE_ID: StageId = StageId::new("chapter-pick-winner");
+pub const STAGE_ID: StageId = StageId::new("pick-chapter-winner");
 
 #[async_trait]
 impl Stage for ChapterWinnerStage {
@@ -184,7 +184,7 @@ mod tests {
             library: lib,
             ephemeral: eph,
             cancel: tokio_util::sync::CancellationToken::new(),
-            stage_name: "chapter-pick-winner",
+            stage_name: "pick-chapter-winner",
         }
     }
 
@@ -212,7 +212,7 @@ mod tests {
     #[tokio::test]
     async fn stage_metadata_matches_pipeline_expectations() {
         let stage = ChapterWinnerStage::new();
-        assert_eq!(stage.name(), "chapter-pick-winner");
+        assert_eq!(stage.name(), "pick-chapter-winner");
         assert_eq!(
             stage.requires(),
             &[

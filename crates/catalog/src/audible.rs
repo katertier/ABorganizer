@@ -17,7 +17,7 @@
 //! response shape. The store the listing comes from controls
 //! visibility: a UK-only audiobook returns 0 hits on
 //! `api.audible.com` but lands on the front page of
-//! `api.audible.co.uk`. `audible-search` walks regions in
+//! `api.audible.co.uk`. `search-audible` walks regions in
 //! `NetworkTunables.audible_region_order` (default 9-region
 //! list mirroring the Audnexus walk from slice 2B) and stops on
 //! the first non-empty response. The [`host_for_region`] helper

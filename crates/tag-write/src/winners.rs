@@ -135,9 +135,9 @@ mod tests {
     async fn returns_only_winner_rows() {
         let (library, _tmp) = fresh().await;
         seed_book(&library, 1).await;
-        seed_winner(&library, 1, "title", "Foundation", "audible-search", 1).await;
+        seed_winner(&library, 1, "title", "Foundation", "search-audible", 1).await;
         seed_winner(&library, 1, "title", "Foundation, Vol. 1", "tag_file", 0).await;
-        seed_winner(&library, 1, "author", "Asimov", "audnexus-enrich", 1).await;
+        seed_winner(&library, 1, "author", "Asimov", "enrich-from-audnexus", 1).await;
 
         let winners = select_winners_for_book(library.pool(), 1)
             .await

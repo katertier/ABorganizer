@@ -1,6 +1,6 @@
 //! Typed identifier for `book_field_provenance.field`.
 //!
-//! Every extractor (tag-read, audnexus, audible-search,
+//! Every extractor (read-tags, audnexus, search-audible,
 //! transcript title/author/publisher heuristics) writes one or
 //! more rows into `book_field_provenance` with a `field` column
 //! naming what value the row claims. The consensus stage reads
@@ -48,16 +48,16 @@ pub enum Field {
     /// ISBN-10 or ISBN-13. Promoted to `books.isbn`.
     Isbn,
     /// Author name. Multi-value; resolved into `authors` +
-    /// `book_narrator`-style junction by `identity-resolve`.
+    /// `book_narrator`-style junction by `resolve-identity`.
     Author,
-    /// Narrator name. Multi-value; same identity-resolve path
+    /// Narrator name. Multi-value; same resolve-identity path
     /// as author.
     Narrator,
     /// Publisher / imprint name.
     Publisher,
     /// Book series name (multi-value; one row per series the
-    /// book belongs to). Currently written by tag-read from the
-    /// audio file's album tag. No consensus / identity-resolve
+    /// book belongs to). Currently written by read-tags from the
+    /// audio file's album tag. No consensus / resolve-identity
     /// path yet — adding one is a future slice; until then the
     /// provenance row is captured but does not promote anywhere.
     Series,
@@ -109,7 +109,7 @@ impl Field {
     /// - `None` for fields that go through junction tables
     ///   (`Author`, `Narrator`, `Genre`, `Series`) or FK-indirect
     ///   identity tables (`Publisher` → `books.publisher_id`).
-    ///   These need their own promotion path (identity-resolve,
+    ///   These need their own promotion path (resolve-identity,
     ///   consensus's genre promoter, future series-resolve).
     ///
     /// Consensus's `PROMOTABLE_FIELDS` table iterates the
@@ -131,7 +131,7 @@ impl Field {
             Self::CoverUrl => Some("cover_url"),
             Self::Abridged => Some("abridged"),
             Self::Explicit => Some("explicit"),
-            // Junction / identity-resolve fields:
+            // Junction / resolve-identity fields:
             Self::Author | Self::Narrator | Self::Publisher | Self::Genre | Self::Series => None,
         }
     }
@@ -264,7 +264,7 @@ mod tests {
 
     #[test]
     fn books_column_none_for_junction_fields() {
-        // Junction / identity-resolve fields don't promote into a
+        // Junction / resolve-identity fields don't promote into a
         // scalar `books` column:
         assert_eq!(Field::Author.books_column(), None);
         assert_eq!(Field::Narrator.books_column(), None);

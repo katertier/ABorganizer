@@ -19,7 +19,7 @@ ab-core     = { workspace = true }
 ab-db       = { workspace = true }
 ab-pipeline = { workspace = true }
 ab-speech   = { workspace = true }
-# For Stage::requires() typed dependency on tag-read +
+# For Stage::requires() typed dependency on read-tags +
 # consensus (description-lang waits for consensus to pick
 # the description winner).
 ab-tag-read = { workspace = true }

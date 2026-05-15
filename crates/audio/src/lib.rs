@@ -3,7 +3,7 @@
 //! # Layers
 //!
 //! 1. **Pure-Rust probe** via [`lofty`]. Today: duration probe in
-//!    [`info::probe_duration_ms`]. Tag-read lives in `ab-tag-read`
+//!    [`info::probe_duration_ms`]. Tag-read lives in `ab-read-tags`
 //!    (separate crate); PCM decode for fingerprinting lives in
 //!    `ab-fingerprint` (separate crate, uses Symphonia). This
 //!    crate intentionally stays small — just the bits the FFI

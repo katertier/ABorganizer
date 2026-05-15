@@ -22,9 +22,9 @@ ab-covers     = { workspace = true }
 ab-db         = { workspace = true }
 ab-pipeline   = { workspace = true }
 async-trait   = { workspace = true }
-# Same crate as `tag-read` uses for reading. Writing routes
+# Same crate as `read-tags` uses for reading. Writing routes
 # through `lofty::tag::Tag::save_to`-style APIs; the typed
-# `ItemKey` mapping is symmetric with what tag-read pulls.
+# `ItemKey` mapping is symmetric with what read-tags pulls.
 lofty         = { workspace = true }
 reqwest       = { workspace = true }
 sqlx          = { workspace = true }

@@ -68,20 +68,20 @@ fn build_pipeline_stages(tunables: &Tunables) -> Vec<Arc<dyn Stage>> {
     let audnexus_client = ab_catalog::AudnexusClient::new(&tunables.http_client);
     let audible_client = ab_catalog::AudibleClient::new(&tunables.http_client);
     let mut stages: Vec<Arc<dyn Stage>> = vec![
-        // `tag-read` (slice 1B) — lofty MP4-atom / ID3 reader.
+        // `read-tags` (slice 1B) — lofty MP4-atom / ID3 reader.
         // Writes title/author/subtitle/description/narrator
         // candidate rows; no dependencies.
         Arc::new(ab_tag_read::TagReadStage::new(tunables.tag_read.clone())),
         // `fingerprint` (slice 1C) — chromaprint whole-book hash.
         Arc::new(ab_fingerprint::FingerprintStage::new()),
-        // `audible-search` fills in an ASIN candidate for books
+        // `search-audible` fills in an ASIN candidate for books
         // with no `CatalogNumber` tag.
         Arc::new(ab_catalog::AudibleSearchStage::new(
             audible_client,
             &tunables.network,
         )),
-        // `audnexus-enrich` waits for both tag-read AND
-        // audible-search so it sees whichever ASIN source landed
+        // `enrich-from-audnexus` waits for both read-tags AND
+        // search-audible so it sees whichever ASIN source landed
         // first.
         Arc::new(ab_catalog::AudnexusEnrichStage::new(
             audnexus_client,
@@ -90,20 +90,20 @@ fn build_pipeline_stages(tunables: &Tunables) -> Vec<Arc<dyn Stage>> {
         // `consensus` promotes the highest-confidence provenance
         // value into the corresponding `books` column.
         Arc::new(ab_catalog::ConsensusStage::new()),
-        // `identity-resolve` promotes author / publisher / narrator
+        // `resolve-identity` promotes author / publisher / narrator
         // candidates into the identity tables + junctions, after
         // consensus has settled the scalar columns.
         Arc::new(ab_catalog::IdentityResolveStage::new()),
-        // `audnexus-chapters` fetches the per-ASIN chapter ToC +
+        // `fetch-audnexus-chapters` fetches the per-ASIN chapter ToC +
         // brand intro/outro markers.
         Arc::new(ab_catalog::AudnexusChaptersStage::new(
             ab_catalog::AudnexusClient::new(&tunables.http_client),
             &tunables.network,
         )),
-        // `embedded-chapters` reads chpl + chapter-track atoms
+        // `read-embedded-chapters` reads chpl + chapter-track atoms
         // from .m4b / .m4a files via mp4ameta.
         Arc::new(ab_catalog::EmbeddedChaptersStage::new()),
-        // `chapter-pick-winner` flips `is_winner` so exactly one
+        // `pick-chapter-winner` flips `is_winner` so exactly one
         // chapter source per book is surfaced to the player.
         Arc::new(ab_catalog::ChapterWinnerStage::new()),
         // `transcribe-head-tail` (slice 3A.4) runs the on-device
@@ -186,7 +186,7 @@ fn build_pipeline_stages(tunables: &Tunables) -> Vec<Arc<dyn Stage>> {
         Arc::new(ab_llm_extractors::ExtractSettingStage::new(&tunables.llm)),
         // `extract-summary-spoiler-free-series` (slice 3K.4.1) —
         // per-series spoiler-free synopsis, regenerated when a
-        // book completes its own summary AND identity-resolve
+        // book completes its own summary AND resolve-identity
         // writes a `book_series` row. Picks the predominant
         // `books.language` across the series' books as the
         // output locale (ADR-0019). No `ai_cache` row — uses
@@ -207,7 +207,7 @@ fn build_pipeline_stages(tunables: &Tunables) -> Vec<Arc<dyn Stage>> {
     // reaps the source rows once refs settle.
     stages.push(Arc::new(ab_transcode::TranscodeM4bStage::new()));
 
-    // `tag-write-early` (ADR-0028, Phase A2) — opt-in via
+    // `write-tags-early` (ADR-0028, Phase A2) — opt-in via
     // `tunables.pipeline.tag_write_early_enabled`. Default
     // `false` because flipping it on re-tags every book whose
     // winners differ from on-disk on the next pipeline pass;
@@ -239,7 +239,7 @@ fn build_pipeline_stages(tunables: &Tunables) -> Vec<Arc<dyn Stage>> {
         info!("daemon.pipeline.tag_write_early_disabled");
     }
 
-    // `tag-write-final` (ADR-0028 § `TagWriteFinal`) — Background
+    // `write-tags-final` (ADR-0028 § `TagWriteFinal`) — Background
     // priority, opt-in via `tunables.pipeline.tag_write_final_enabled`.
     // Same fallback shape as Early: `from_tunables` fails closed
     // only on a broken TLS stack; degrade to the permissive

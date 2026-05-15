@@ -214,7 +214,7 @@ pub struct AudnexusGenre {
 /// One author or narrator entry on an Audnexus book response.
 ///
 /// Audnexus assigns its own ASINs to people (visible in their
-/// `/authors/{asin}` endpoint) — kept here so the identity-resolve
+/// `/authors/{asin}` endpoint) — kept here so the resolve-identity
 /// stage can use them as the join key when available.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AudnexusContributor {

@@ -1,7 +1,7 @@
 //! Genre normalization + locale-aware display.
 //!
 //! Mirrors [`crate::language_code`]: arbitrary input (Audnexus
-//! `"Science Fiction"`, Audible `"sci-fi"`, tag-read
+//! `"Science Fiction"`, Audible `"sci-fi"`, read-tags
 //! `"Science-Fiction"`) → canonical slug (`"science-fiction"`)
 //! → locale-aware display (`"Science Fiction"` in `"en"`,
 //! `"Science-Fiction"` in `"de"`, `"Ciencia ficción"` in `"es"`).

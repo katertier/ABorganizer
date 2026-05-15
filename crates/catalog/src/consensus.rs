@@ -26,13 +26,13 @@
 //!
 //! Junction-table fields (author, narrator, publisher) require
 //! lookup + insert into their identity tables and are handled by
-//! a separate "identity-resolve" slice.
+//! a separate "resolve-identity" slice.
 //!
 //! # Idempotency
 //!
 //! Re-running consensus on the same book is a no-op when the
 //! winners haven't changed. When new candidates arrive (e.g. an
-//! Audnexus enrich completes after tag-read), the next consensus
+//! Audnexus enrich completes after read-tags), the next consensus
 //! pass picks up the higher-confidence row and updates `books`
 //! accordingly.
 
@@ -69,9 +69,9 @@ impl Default for ConsensusStage {
 /// needs the × 1000 integer transform handled by
 /// `promote_duration`. `Genre` is also intentionally absent — it's
 /// multi-value through the `book_genre` junction, handled by
-/// `promote_genres`. Junction / identity-resolve fields
+/// `promote_genres`. Junction / resolve-identity fields
 /// (`Author`, `Narrator`, `Publisher`, `Series`) return
-/// `Field::books_column() == None` and live in `identity-resolve`.
+/// `Field::books_column() == None` and live in `resolve-identity`.
 const PROMOTABLE_FIELDS: &[Field] = &[
     Field::Title,
     Field::Subtitle,
@@ -90,9 +90,9 @@ impl Stage for ConsensusStage {
     }
 
     fn requires(&self) -> &'static [StageId] {
-        // audnexus-enrich is the highest-confidence source. By
-        // requiring it, consensus runs after both tag-read (which
-        // audnexus-enrich requires) and audnexus-enrich. Adding
+        // enrich-from-audnexus is the highest-confidence source. By
+        // requiring it, consensus runs after both read-tags (which
+        // enrich-from-audnexus requires) and enrich-from-audnexus. Adding
         // more enrichers later: extend this list so consensus
         // waits for them.
         &[crate::enrich::STAGE_ID]
@@ -419,7 +419,7 @@ async fn promote_genres(
     // candidate. Builds a NOT-IN clause from the current slug
     // list — dynamic SQL, but the slugs themselves come from
     // the closed `book_field_provenance.value` namespace
-    // (written by normalize() in tag-read / Audnexus) so
+    // (written by normalize() in read-tags / Audnexus) so
     // injection isn't a concern. Bound parameters anyway for
     // safety.
     let placeholders = std::iter::repeat_n("?", current_slugs.len())
@@ -557,8 +557,8 @@ mod tests {
         sqlx::query(
             "INSERT INTO book_field_provenance \
              (book_id, field, value, source, stage, confidence) \
-             VALUES (1, 'title', 'tag-value',      'tag_file',         'tag-read',        0.7), \
-                    (1, 'title', 'audnexus-value', 'audnexus_asin_us', 'audnexus-enrich', 0.95)",
+             VALUES (1, 'title', 'tag-value',      'tag_file',         'read-tags',        0.7), \
+                    (1, 'title', 'audnexus-value', 'audnexus_asin_us', 'enrich-from-audnexus', 0.95)",
         )
         .execute(ctx.library.pool())
         .await
@@ -599,7 +599,7 @@ mod tests {
         sqlx::query(
             "INSERT INTO book_field_provenance \
              (book_id, field, value, source, stage, confidence) \
-             VALUES (1, 'duration_seconds', '36000', 'audnexus_asin_us', 'audnexus-enrich', 0.95)",
+             VALUES (1, 'duration_seconds', '36000', 'audnexus_asin_us', 'enrich-from-audnexus', 0.95)",
         )
         .execute(ctx.library.pool())
         .await
@@ -701,7 +701,7 @@ mod tests {
         sqlx::query(
             "INSERT INTO book_field_provenance \
              (book_id, field, value, source, stage, confidence) \
-             VALUES (1, 'description', 'desc', 'audnexus_asin_us', 'audnexus-enrich', 0.95)",
+             VALUES (1, 'description', 'desc', 'audnexus_asin_us', 'enrich-from-audnexus', 0.95)",
         )
         .execute(ctx.library.pool())
         .await

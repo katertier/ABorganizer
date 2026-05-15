@@ -1,16 +1,16 @@
 //! Audible-search ASIN discovery for books with no tag-supplied ASIN.
 //!
-//! When tag-read finds no `CatalogNumber` atom (so no ASIN candidate
-//! exists), `audnexus-enrich` has nothing to look up against.
+//! When read-tags finds no `CatalogNumber` atom (so no ASIN candidate
+//! exists), `enrich-from-audnexus` has nothing to look up against.
 //! This stage closes that gap: it pulls the best title (+author)
 //! candidates from `book_field_provenance`, hits Audible's catalog
 //! search, picks the first relevance-ranked result, and writes its
-//! ASIN as a low-confidence provenance candidate so `audnexus-enrich`
+//! ASIN as a low-confidence provenance candidate so `enrich-from-audnexus`
 //! (which runs after this stage) can take it from there.
 //!
 //! # Confidence model
 //!
-//! Tag-supplied ASIN: 0.7 (tag-read).
+//! Tag-supplied ASIN: 0.7 (read-tags).
 //! Audible-search ASIN: **0.6** (this stage) — lower than tag,
 //! because relevance-rank-first-result is a guess. The downstream
 //! Audnexus call validates it (if Audnexus 404s the ASIN on every
@@ -35,7 +35,7 @@ use ab_pipeline::{Stage, StageContext, StageId, StageOutcome};
 use crate::AudibleClient;
 
 /// Confidence assigned to provenance rows from an Audible-search
-/// ASIN guess. Lower than tag-read (0.7) so a confirmed tag value
+/// ASIN guess. Lower than read-tags (0.7) so a confirmed tag value
 /// always wins.
 pub const AUDIBLE_SEARCH_CONFIDENCE: f64 = 0.6;
 
@@ -79,7 +79,7 @@ impl AudibleSearchStage {
 
 /// Typed identifier for this stage. Imported by dependents
 /// in their `Stage::requires()` impls.
-pub const STAGE_ID: StageId = StageId::new("audible-search");
+pub const STAGE_ID: StageId = StageId::new("search-audible");
 
 #[async_trait]
 impl Stage for AudibleSearchStage {
@@ -88,7 +88,7 @@ impl Stage for AudibleSearchStage {
     }
 
     fn requires(&self) -> &'static [StageId] {
-        // tag-read writes title+author candidates. Without those we
+        // read-tags writes title+author candidates. Without those we
         // can't even form a search query.
         &[ab_tag_read::STAGE_ID]
     }
@@ -103,7 +103,7 @@ impl Stage for AudibleSearchStage {
         }
 
         // Defer when an ASIN already exists. The downstream
-        // `audnexus-enrich` will use it; running an Audible search
+        // `enrich-from-audnexus` will use it; running an Audible search
         // would just add a competing low-confidence row.
         if has_asin_candidate(&ctx.library, book_id).await? {
             return Ok(StageOutcome::Skipped);
@@ -267,7 +267,7 @@ mod tests {
             library: lib,
             ephemeral: eph,
             cancel: tokio_util::sync::CancellationToken::new(),
-            stage_name: "audible-search",
+            stage_name: "search-audible",
         }
     }
 
@@ -275,7 +275,7 @@ mod tests {
     async fn stage_metadata_matches_pipeline_expectations() {
         let client = AudibleClient::new(&HttpClientTunables::default());
         let stage = AudibleSearchStage::new(client, &NetworkTunables::default());
-        assert_eq!(stage.name(), "audible-search");
+        assert_eq!(stage.name(), "search-audible");
         assert_eq!(stage.requires(), &[ab_tag_read::STAGE_ID]);
     }
 
@@ -304,8 +304,8 @@ mod tests {
         sqlx::query(
             "INSERT INTO book_field_provenance \
              (book_id, field, value, source, stage, confidence) \
-             VALUES (1, 'asin',  'B07XYZ1234', 'tag_file', 'tag-read', 0.7), \
-                    (1, 'title', 'Some Book',  'tag_file', 'tag-read', 0.7)",
+             VALUES (1, 'asin',  'B07XYZ1234', 'tag_file', 'read-tags', 0.7), \
+                    (1, 'title', 'Some Book',  'tag_file', 'read-tags', 0.7)",
         )
         .execute(ctx.library.pool())
         .await

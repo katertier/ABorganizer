@@ -13,10 +13,10 @@
 //! Multi-file books typically carry the same cover on every
 //! file; we pick the first to keep this read fast + bounded.
 //!
-//! No HTTP fallback to `books.cover_url` — the tag-write-early
+//! No HTTP fallback to `books.cover_url` — the write-tags-early
 //! stage (C3a) is what writes the cover into the file; books
 //! that haven't been through that stage 404 here. The clean
-//! recovery path is to re-run tag-write-early via the
+//! recovery path is to re-run write-tags-early via the
 //! `POST /books/:id/retry` flow; doing the lookup-and-fetch
 //! every request would couple the read endpoint to the catalog
 //! HTTP path.

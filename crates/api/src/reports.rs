@@ -99,7 +99,7 @@ pub async fn report_gaps(
     let client = AudibleClient::new(&tunables.http_client);
     let max_pages = q.max_pages.unwrap_or(5);
     // Use the home region for the report endpoint; region-walk
-    // is a follow-up slice (the audible-search Stage walks; the
+    // is a follow-up slice (the search-audible Stage walks; the
     // report just needs one region to produce a useful list).
     let region = audible_home_region(&tunables);
     let products = client
@@ -268,7 +268,7 @@ async fn annotate_against_library(
 /// `tunables.network.audible_region_order`, or `"us"` as the
 /// fallback when the list is empty (matching `AudibleClient`'s
 /// pre-region-walk default). Used by the report endpoints,
-/// which don't walk regions; the `audible-search` Stage walks.
+/// which don't walk regions; the `search-audible` Stage walks.
 fn audible_home_region(tunables: &Tunables) -> String {
     tunables
         .network

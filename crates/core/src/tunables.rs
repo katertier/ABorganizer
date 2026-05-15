@@ -183,7 +183,7 @@ pub struct NetworkTunables {
     pub audible_allowed: bool,
     /// Region order tried by Audnexus when ASIN-based lookup misses.
     pub audnexus_region_order: Vec<String>,
-    /// Region order tried by `audible-search` when the home
+    /// Region order tried by `search-audible` when the home
     /// region returns no products. Same 2-letter codes as
     /// `audnexus_region_order` — each code maps to an
     /// `api.audible.<tld>` host inside `crates/catalog`.
@@ -269,19 +269,19 @@ pub struct PipelineTunables {
     /// Maximum pending jobs per stage before scan refuses new entries.
     pub max_pending_per_stage: usize,
 
-    /// Opt-in switch for `tag-write-early` (ADR-0028).
+    /// Opt-in switch for `write-tags-early` (ADR-0028).
     ///
     /// `false` (default) — the stage's body ships but is NOT
     /// wired into the pipeline DAG, so books never reach it.
     /// Flip to `true` after dry-running the lofty writes
     /// against a library copy; once on, every book whose
-    /// `tag-read` + consensus winners differ from on-disk will
+    /// `read-tags` + consensus winners differ from on-disk will
     /// be re-tagged on the next pipeline pass. Per-field
     /// before/after pairs land in `mass_edit_history` so a
     /// future undo surface can roll them back if needed.
     pub tag_write_early_enabled: bool,
 
-    /// Opt-in switch for `tag-write-final` (ADR-0028).
+    /// Opt-in switch for `write-tags-final` (ADR-0028).
     ///
     /// `false` (default) for the same reason as
     /// [`Self::tag_write_early_enabled`]: turning it on re-tags

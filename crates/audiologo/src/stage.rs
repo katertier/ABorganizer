@@ -13,7 +13,7 @@
 //! ## Slice ladder (4B complete as of slice 4B.6)
 //!
 //! - **4B.0:** rename `books.audiologo_intro_ms` →
-//!   `brand_intro_duration_ms` (migration 017); audnexus-chapters
+//!   `brand_intro_duration_ms` (migration 017); fetch-audnexus-chapters
 //!   stage restores the writeback. ✓
 //! - **4B.1:** Swift `AVAssetReader` FFI in `crates/audio` for
 //!   windowed Float32 PCM decode. ✓
@@ -637,7 +637,7 @@ async fn update_book_audiologo_status(
 }
 
 /// Fetch Audnexus's reported brand-intro duration for the book, if
-/// any. Slice 4B.0 promotes this from the audnexus-chapters stage's
+/// any. Slice 4B.0 promotes this from the fetch-audnexus-chapters stage's
 /// response into `books.brand_intro_duration_ms`. Used by 4B for
 /// the Libation-stripped path (non-NULL brand duration + no
 /// fingerprint hit → `audiologo_status='stripped'`).
