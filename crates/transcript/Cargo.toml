@@ -12,6 +12,9 @@ description  = "Pipeline stages that orchestrate transcription + tag-text extrac
 workspace = true
 
 [dependencies]
+# C.4 EPUB name-dict stage delegates here for the pure-function
+# EPUB walk + dictionary extraction (ADR-0043 § C.4).
+ab-companion-extract = { workspace = true }
 ab-core     = { workspace = true }
 ab-db       = { workspace = true }
 ab-pipeline = { workspace = true }
@@ -33,3 +36,6 @@ tracing     = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio    = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# C.4 stage tests build minimal EPUB ZIPs on the fly.
+zip      = { workspace = true }

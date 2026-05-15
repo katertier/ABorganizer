@@ -24,6 +24,7 @@
 //! Add a new transcript-text extractor: implement [`Extractor`]
 //! + register it in [`extractors::built_in_extractors`].
 
+pub mod c4_epub_name_dict_stage;
 pub mod description_lang_stage;
 pub mod extract_stage;
 pub mod extractors;
@@ -33,6 +34,10 @@ pub mod multi_file;
 pub mod samples_stage;
 pub mod stage;
 
+pub use c4_epub_name_dict_stage::{
+    EXTRACTOR_VERSION as C4_EXTRACTOR_VERSION, EpubNameDictPayload, ExtractEpubNameDictStage,
+    STAGE_NAME as EXTRACT_EPUB_NAME_DICT_STAGE, load_name_dict as load_epub_name_dict,
+};
 pub use description_lang_stage::{
     DetectDescriptionLangStage, STAGE_NAME as DETECT_DESCRIPTION_LANG_STAGE,
 };

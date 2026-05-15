@@ -148,6 +148,7 @@ version = "0.1.0"
 dependencies = [
  "roxmltree",
  "scraper",
+ "serde",
  "thiserror",
  "unicode-segmentation",
  "zip",
@@ -501,6 +502,7 @@ name = "ab-transcript"
 version = "0.1.0"
 dependencies = [
  "ab-catalog",
+ "ab-companion-extract",
  "ab-core",
  "ab-db",
  "ab-pipeline",
@@ -516,6 +518,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "zip",
 ]
 
 [[package]]

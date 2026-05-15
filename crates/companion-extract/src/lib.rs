@@ -33,6 +33,7 @@
 use std::collections::HashMap;
 
 use scraper::{Html, Selector};
+use serde::{Deserialize, Serialize};
 use unicode_segmentation::UnicodeSegmentation;
 
 pub mod epub_walk;
@@ -42,7 +43,7 @@ pub use epub_walk::{EpubBody, EpubWalkError, extract_name_dict_from_epub, walk_s
 /// One canonical proper-noun candidate with its observed
 /// frequency. The C.4 stage writes a serialised `Vec<NameEntry>`
 /// to `ai_cache.content` with `cache_type='epub_name_dict'`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NameEntry {
     /// Canonical surface form. Multi-token sequences keep their
     /// internal spaces ("Kaladin Stormblessed"); single-token

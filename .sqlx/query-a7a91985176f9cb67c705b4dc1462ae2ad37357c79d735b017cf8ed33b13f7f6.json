@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT parsed_at FROM book_companions WHERE companion_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "parsed_at",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "a7a91985176f9cb67c705b4dc1462ae2ad37357c79d735b017cf8ed33b13f7f6"
+}

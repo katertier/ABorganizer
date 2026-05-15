@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO book_companions (book_id, path, format, parse_tier, content_hash, bytes, discovered_at) VALUES (?, ?, ?, ?, 'deadbeef', 0, 0) RETURNING companion_id AS \"companion_id!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "companion_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0429b899c866f2d3eefa9ef7ee91a4bcc6f805b9e2cb6a4873256545e87cb968"
+}
