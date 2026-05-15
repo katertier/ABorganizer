@@ -25,6 +25,7 @@ pub mod enrich;
 pub mod franchise;
 pub mod identity;
 pub mod mp3_chap;
+pub mod series_gaps;
 pub mod tiers;
 
 pub use audible::AudibleClient;
