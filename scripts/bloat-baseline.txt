@@ -1,0 +1,39 @@
+aborg-daemon: 14812176 bytes (14,13 MiB)
+generated: 2026-05-15T20:14:00Z
+
+
+ File  .text     Size Crate
+11.5%  17.3%   2.0MiB std
+10.8%  16.4%   1.9MiB lofty
+ 8.3%  12.5%   1.4MiB [Unknown]
+ 2.9%   4.3% 512.6KiB axum
+ 2.4%   3.7% 436.5KiB sqlx_core
+ 2.1%   3.2% 373.8KiB tokio
+ 1.9%   2.9% 343.5KiB regex_automata
+ 1.7%   2.6% 302.5KiB rustfft
+ 1.6%   2.4% 286.6KiB rustls
+ 1.0%   1.6% 185.0KiB ab_catalog
+ 0.9%   1.4% 168.7KiB clap_builder
+ 0.8%   1.2% 146.9KiB regex_syntax
+ 0.8%   1.2% 138.5KiB ring
+ 0.7%   1.1% 126.6KiB symphonia_format_isomp4
+ 0.7%   1.1% 125.7KiB ab_llm_extractors
+ 0.7%   1.0% 123.1KiB tracing
+ 0.7%   1.0% 117.2KiB futures_util
+ 0.6%   1.0% 115.5KiB sqlx_sqlite
+ 0.6%   0.9% 111.2KiB figment
+ 0.6%   0.9% 109.9KiB hyper
+ 0.6%   0.9% 109.2KiB symphonia_metadata
+ 0.6%   0.9% 108.7KiB serde_json
+ 0.6%   0.9% 101.7KiB aho_corasick
+ 0.5%   0.8%  93.6KiB libsqlite3_sys
+ 0.5%   0.8%  92.5KiB reqwest
+ 0.5%   0.7%  86.7KiB http
+ 0.5%   0.7%  86.5KiB ab_api
+ 0.4%   0.7%  80.4KiB hyper_util
+ 0.4%   0.6%  72.0KiB ab_transcript
+ 0.4%   0.6%  70.1KiB ab_pipeline
+ 9.8%  14.9%   1.7MiB And 136 more crates. Use -n N to show more.
+66.1% 100.0%  11.6MiB .text section size, the file size is 17.5MiB
+
+Note: numbers above are a result of guesswork. They are not 100% correct and never will be.

@@ -53,3 +53,4 @@ tests/fixtures/checksums.lock
 
 # ── Seed update artifacts ──────────────────────────────────────────────
 crates/seed/data/cache/
+.tokensave
