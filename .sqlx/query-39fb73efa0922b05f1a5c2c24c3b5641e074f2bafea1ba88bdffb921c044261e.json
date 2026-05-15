@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE books SET deleted_at = strftime('%s','now') WHERE book_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "39fb73efa0922b05f1a5c2c24c3b5641e074f2bafea1ba88bdffb921c044261e"
+}
