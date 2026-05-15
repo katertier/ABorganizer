@@ -27,11 +27,13 @@
 
 mod detect;
 mod pair;
+mod scan;
 
 pub use detect::{detect_format, is_companion_extension};
 pub use pair::{
     AudiobookCandidate, AutoPairResult, auto_pair, is_ancestor_or_equal, path_diverges,
 };
+pub use scan::{DETECT_PREFIX_BYTES, DiscoveredCompanion, ScanError, discover_companions};
 
 use serde::{Deserialize, Serialize};
 
