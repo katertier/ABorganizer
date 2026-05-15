@@ -208,6 +208,8 @@ impl Default for NetworkTunables {
                 "jp".into(),
                 "in".into(),
                 "it".into(),
+                "es".into(),
+                "br".into(),
             ],
             audible_region_order: vec![
                 "us".into(),
@@ -219,6 +221,8 @@ impl Default for NetworkTunables {
                 "jp".into(),
                 "in".into(),
                 "it".into(),
+                "es".into(),
+                "br".into(),
             ],
             cover_fetch_allowed: true,
         }
