@@ -1,0 +1,19 @@
+/* Global resets + base typography. Polish-last (ADR-0040 step 3) —
+   custom design language lands in a separate slice. */
+:root {
+    font-family: system-ui, -apple-system, sans-serif;
+    line-height: 1.5;
+    color-scheme: light dark;
+}
+
+body {
+    margin: 0;
+    min-height: 100vh;
+}
+
+.compact {
+    /* Menubar-embed host gets a tighter row spacing + smaller
+       cover thumbs. Components branch on this class via
+       `<div class:compact={host === "menubar"}>`. */
+    font-size: 0.9rem;
+}
