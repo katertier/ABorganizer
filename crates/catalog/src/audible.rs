@@ -67,6 +67,27 @@ pub const fn host_for_region(region: &str) -> Option<&'static str> {
 /// disambiguation: title, author, runtime, language.
 const SEARCH_RESPONSE_GROUPS: &str = "product_desc,product_attrs,contributors";
 
+/// User-Agent string mirroring the Audible iOS app (ADR-0050 § 5).
+///
+/// Audible's public-but-undocumented JSON API tolerates many UAs
+/// but rate-limits unfamiliar ones harder; using the iOS app's
+/// real UA gets the same anti-bot posture the mobile clients
+/// see. The Libex project (MIT, see ADR-0050) publishes the same
+/// string in production without legal pushback.
+///
+/// `CFNetwork/1240.0.4` corresponds to iOS 14.x — a well-aged
+/// build that's still in regular rotation, so we don't look like
+/// a one-off bot. If Audible enforces against this UA we revert
+/// to the generic build-info UA and accept the friction.
+pub const AUDIBLE_IOS_UA: &str = "Audible/671 CFNetwork/1240.0.4 Darwin/20.6.0";
+
+/// `site_variant` value used by the Audible Android app.
+///
+/// Hits `/1.0/searchsuggestions` (ADR-0050 § 5). Wired in by the
+/// searchsuggestions caller; defined here so the constant lives
+/// next to the iOS UA.
+pub const AUDIBLE_ANDROID_SITE_VARIANT: &str = "android-mshop";
+
 /// Reusable Audible HTTP client. Carries one `reqwest::Client`.
 #[derive(Clone)]
 pub struct AudibleClient {
@@ -78,13 +99,8 @@ impl AudibleClient {
     /// `tunables.audible_timeout_secs`.
     #[must_use]
     pub fn new(tunables: &HttpClientTunables) -> Self {
-        let ua = format!(
-            "{}/{}",
-            ab_core::build_info::APP_NAME,
-            env!("CARGO_PKG_VERSION")
-        );
         let http = Client::builder()
-            .user_agent(ua)
+            .user_agent(AUDIBLE_IOS_UA)
             .timeout(Duration::from_secs(tunables.audible_timeout_secs))
             .build()
             .unwrap_or_else(|_| Client::new());
