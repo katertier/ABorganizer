@@ -103,6 +103,10 @@ fn build_pipeline_stages(tunables: &Tunables) -> Vec<Arc<dyn Stage>> {
         // `read-embedded-chapters` reads chpl + chapter-track atoms
         // from .m4b / .m4a files via mp4ameta.
         Arc::new(ab_catalog::EmbeddedChaptersStage::new()),
+        // `read-cue-sidecar` reads `.cue` sidecars next to audio
+        // files (CD-ripped audiobooks) and writes chapter rows
+        // with `source = 'cue'`.
+        Arc::new(ab_catalog::CueSidecarChaptersStage::new()),
         // `pick-chapter-winner` flips `is_winner` so exactly one
         // chapter source per book is surfaced to the player.
         Arc::new(ab_catalog::ChapterWinnerStage::new()),
