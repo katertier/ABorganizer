@@ -6,22 +6,25 @@ rust-version = { workspace = true }
 license      = { workspace = true }
 authors      = { workspace = true }
 repository   = { workspace = true }
-description  = "SafeUnzip — ZIP-only extractor with zip-slip / depth / size caps. ADR-0047."
+description  = "ZIP archive extraction glue — delegates security to the `safe_unzip` crate; owns the zip_archive_extracts tracking + scan integration. ADR-0047."
 
 [lints]
 workspace = true
 
 [dependencies]
-ab-core   = { workspace = true }
-ab-db     = { workspace = true }
-blake3    = { workspace = true }
-serde     = { workspace = true }
-sqlx      = { workspace = true }
-thiserror = { workspace = true }
-tokio     = { workspace = true, features = ["fs", "io-util"] }
-tracing   = { workspace = true }
-zip       = { workspace = true }
+ab-core    = { workspace = true }
+ab-db      = { workspace = true }
+blake3     = { workspace = true }
+safe_unzip = { workspace = true }
+serde      = { workspace = true }
+sqlx       = { workspace = true }
+thiserror  = { workspace = true }
+tokio      = { workspace = true, features = ["fs", "io-util"] }
+tracing    = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio    = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# Used only by test fixtures to build the test ZIPs we feed
+# through safe_unzip. Production reads go through safe_unzip.
+zip      = { workspace = true }

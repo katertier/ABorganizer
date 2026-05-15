@@ -182,12 +182,20 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"]
 url            = "2.5"
 uuid           = { version = "1.10", features = ["v4", "v7", "serde"] }
 walkdir        = "2.5"
-# Pure-Rust ZIP reader/writer for ab-archive's SafeUnzip
-# (ADR-0047). Default features disabled to drop bzip2 (custom
-# license cargo-deny refuses) + LZMA (rarely used in audiobook
-# bundles). Pure deflate-zlib-rs covers 99%+ of real-world
-# audiobook ZIPs; exotic compressors get rejected with a
-# ZipError surfaced to the operator.
+# Secure zip extraction (ADR-0047): defence-in-depth caps for
+# zip-slip / zip-bomb / symlink / depth violations. `ab-archive`
+# delegates extraction to this crate and owns only the bits
+# specific to ABorganizer's pipeline (tracking row, idempotent
+# rescan, scan integration). MIT OR Apache-2.0. The crate
+# already pulls `zip` 2.x with minimal features internally; we
+# do not depend on `zip` directly anymore.
+safe_unzip     = "0.1"
+# Pure-Rust ZIP writer — used only by `ab-archive`'s test
+# fixtures (we never read with the bare `zip` crate in
+# production code; that's `safe_unzip`'s job). Default features
+# disabled to drop bzip2 (custom license cargo-deny refuses) +
+# LZMA (rarely used). The deflate-flate2-zlib-rs path is shared
+# transitively with safe_unzip.
 zip            = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 zstd           = "0.13"
 

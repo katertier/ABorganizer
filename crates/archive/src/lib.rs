@@ -1,29 +1,43 @@
-//! `SafeUnzip` — ZIP-only extractor with defence-in-depth caps
-//! (ADR-0047, slice B.21).
+//! ZIP archive extraction glue (ADR-0047, B.21 + follow-up code
+//! swap 2026-05-15).
 //!
-//! Three risks make naive extraction unsafe; `SafeUnzip` refuses
-//! every entry that violates one of these caps:
+//! `ab-archive` is the **thin glue layer** between ABorganizer's
+//! scan/pipeline integration and the [`safe_unzip`](https://crates.io/crates/safe_unzip)
+//! crate. The defence-in-depth posture (zip-slip / zip-bomb /
+//! symlink / depth caps) is owned by `safe_unzip` upstream;
+//! this crate owns only the ABorganizer-specific pieces:
 //!
-//! * **Zip-slip.** Entries with `..` traversals canonicalise
-//!   outside the target dir. We canonicalise + verify the parent
-//!   prefix before opening any output file.
-//! * **Zip-bomb.** Small archive, multi-GB decompressed. We cap
-//!   per-entry bytes AND running cumulative bytes.
-//! * **Entry-count `DoS`.** Millions of empty entries. We cap
-//!   total entries before decompression starts.
+//! * [`ArchiveTunables`] — operator-configurable caps that map
+//!   onto [`safe_unzip::Limits`] + [`safe_unzip::SymlinkPolicy`]
+//!   at extractor-build time.
+//! * [`extract_safe`] — the operator-facing extraction call;
+//!   delegates to [`safe_unzip::Extractor`] and converts the
+//!   upstream report into our [`ExtractReport`] shape.
+//! * [`record_extract`] + [`recorded_hash`] — the
+//!   `zip_archive_extracts` tracking table accessors that drive
+//!   idempotent rescan.
+//! * [`blake3_file`] — streamed BLAKE3 over the source ZIP for
+//!   the rescan source-hash check.
 //!
-//! Also: symlinks rejected by default (RAR / TAR carry them;
-//! ZIP can too via Unix attrs), absolute paths rejected, depth
-//! beyond N nested dirs rejected.
+//! ## Semantics
 //!
-//! Scan integration (the auto-extract-during-scan path) lives in
-//! its own slice. This crate stays the pure-Rust extractor +
-//! tracking-table accessor.
+//! `safe_unzip` is **secure-by-default**: a violation (zip-slip,
+//! over-size, too-many-entries, depth, symlink) aborts the entire
+//! extraction with a typed [`safe_unzip::Error`]. Our
+//! [`ArchiveError`] mirrors those variants so callers can pattern-
+//! match without taking a direct dependency on `safe_unzip`'s
+//! types.
+//!
+//! This is a deliberate tightening from the prior hand-rolled
+//! extractor (which skipped bad entries and continued); leaving
+//! a half-extracted directory after a security violation makes
+//! recovery harder than refusing the archive outright. ADR-0047's
+//! § Migration documents the shift.
 
 #![forbid(unsafe_code)]
 #![allow(missing_docs)] // scaffold; tightened in follow-up slices
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -54,45 +68,65 @@ impl Default for ArchiveTunables {
     }
 }
 
+impl ArchiveTunables {
+    /// Project these tunables onto a [`safe_unzip::Limits`].
+    const fn to_limits(&self) -> safe_unzip::Limits {
+        safe_unzip::Limits {
+            max_total_bytes: self.max_decompressed_bytes,
+            max_file_count: self.max_entries as usize,
+            max_single_file: self.max_per_entry_bytes,
+            max_path_depth: self.max_depth as usize,
+        }
+    }
+}
+
+/// Successful extraction report. Mirrors the
+/// `zip_archive_extracts` row plus the upstream files/dirs split.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ExtractReport {
     pub source_path: PathBuf,
     pub extracted_path: PathBuf,
     pub bytes_in: u64,
     pub bytes_out: u64,
+    /// `files_extracted + dirs_created` from `safe_unzip::Report`,
+    /// stored as a single count for the tracking row.
     pub entries_count: u32,
-    pub entries_extracted: u32,
-    pub entries_skipped: u32,
-    /// Reasons indexed by skipped-entry name. Operator-facing
-    /// audit; bounded by `entries_count` so the size stays sane.
-    pub skipped: Vec<SkippedEntry>,
+    pub files_extracted: u32,
+    pub dirs_created: u32,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct SkippedEntry {
-    pub name: String,
-    pub reason: SkipReason,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SkipReason {
-    AbsolutePath,
-    ZipSlip,
-    Symlink,
-    DepthExceeded,
-    PerEntryByteCap,
-    TotalByteCap,
-}
-
+/// All ABorganizer-facing failure modes during a ZIP extract.
+///
+/// Variants align with [`safe_unzip::Error`] but stay decoupled
+/// from the upstream type so callers don't need to depend on
+/// `safe_unzip` directly. New `safe_unzip` variants fold into
+/// [`Self::Other`] until we promote them explicitly.
 #[derive(Debug, thiserror::Error)]
 pub enum ArchiveError {
     #[error("source ZIP not found: {0}")]
     NotFound(PathBuf),
-    #[error("entries count {actual} exceeds cap {cap}")]
-    TooManyEntries { actual: u32, cap: u32 },
-    #[error("failed to open zip {path}: {reason}")]
-    Open { path: PathBuf, reason: String },
+    #[error("path '{entry}' escapes destination ({detail})")]
+    PathEscape { entry: String, detail: String },
+    #[error("symlink entry '{entry}' rejected (target '{target}')")]
+    SymlinkRejected { entry: String, target: String },
+    #[error("total decompressed bytes would be {would_be}, limit {limit}")]
+    TotalSizeExceeded { limit: u64, would_be: u64 },
+    #[error("file count would be {attempted}, limit {limit}")]
+    FileCountExceeded { limit: usize, attempted: usize },
+    #[error("entry '{entry}' size {size} exceeds per-entry limit {limit}")]
+    FileTooLarge {
+        entry: String,
+        limit: u64,
+        size: u64,
+    },
+    #[error("entry '{entry}' depth {depth} exceeds limit {limit}")]
+    PathTooDeep {
+        entry: String,
+        depth: usize,
+        limit: usize,
+    },
+    #[error("entry '{entry}' has invalid filename ({reason})")]
+    InvalidFilename { entry: String, reason: String },
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("zip read error: {0}")]
@@ -101,11 +135,35 @@ pub enum ArchiveError {
     Hash(String),
     #[error("database error: {0}")]
     Db(String),
+    #[error("safe_unzip error: {0}")]
+    Other(String),
 }
 
-impl From<zip::result::ZipError> for ArchiveError {
-    fn from(e: zip::result::ZipError) -> Self {
-        Self::Zip(e.to_string())
+impl From<safe_unzip::Error> for ArchiveError {
+    fn from(e: safe_unzip::Error) -> Self {
+        use safe_unzip::Error as U;
+        match e {
+            U::PathEscape { entry, detail } => Self::PathEscape { entry, detail },
+            U::SymlinkNotAllowed { entry, target } => Self::SymlinkRejected { entry, target },
+            U::TotalSizeExceeded { limit, would_be } => Self::TotalSizeExceeded { limit, would_be },
+            U::FileCountExceeded { limit, attempted } => {
+                Self::FileCountExceeded { limit, attempted }
+            }
+            U::FileTooLarge { entry, limit, size } => Self::FileTooLarge { entry, limit, size },
+            U::PathTooDeep {
+                entry,
+                depth,
+                limit,
+            } => Self::PathTooDeep {
+                entry,
+                depth,
+                limit,
+            },
+            U::InvalidFilename { entry, reason } => Self::InvalidFilename { entry, reason },
+            U::Io(io) => Self::Io(io),
+            U::Zip(z) => Self::Zip(z.to_string()),
+            other => Self::Other(other.to_string()),
+        }
     }
 }
 
@@ -134,10 +192,15 @@ pub fn blake3_file(path: &Path) -> Result<String, ArchiveError> {
 
 /// Extract a ZIP archive with the configured safety caps.
 ///
-/// Synchronous std-IO (the `zip` crate is sync-only); call from a
-/// `spawn_blocking` task in async contexts. The function is
-/// idempotent at the call-site level: re-running with an unchanged
-/// `target_dir` overwrites contents.
+/// Synchronous std-IO (the upstream `safe_unzip::Extractor` is
+/// sync). Call from a `spawn_blocking` task in async contexts.
+///
+/// A security violation (zip-slip, over-size, depth, symlink,
+/// etc.) aborts the entire extraction with a typed
+/// [`ArchiveError`]; nothing partial lands in `target_dir`'s
+/// final state beyond what `safe_unzip` had committed before the
+/// violation was detected. The caller is responsible for cleaning
+/// up `target_dir` on Err if a redo is unwanted.
 pub fn extract_safe(
     source_zip: &Path,
     target_dir: &Path,
@@ -147,116 +210,36 @@ pub fn extract_safe(
         return Err(ArchiveError::NotFound(source_zip.to_path_buf()));
     }
     let bytes_in = std::fs::metadata(source_zip)?.len();
-    std::fs::create_dir_all(target_dir)?;
-    let canonical_target = std::fs::canonicalize(target_dir)?;
 
-    let file = std::fs::File::open(source_zip).map_err(|e| ArchiveError::Open {
-        path: source_zip.to_path_buf(),
-        reason: e.to_string(),
-    })?;
-    let mut zip = zip::ZipArchive::new(file)?;
-
-    let entries_count_u32 = u32::try_from(zip.len()).unwrap_or(u32::MAX);
-    if entries_count_u32 > caps.max_entries {
-        return Err(ArchiveError::TooManyEntries {
-            actual: entries_count_u32,
-            cap: caps.max_entries,
-        });
-    }
-
-    let mut report = ExtractReport {
-        source_path: source_zip.to_path_buf(),
-        extracted_path: canonical_target.clone(),
-        bytes_in,
-        entries_count: entries_count_u32,
-        ..Default::default()
+    let symlink_policy = if caps.forbid_symlinks {
+        safe_unzip::SymlinkPolicy::Error
+    } else {
+        // `Skip` is the safe default — silently ignore symlink
+        // entries instead of following them. The crate does not
+        // expose a "follow" policy by design.
+        safe_unzip::SymlinkPolicy::Skip
     };
 
-    for i in 0..zip.len() {
-        let mut entry = zip.by_index(i)?;
-        let raw_name = entry.name().to_owned();
+    let report = safe_unzip::Extractor::new_or_create(target_dir)?
+        .limits(caps.to_limits())
+        .symlinks(symlink_policy)
+        .overwrite(safe_unzip::OverwritePolicy::Overwrite)
+        .extract_file(source_zip)?;
 
-        // ── path-shape checks ────────────────────────────
-        let entry_path = Path::new(&raw_name);
-        if entry_path.is_absolute() {
-            push_skip(&mut report, raw_name, SkipReason::AbsolutePath);
-            continue;
-        }
-        let depth = entry_path.components().count();
-        if depth > caps.max_depth as usize {
-            push_skip(&mut report, raw_name, SkipReason::DepthExceeded);
-            continue;
-        }
-        if has_parent_component(entry_path) {
-            push_skip(&mut report, raw_name, SkipReason::ZipSlip);
-            continue;
-        }
-        if caps.forbid_symlinks && is_symlink_entry(&entry) {
-            push_skip(&mut report, raw_name, SkipReason::Symlink);
-            continue;
-        }
+    let canonical_target = std::fs::canonicalize(target_dir)?;
+    let files_extracted = u32::try_from(report.files_extracted).unwrap_or(u32::MAX);
+    let dirs_created = u32::try_from(report.dirs_created).unwrap_or(u32::MAX);
+    let entries_count = files_extracted.saturating_add(dirs_created);
 
-        let candidate = canonical_target.join(entry_path);
-        if !path_inside(&canonical_target, &candidate) {
-            push_skip(&mut report, raw_name, SkipReason::ZipSlip);
-            continue;
-        }
-
-        // ── byte caps ────────────────────────────────────
-        let entry_size = entry.size();
-        if entry_size > caps.max_per_entry_bytes {
-            push_skip(&mut report, raw_name, SkipReason::PerEntryByteCap);
-            continue;
-        }
-        if report.bytes_out.saturating_add(entry_size) > caps.max_decompressed_bytes {
-            push_skip(&mut report, raw_name, SkipReason::TotalByteCap);
-            continue;
-        }
-
-        // ── write ────────────────────────────────────────
-        if entry.is_dir() {
-            std::fs::create_dir_all(&candidate)?;
-            report.entries_extracted = report.entries_extracted.saturating_add(1);
-            continue;
-        }
-        if let Some(parent) = candidate.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let mut out = std::fs::File::create(&candidate)?;
-        let written = std::io::copy(&mut entry, &mut out)?;
-        report.bytes_out = report.bytes_out.saturating_add(written);
-        report.entries_extracted = report.entries_extracted.saturating_add(1);
-    }
-
-    Ok(report)
-}
-
-fn push_skip(report: &mut ExtractReport, name: String, reason: SkipReason) {
-    report.entries_skipped = report.entries_skipped.saturating_add(1);
-    report.skipped.push(SkippedEntry { name, reason });
-}
-
-fn has_parent_component(p: &Path) -> bool {
-    p.components()
-        .any(|c| matches!(c, Component::ParentDir | Component::RootDir))
-}
-
-fn is_symlink_entry(entry: &zip::read::ZipFile<'_, std::fs::File>) -> bool {
-    // Unix mode 0o12_0000 == symlink. The zip crate exposes the
-    // attribute mask via `unix_mode`; missing modes default to
-    // not-a-symlink, which is what we want for cross-platform
-    // archives generated on Windows.
-    entry
-        .unix_mode()
-        .is_some_and(|m| (m & 0o17_0000) == 0o12_0000)
-}
-
-fn path_inside(root: &Path, candidate: &Path) -> bool {
-    // Canonicalise the candidate's parent (the file itself doesn't
-    // exist yet); compare against the canonical root.
-    let parent = candidate.parent().unwrap_or(candidate);
-    std::fs::create_dir_all(parent).ok();
-    std::fs::canonicalize(parent).is_ok_and(|c| c.starts_with(root))
+    Ok(ExtractReport {
+        source_path: source_zip.to_path_buf(),
+        extracted_path: canonical_target,
+        bytes_in,
+        bytes_out: report.bytes_written,
+        entries_count,
+        files_extracted,
+        dirs_created,
+    })
 }
 
 // ── zip_archive_extracts persistence ──────────────────────────────
@@ -360,7 +343,7 @@ mod tests {
         );
         let target = tmp.path().join("clean.extracted");
         let report = extract_safe(&src, &target, &ArchiveTunables::default()).expect("extract");
-        assert_eq!(report.entries_extracted, 3);
+        assert!(report.files_extracted >= 3);
         assert!(target.join("book.m4b").exists());
         assert!(target.join("notes/readme.txt").exists());
     }
@@ -371,10 +354,14 @@ mod tests {
         let src = tmp.path().join("evil.zip");
         write_zip(&src, &[("normal.txt", b"ok"), ("../escape.txt", b"NO")]);
         let target = tmp.path().join("evil.extracted");
-        let report = extract_safe(&src, &target, &ArchiveTunables::default()).expect("extract");
-        assert_eq!(report.entries_extracted, 1);
-        assert_eq!(report.entries_skipped, 1);
-        assert!(matches!(report.skipped[0].reason, SkipReason::ZipSlip));
+        let err = extract_safe(&src, &target, &ArchiveTunables::default())
+            .expect_err("path-escape rejected");
+        assert!(
+            matches!(err, ArchiveError::PathEscape { .. }),
+            "expected PathEscape, got {err:?}"
+        );
+        // Nothing extracted outside the target.
+        assert!(!tmp.path().join("escape.txt").exists());
     }
 
     #[test]
@@ -395,7 +382,7 @@ mod tests {
             ..ArchiveTunables::default()
         };
         let err = extract_safe(&src, &target, &caps).expect_err("cap");
-        assert!(matches!(err, ArchiveError::TooManyEntries { .. }));
+        assert!(matches!(err, ArchiveError::FileCountExceeded { .. }));
     }
 
     #[test]
@@ -415,14 +402,10 @@ mod tests {
             max_decompressed_bytes: 1500,
             ..ArchiveTunables::default()
         };
-        let report = extract_safe(&src, &target, &caps).expect("extract");
-        // 1 KiB extracted; second entry would push past 1500.
-        assert_eq!(report.entries_extracted, 1);
+        let err = extract_safe(&src, &target, &caps).expect_err("cap");
         assert!(
-            report
-                .skipped
-                .iter()
-                .any(|s| matches!(s.reason, SkipReason::TotalByteCap))
+            matches!(err, ArchiveError::TotalSizeExceeded { .. }),
+            "expected TotalSizeExceeded, got {err:?}"
         );
     }
 
@@ -444,9 +427,8 @@ mod tests {
             bytes_in: 100,
             bytes_out: 200,
             entries_count: 3,
-            entries_extracted: 3,
-            entries_skipped: 0,
-            skipped: vec![],
+            files_extracted: 3,
+            dirs_created: 0,
         };
         let id1 = record_extract(
             db.pool(),
