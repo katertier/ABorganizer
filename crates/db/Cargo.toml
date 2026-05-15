@@ -17,7 +17,10 @@ anyhow    = { workspace = true }
 chrono    = { workspace = true }
 serde     = { workspace = true }
 serde_json = { workspace = true }
-sqlx      = { workspace = true }
+# ab-db owns `sqlx::migrate!` in `migrations.rs`; the `migrate`
+# feature is workspace-trimmed (it isn't needed elsewhere) and
+# re-added here. SAVINGS.md sub-slice b.
+sqlx      = { workspace = true, features = ["migrate"] }
 thiserror = { workspace = true }
 tokio     = { workspace = true }
 tracing   = { workspace = true }
