@@ -16,6 +16,8 @@ workspace = true
 # See ADR-0043 § C.4b.
 roxmltree            = { workspace = true }
 scraper              = { workspace = true }
+# C.4 stage serialises Vec<NameEntry> as ai_cache content.
+serde                = { workspace = true }
 thiserror            = { workspace = true }
 unicode-segmentation = { workspace = true }
 # Pure-Rust ZIP reader for EPUB containers (EPUB is a ZIP).

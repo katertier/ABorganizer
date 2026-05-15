@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO ai_cache (book_id, cache_type, content, compressed, extractor_version, locale, created_at) VALUES (?, ?, ?, 0, ?, ?, strftime('%s','now')) ON CONFLICT(book_id, cache_type) DO UPDATE SET content = excluded.content, compressed = excluded.compressed, extractor_version = excluded.extractor_version, locale = excluded.locale, created_at = excluded.created_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "02a401a36c5e948e5c25eeae38eb04c065b2fe9c1d1ca432cb597753dcdfb9fe"
+}

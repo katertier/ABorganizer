@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO books (title) VALUES (?) RETURNING book_id AS \"book_id!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "book_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "104fb3f440947a4d570240214761171f7877e40a420c36bbfbb467073b3fd92e"
+}

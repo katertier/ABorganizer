@@ -61,6 +61,12 @@ pub enum CacheKey {
     /// and `book_tags` rows with `source='setting_llm'`
     /// (`$`-prefixed tags across 10 categories per ADR-0022).
     Setting,
+    /// Proper-noun dictionary extracted from a paired EPUB
+    /// companion (ADR-0043 § C.4). Consumed by the C.5
+    /// `transcript-correct-via-epub` stage to fix near-miss
+    /// proper-noun spellings in `transcript_full`. Payload is
+    /// JSON `{ "entries": [...], "language": "..." }`.
+    EpubNameDict,
 }
 
 impl CacheKey {
@@ -79,6 +85,7 @@ impl CacheKey {
             Self::StoryArc => "story_arc",
             Self::Characters => "characters",
             Self::Setting => "setting",
+            Self::EpubNameDict => "epub_name_dict",
         }
     }
 
@@ -100,6 +107,7 @@ impl CacheKey {
             "story_arc" => Some(Self::StoryArc),
             "characters" => Some(Self::Characters),
             "setting" => Some(Self::Setting),
+            "epub_name_dict" => Some(Self::EpubNameDict),
             _ => None,
         }
     }
@@ -172,8 +180,8 @@ impl std::str::FromStr for CacheKey {
 #[must_use]
 pub fn cache_keys_for_stage(stage: &str) -> Option<&'static [CacheKey]> {
     use CacheKey::{
-        Characters, DnaTags, Setting, StoryArc, SummarySpoilerFree, TranscriptFull, TranscriptHead,
-        TranscriptSamples, TranscriptTail,
+        Characters, DnaTags, EpubNameDict, Setting, StoryArc, SummarySpoilerFree, TranscriptFull,
+        TranscriptHead, TranscriptSamples, TranscriptTail,
     };
     // `&'static` literals so the result is cheap to return.
     const HEAD_TAIL: &[CacheKey] = &[TranscriptHead, TranscriptTail];
@@ -184,6 +192,7 @@ pub fn cache_keys_for_stage(stage: &str) -> Option<&'static [CacheKey]> {
     const ARC: &[CacheKey] = &[StoryArc];
     const CHARS: &[CacheKey] = &[Characters];
     const SETTING: &[CacheKey] = &[Setting];
+    const EPUB_NAME_DICT: &[CacheKey] = &[EpubNameDict];
     const NONE: &[CacheKey] = &[];
 
     Some(match stage {
@@ -195,6 +204,7 @@ pub fn cache_keys_for_stage(stage: &str) -> Option<&'static [CacheKey]> {
         "extract-story-arc" => ARC,
         "extract-characters" => CHARS,
         "extract-setting" => SETTING,
+        "extract-epub-name-dict" => EPUB_NAME_DICT,
         // Stages without ai_cache output. They still have
         // pipeline_progress rows the retry endpoint clears,
         // but no cache-side cleanup.
@@ -344,6 +354,7 @@ mod tests {
             CacheKey::StoryArc,
             CacheKey::Characters,
             CacheKey::Setting,
+            CacheKey::EpubNameDict,
         ] {
             let s = key.as_str();
             assert_eq!(CacheKey::parse(s), Some(key), "round-trip {s}");
@@ -375,6 +386,7 @@ mod tests {
             CacheKey::StoryArc,
             CacheKey::Characters,
             CacheKey::Setting,
+            CacheKey::EpubNameDict,
         ] {
             let parsed: CacheKey = key.as_str().parse().expect("from_str round trip");
             assert_eq!(parsed, key);
@@ -404,6 +416,7 @@ mod tests {
             ("extract-story-arc", &[CacheKey::StoryArc][..]),
             ("extract-characters", &[CacheKey::Characters][..]),
             ("extract-setting", &[CacheKey::Setting][..]),
+            ("extract-epub-name-dict", &[CacheKey::EpubNameDict][..]),
         ] {
             assert_eq!(
                 cache_keys_for_stage(stage),
