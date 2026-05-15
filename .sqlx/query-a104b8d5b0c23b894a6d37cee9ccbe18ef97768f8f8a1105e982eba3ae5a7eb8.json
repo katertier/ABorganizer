@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO companion_nearby_books (companion_id, book_id, discovered_at) VALUES (?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "a104b8d5b0c23b894a6d37cee9ccbe18ef97768f8f8a1105e982eba3ae5a7eb8"
+}

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT CAST(COALESCE(SUM(companion_paired_count), 0) AS INTEGER) AS \"sum!: i64\" FROM book_files WHERE book_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "sum!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "90a13233090b8e04096bdbd32ee845365ec6e170d0ff3041064ee78650ca5514"
+}

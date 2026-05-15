@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT book_id FROM book_companions WHERE companion_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "book_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "ba1f3a65ee38032d9cb6b4d0fc9dbe4c8dbcae727a4dd19221d21df73fb4e22a"
+}

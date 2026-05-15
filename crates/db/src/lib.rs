@@ -18,11 +18,13 @@
 #![allow(missing_docs)] // scaffold; will be tightened as queries land
 
 pub mod book_file_refs;
+pub mod companions;
 pub mod ephemeral;
 pub mod library;
 pub mod migrations;
 pub mod tokens;
 
+pub use companions::CompanionId;
 pub use ephemeral::EphemeralDb;
 pub use library::LibraryDb;
 pub use tokens::{AuthenticatedToken, lookup_by_raw_token, tokens_table_is_empty, unix_now_secs};
