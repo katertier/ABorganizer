@@ -23,6 +23,7 @@ pub mod paths;
 pub mod reading_status;
 pub mod tags;
 pub mod time_format;
+pub mod trust_zones;
 pub mod tunables;
 
 pub use cache::{CacheKey, ParseCacheKeyError, cache_keys_for_stage};

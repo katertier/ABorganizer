@@ -164,8 +164,10 @@ dependencies = [
  "chrono",
  "figment",
  "once_cell",
+ "path_jail 0.3.1",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "toml",
  "tracing",
@@ -2464,6 +2466,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "53740d8f837c89c9978bfbdaa7d48e3dac9f211944bab5f80cb0dcc262bf1edd"
 
 [[package]]
+name = "path_jail"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eafb3093d4faaeb6d6e81a5567b424035eaa960c36fc4e7b4d8f4d659abb7166"
+
+[[package]]
 name = "pear"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3088,7 +3096,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1cfe9d7fdbf9e9a54a5aaf6eed1b971722d3a72e4784ccd0d63af1eed1fc50f9"
 dependencies = [
  "glob-match",
- "path_jail",
+ "path_jail 0.2.0",
  "zip 2.4.2",
 ]
 

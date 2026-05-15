@@ -415,7 +415,10 @@ pub async fn classify_embedded_chapter_coverage(
 /// book (the schema doesn't tie chapters to files); the
 /// [`EmbeddedCoverage`] classification decides whether
 /// `source = 'embedded'` rows participate.
-#[allow(clippy::too_many_arguments, reason = "the (file_id, jingle_start_ms, jingle_end_ms, padding_ms) tuple maps directly onto the audiologo row schema; bundling adds noise without clarifying the call site")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the (file_id, jingle_start_ms, jingle_end_ms, padding_ms) tuple maps directly onto the audiologo row schema; bundling adds noise without clarifying the call site"
+)]
 async fn shift_chapters_for_cut(
     tx: &mut Transaction<'_, Sqlite>,
     file_id: i64,

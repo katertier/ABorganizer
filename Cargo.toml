@@ -190,6 +190,20 @@ walkdir        = "2.5"
 # already pulls `zip` 2.x with minimal features internally; we
 # do not depend on `zip` directly anymore.
 safe_unzip     = "0.1"
+# Filesystem sandbox for trust-zone-validated path handling
+# (ADR-0049). Restricts paths to a root directory; blocks
+# traversal, symlink escapes, absolute injection, null bytes.
+# Soft-canonicalize so write-side paths (file doesn't exist
+# yet) validate too. Same author as safe_unzip (tenuo-ai).
+# MIT OR Apache-2.0. The `secure-open` feature enables
+# `O_NOFOLLOW` on `open` / `create` so the TOCTOU window
+# between path canonicalization and file open stays closed.
+#
+# safe_unzip 0.1.6 transitively pulls path_jail ^0.2; our 0.3
+# declaration adds the markers + secure-open feature we want.
+# cargo coexists 0.2.x (inside safe_unzip) and 0.3.x (direct)
+# because they're separate SemVer compat zones.
+path_jail      = { version = "0.3", features = ["secure-open"] }
 # Pure-Rust ZIP writer — used only by `ab-archive`'s test
 # fixtures (we never read with the bare `zip` crate in
 # production code; that's `safe_unzip`'s job). Default features
