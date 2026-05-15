@@ -18,6 +18,11 @@ ab-pipeline = { workspace = true }
 # For Stage::requires() typed dependencies on read-tags.
 ab-tag-read = { workspace = true }
 async-trait = { workspace = true }
+# Used by `release_state` to parse Audible `release_date` /
+# `publication_datetime` fields (RFC 3339 or date-only) and
+# compare against "now" for the released/scheduled/announced
+# classification (ADR-0050 § 1).
+chrono      = { workspace = true }
 # Used for MP3 CHAP-frame access: lofty parses the ID3v2 tag,
 # surfaces CHAP as `Frame::Binary` (the spec frame is not in
 # lofty's typed set), and `mp3_chap` hand-rolls the chapter
