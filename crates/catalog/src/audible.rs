@@ -57,6 +57,10 @@ pub const fn host_for_region(region: &str) -> Option<&'static str> {
         b"jp" => Some("https://api.audible.co.jp"),
         b"in" => Some("https://api.audible.in"),
         b"it" => Some("https://api.audible.it"),
+        // Spain + Brazil added per ADR-0050 region-walk
+        // completion (Libex confirms both resolve in production).
+        b"es" => Some("https://api.audible.es"),
+        b"br" => Some("https://api.audible.com.br"),
         _ => None,
     }
 }
@@ -277,10 +281,12 @@ mod tests {
     #[test]
     fn host_for_region_maps_every_default_region() {
         // The default `audible_region_order` in `NetworkTunables`
-        // is `[us, uk, de, fr, ca, au, jp, in, it]`. Every code in
-        // that list must produce a known host, or the region-walk
-        // skips them all silently.
-        for code in ["us", "uk", "de", "fr", "ca", "au", "jp", "in", "it"] {
+        // is `[us, uk, de, fr, ca, au, jp, in, it, es, br]`. Every
+        // code in that list must produce a known host, or the
+        // region-walk skips them all silently.
+        for code in [
+            "us", "uk", "de", "fr", "ca", "au", "jp", "in", "it", "es", "br",
+        ] {
             assert!(
                 host_for_region(code).is_some(),
                 "region `{code}` (default tunable) must map to a host",
