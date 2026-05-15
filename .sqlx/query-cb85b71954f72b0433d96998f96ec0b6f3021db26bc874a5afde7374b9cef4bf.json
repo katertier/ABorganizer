@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO operation_journal\n            (op_kind, target_kind, target_id, pre_state_json,\n             reversible, batch_id, progress)\n         VALUES (?, ?, ?, ?, ?, ?, 'pending')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "cb85b71954f72b0433d96998f96ec0b6f3021db26bc874a5afde7374b9cef4bf"
+}

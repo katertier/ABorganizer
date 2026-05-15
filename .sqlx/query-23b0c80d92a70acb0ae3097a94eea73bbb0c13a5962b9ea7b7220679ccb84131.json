@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n            op_kind         AS \"op_kind!: String\",\n            target_kind     AS \"target_kind!: String\",\n            target_id       AS \"target_id!: i64\",\n            pre_state_json  AS \"pre_state_json!: String\",\n            post_state_json AS \"post_state_json: String\",\n            created_at      AS \"created_at!: i64\",\n            reversible      AS \"reversible!: i64\",\n            batch_id        AS \"batch_id: String\",\n            progress        AS \"progress!: String\",\n            failed_reason   AS \"failed_reason: String\"\n         FROM operation_journal WHERE op_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "op_kind!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "target_kind!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "target_id!: i64",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "pre_state_json!: String",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "post_state_json: String",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at!: i64",
+        "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "reversible!: i64",
+        "ordinal": 6,
+        "type_info": "Integer"
+      },
+      {
+        "name": "batch_id: String",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "progress!: String",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "failed_reason: String",
+        "ordinal": 9,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "23b0c80d92a70acb0ae3097a94eea73bbb0c13a5962b9ea7b7220679ccb84131"
+}

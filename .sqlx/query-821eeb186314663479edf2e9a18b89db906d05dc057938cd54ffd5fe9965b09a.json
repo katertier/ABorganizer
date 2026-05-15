@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE operation_journal\n            SET progress = 'done',\n                post_state_json = ?\n            WHERE op_id = ? AND progress = 'pending'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "821eeb186314663479edf2e9a18b89db906d05dc057938cd54ffd5fe9965b09a"
+}

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n            op_id    AS \"op_id!: i64\",\n            batch_id AS \"batch_id: String\"\n         FROM operation_journal\n         WHERE progress = 'pending'\n         ORDER BY batch_id, op_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "op_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "batch_id: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "67e881dbb3f8901b1bd9bba25c807eb3780b451b6e7f695b48669c9b22658371"
+}

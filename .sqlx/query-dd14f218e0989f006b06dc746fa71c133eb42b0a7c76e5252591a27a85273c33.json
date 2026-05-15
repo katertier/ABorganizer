@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE operation_journal\n            SET progress = 'failed',\n                failed_reason = ?\n            WHERE op_id = ? AND progress = 'pending'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "dd14f218e0989f006b06dc746fa71c133eb42b0a7c76e5252591a27a85273c33"
+}

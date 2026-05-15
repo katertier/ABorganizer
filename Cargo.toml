@@ -25,6 +25,7 @@ members = [
     "crates/dispatcher",
     "crates/saved-queries",
     "crates/stats",
+    "crates/journal",
     "crates/tag-read",
     "crates/tag-write",
     "bins/aborg",
@@ -169,6 +170,7 @@ ab-query       = { path = "crates/query" }
 ab-dispatcher  = { path = "crates/dispatcher" }
 ab-saved-queries = { path = "crates/saved-queries" }
 ab-stats       = { path = "crates/stats" }
+ab-journal     = { path = "crates/journal" }
 ab-tag-read    = { path = "crates/tag-read" }
 ab-tag-write   = { path = "crates/tag-write" }
 
