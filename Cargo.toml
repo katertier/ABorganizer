@@ -23,6 +23,7 @@ members = [
     "crates/background",
     "crates/query",
     "crates/dispatcher",
+    "crates/stats",
     "crates/tag-read",
     "crates/tag-write",
     "bins/aborg",
@@ -165,6 +166,7 @@ ab-progress    = { path = "crates/progress" }
 ab-background  = { path = "crates/background" }
 ab-query       = { path = "crates/query" }
 ab-dispatcher  = { path = "crates/dispatcher" }
+ab-stats       = { path = "crates/stats" }
 ab-tag-read    = { path = "crates/tag-read" }
 ab-tag-write   = { path = "crates/tag-write" }
 

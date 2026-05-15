@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n            strftime('%Y', created_at, 'unixepoch') AS \"bucket_label!: String\",\n            COUNT(*) AS \"n!: i64\",\n            COALESCE(SUM(duration_ms), 0) AS \"hours_ms!: i64\"\n         FROM books\n         WHERE deleted_at IS NULL\n         GROUP BY 1\n         ORDER BY 1 DESC",
+  "describe": {
+    "columns": [
+      {
+        "name": "bucket_label!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "n!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "hours_ms!: i64",
+        "ordinal": 2,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "30c3584a4d14ee4bf56a5bb53bfb522a920b6f8559ba0a1e176af4ffc5b50c93"
+}

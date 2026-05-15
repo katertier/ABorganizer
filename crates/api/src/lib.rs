@@ -33,6 +33,7 @@ pub mod rate_limit;
 pub mod reports;
 pub mod router;
 pub mod state;
+pub mod stats;
 pub mod tokens;
 pub mod user_edits;
 

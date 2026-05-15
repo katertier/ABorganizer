@@ -325,6 +325,16 @@ async fn background_task_run_protected() {
 }
 
 #[tokio::test]
+async fn stats_protected() {
+    assert_protected("GET", "/stats").await;
+}
+
+#[tokio::test]
+async fn stats_breakdown_protected() {
+    assert_protected("GET", "/stats/breakdown").await;
+}
+
+#[tokio::test]
 async fn audiologos_review_protected() {
     assert_protected("GET", "/audiologos/review").await;
 }
