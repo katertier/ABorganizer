@@ -85,10 +85,77 @@ pub const DNA_SCHEMA_JSON: &str = r#"{
     "type": "object",
     "properties": {
         "dna_tags": {"type": "array", "items": {"type": "string"}},
-        "spoiler_tags": {"type": "array", "items": {"type": "string"}}
+        "spoiler_tags": {"type": "array", "items": {"type": "string"}},
+        "tag_hierarchy": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "parent": {"type": "string"},
+                    "child": {"type": "string"}
+                },
+                "required": ["parent", "child"]
+            }
+        },
+        "content_warnings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "label": {"type": "string"},
+                    "severity": {
+                        "type": "string",
+                        "enum": ["mild", "moderate", "intense", "graphic"]
+                    }
+                },
+                "required": ["label", "severity"]
+            }
+        }
     },
     "required": ["dna_tags", "spoiler_tags"]
 }"#;
+
+/// Canonical content-warning vocabulary (ADR-0042).
+///
+/// The DNA prompt enumerates this list verbatim; the executor
+/// rejects freeform labels emitted by the LLM. UI display is
+/// per-locale — the canonical English label is the storage key.
+pub const CONTENT_WARNING_VOCABULARY: &[&str] = &[
+    "violence",
+    "sexual_content",
+    "sexual_assault",
+    "graphic_sex",
+    "addiction",
+    "substance_abuse",
+    "suicide",
+    "self_harm",
+    "child_endangerment",
+    "child_abuse",
+    "gore",
+    "torture",
+    "animal_cruelty",
+    "animal_death",
+    "eating_disorder",
+    "body_horror",
+    "kidnapping",
+    "stalking",
+    "domestic_abuse",
+    "racism",
+    "homophobia",
+    "transphobia",
+    "ableism",
+    "war",
+    "death",
+    "grief",
+    "medical_trauma",
+    "pregnancy_loss",
+    "mental_illness",
+    "religious_trauma",
+];
+
+/// Valid severity values (CHECK constraint in
+/// `book_content_warnings.severity`).
+pub const CONTENT_WARNING_SEVERITIES: &[&str] = &["mild", "moderate", "intense", "graphic"];
 
 /// Stage that asks the on-device LLM for thematic DNA tags +
 /// spoiler tags, then promotes them into `book_tags`.
@@ -176,9 +243,14 @@ impl Stage for ExtractDnaTagsStage {
         };
         let dna = clamp(&parsed.dna_tags, self.tunables.dna_max_tags);
         let spoilers = clamp(&parsed.spoiler_tags, self.tunables.dna_max_spoiler_tags);
+        let dna_set: std::collections::HashSet<&str> = dna.iter().map(String::as_str).collect();
+        let hierarchy = canonicalise_hierarchy(&parsed.tag_hierarchy, &dna_set);
+        let warnings = canonicalise_warnings(&parsed.content_warnings);
 
         // 5. Write tags + cache.
         write_tags(&ctx.library, book_id, &dna, &spoilers).await?;
+        write_hierarchy(&ctx.library, &hierarchy).await?;
+        write_content_warnings(&ctx.library, book_id, &warnings).await?;
         write_cache(
             &ctx.library,
             book_id,
@@ -192,6 +264,8 @@ impl Stage for ExtractDnaTagsStage {
             book_id = book_id.0,
             dna_count = dna.len(),
             spoiler_count = spoilers.len(),
+            hierarchy_count = hierarchy.len(),
+            warning_count = warnings.len(),
             "fm.dna.extracted"
         );
         Ok(StageOutcome::Done)
@@ -207,6 +281,31 @@ struct DnaResponse {
     dna_tags: Vec<String>,
     #[serde(default)]
     spoiler_tags: Vec<String>,
+    #[serde(default)]
+    tag_hierarchy: Vec<HierarchyPair>,
+    #[serde(default)]
+    content_warnings: Vec<ContentWarning>,
+}
+
+/// One `{parent, child}` pair as emitted by the LLM. Public so
+/// [`canonicalise_hierarchy`] can take it from outside the module
+/// (tests, future re-extraction tooling).
+#[derive(Debug, Clone, Deserialize)]
+pub struct HierarchyPair {
+    /// Parent tag as emitted by the LLM (pre-normalisation).
+    pub parent: String,
+    /// Child tag as emitted by the LLM (pre-normalisation).
+    pub child: String,
+}
+
+/// One content-warning entry as emitted by the LLM. Public so
+/// [`canonicalise_warnings`] can take it from outside the module.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ContentWarning {
+    /// Warning label as emitted by the LLM (pre-vocabulary check).
+    pub label: String,
+    /// Severity as emitted by the LLM (pre-enum check).
+    pub severity: String,
 }
 
 /// Segment array (the only thing still in the JSON BLOB after
@@ -340,6 +439,178 @@ async fn write_tags(
     Ok(())
 }
 
+/// Canonicalised hierarchy pair after vocabulary + cycle filtering.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CanonicalPair {
+    /// Parent tag, canonicalised (lower-case, hyphenated, no prefix).
+    pub parent: String,
+    /// Child tag, canonicalised (lower-case, hyphenated, no prefix).
+    pub child: String,
+}
+
+/// Canonicalised content-warning entry after vocabulary + severity
+/// filtering.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CanonicalWarning {
+    /// Canonical label drawn from [`CONTENT_WARNING_VOCABULARY`].
+    pub label: String,
+    /// Severity drawn from [`CONTENT_WARNING_SEVERITIES`].
+    pub severity: String,
+}
+
+/// Filter raw `{parent, child}` pairs:
+/// - normalise both sides
+/// - drop self-references
+/// - drop pairs whose parent or child isn't in the accepted DNA set
+/// - de-dup
+///
+/// Cycle prevention is enforced at the write site (the executor
+/// walks descendants before inserting). This filter only handles
+/// the cheap drops.
+#[must_use]
+pub fn canonicalise_hierarchy<S: std::hash::BuildHasher>(
+    raw: &[HierarchyPair],
+    dna_set: &std::collections::HashSet<&str, S>,
+) -> Vec<CanonicalPair> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for pair in raw {
+        let parent = normalise_tag(&pair.parent);
+        let child = normalise_tag(&pair.child);
+        if parent.is_empty() || child.is_empty() || parent == child {
+            continue;
+        }
+        if !dna_set.contains(parent.as_str()) || !dna_set.contains(child.as_str()) {
+            continue;
+        }
+        let pair = CanonicalPair { parent, child };
+        if seen.insert(pair.clone()) {
+            out.push(pair);
+        }
+    }
+    out
+}
+
+/// Filter raw content-warning entries against the canonical
+/// vocabulary + severity enum.
+///
+/// Freeform labels are dropped silently — the prompt enumerates
+/// the allowed set, and the `book_content_warnings.severity` CHECK
+/// constraint would reject anything else anyway.
+#[must_use]
+pub fn canonicalise_warnings(raw: &[ContentWarning]) -> Vec<CanonicalWarning> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for w in raw {
+        let label = w.label.trim().to_ascii_lowercase().replace(' ', "_");
+        if !CONTENT_WARNING_VOCABULARY.contains(&label.as_str()) {
+            continue;
+        }
+        let severity = w.severity.trim().to_ascii_lowercase();
+        if !CONTENT_WARNING_SEVERITIES.contains(&severity.as_str()) {
+            continue;
+        }
+        if seen.insert(label.clone()) {
+            out.push(CanonicalWarning { label, severity });
+        }
+    }
+    out
+}
+
+async fn write_hierarchy(library: &LibraryDb, pairs: &[CanonicalPair]) -> Result<()> {
+    if pairs.is_empty() {
+        return Ok(());
+    }
+    let mut tx = library
+        .pool()
+        .begin()
+        .await
+        .map_err(|e| Error::Database(format!("dna hierarchy begin: {e}")))?;
+    for pair in pairs {
+        if would_create_cycle(&mut tx, &pair.parent, &pair.child).await? {
+            tracing::warn!(
+                parent = pair.parent.as_str(),
+                child = pair.child.as_str(),
+                "fm.dna.hierarchy_cycle_skipped"
+            );
+            continue;
+        }
+        sqlx::query!(
+            "INSERT OR IGNORE INTO tag_hierarchy (parent_tag, child_tag) VALUES (?, ?)",
+            pair.parent,
+            pair.child,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| Error::Database(format!("dna hierarchy insert: {e}")))?;
+    }
+    tx.commit()
+        .await
+        .map_err(|e| Error::Database(format!("dna hierarchy commit: {e}")))?;
+    Ok(())
+}
+
+/// Walk `tag_hierarchy` from `child` downwards looking for `parent`.
+/// If found, inserting `(parent, child)` would close a cycle.
+async fn would_create_cycle(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    parent: &str,
+    child: &str,
+) -> Result<bool> {
+    let rows = sqlx::query!(
+        "WITH RECURSIVE descendants(tag) AS ( \
+            SELECT child_tag FROM tag_hierarchy WHERE parent_tag = ? \
+            UNION \
+            SELECT th.child_tag FROM tag_hierarchy th \
+            JOIN descendants d ON th.parent_tag = d.tag \
+         ) \
+         SELECT tag FROM descendants WHERE tag = ?",
+        child,
+        parent,
+    )
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|e| Error::Database(format!("dna hierarchy cycle probe: {e}")))?;
+    Ok(rows.is_some())
+}
+
+async fn write_content_warnings(
+    library: &LibraryDb,
+    book_id: BookId,
+    warnings: &[CanonicalWarning],
+) -> Result<()> {
+    let id = book_id.0;
+    let now = chrono::Utc::now().timestamp();
+    let mut tx = library
+        .pool()
+        .begin()
+        .await
+        .map_err(|e| Error::Database(format!("dna warnings begin: {e}")))?;
+
+    sqlx::query!("DELETE FROM book_content_warnings WHERE book_id = ?", id,)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| Error::Database(format!("dna warnings clear: {e}")))?;
+
+    for w in warnings {
+        sqlx::query!(
+            "INSERT INTO book_content_warnings (book_id, label, severity, extracted_at) \
+             VALUES (?, ?, ?, ?)",
+            id,
+            w.label,
+            w.severity,
+            now,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| Error::Database(format!("dna warning insert: {e}")))?;
+    }
+    tx.commit()
+        .await
+        .map_err(|e| Error::Database(format!("dna warnings commit: {e}")))?;
+    Ok(())
+}
+
 #[derive(Debug, Serialize)]
 struct CachePayload<'a> {
     raw: &'a str,
@@ -404,9 +675,10 @@ pub fn build_prompt(transcript: &str, locale: &str, max_dna: usize, max_spoilers
     // category caps, what each list semantically means, the
     // no-prefix-in-the-string convention, and the
     // English-tags-regardless-of-locale rule.
+    let vocab = CONTENT_WARNING_VOCABULARY.join(", ");
     format!(
         "You are a metadata extractor for an audiobook library. \
-Read the TRANSCRIPT excerpt below and produce two short tag lists.\n\
+Read the TRANSCRIPT excerpt below and produce structured output.\n\
 \n\
 - `dna_tags`: at most {max_dna} short, lowercase, hyphenated tags \
 describing the book's themes, mood, narrative style, and content \
@@ -419,6 +691,18 @@ attributes a spoiler-averse reader should not see by default. \
 Examples: \"hero-dies\", \"twin-twist\", \"unreliable-narrator-revealed\". \
 Only include tags backed by clear evidence in the transcript. Do NOT \
 include the ! prefix in the string.\n\
+- `tag_hierarchy`: optional array of `{{parent, child}}` pairs where \
+both strings are tags drawn from `dna_tags`. Use only when a \
+parent/child relation is genuinely useful (e.g. `{{parent: \
+\"fantasy\", child: \"high-fantasy\"}}`). Skip rather than \
+fabricate; an empty array is fine. Self-references and cycles \
+are rejected by the storage layer.\n\
+- `content_warnings`: optional array of `{{label, severity}}` \
+objects. `label` MUST be drawn from this canonical vocabulary: \
+{vocab}. `severity` is one of `mild`, `moderate`, `intense`, \
+`graphic`. Emit only warnings backed by clear transcript \
+evidence. Freeform labels outside the vocabulary will be \
+discarded by the storage layer.\n\
 \n\
 Write tags in English regardless of TRANSCRIPT language.\n\
 \n\
@@ -587,5 +871,116 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(required.contains(&"dna_tags".to_owned()));
         assert!(required.contains(&"spoiler_tags".to_owned()));
+    }
+
+    #[test]
+    fn build_prompt_lists_content_warning_vocabulary() {
+        let p = build_prompt("text", "en", 5, 2);
+        // Spot-check three vocabulary items — the prompt should
+        // enumerate the full canonical list so the LLM can choose
+        // from a fixed surface rather than inventing labels.
+        assert!(p.contains("violence"));
+        assert!(p.contains("animal_cruelty"));
+        assert!(p.contains("mental_illness"));
+        // Severity enum is named in the prose so the model
+        // doesn't invent "severe" or "extreme" buckets.
+        assert!(p.contains("mild"));
+        assert!(p.contains("graphic"));
+    }
+
+    #[test]
+    fn schema_lists_hierarchy_and_warnings() {
+        let v: serde_json::Value = serde_json::from_str(DNA_SCHEMA_JSON).expect("schema parses");
+        let props = v["properties"]
+            .as_object()
+            .expect("properties is an object");
+        assert_eq!(props["tag_hierarchy"]["type"], "array");
+        assert_eq!(props["content_warnings"]["type"], "array");
+        // Severity enum constraint is what gives the storage
+        // layer's CHECK constraint a head start — verify it's
+        // declared.
+        let sev = &props["content_warnings"]["items"]["properties"]["severity"];
+        let sev_enum: Vec<&str> = sev["enum"]
+            .as_array()
+            .expect("severity enum array")
+            .iter()
+            .map(|x| x.as_str().expect("string entry"))
+            .collect();
+        assert_eq!(sev_enum, CONTENT_WARNING_SEVERITIES);
+    }
+
+    #[test]
+    fn parse_dna_response_with_hierarchy_and_warnings() {
+        let json = r#"{
+            "dna_tags": ["fantasy", "high-fantasy"],
+            "spoiler_tags": [],
+            "tag_hierarchy": [{"parent": "fantasy", "child": "high-fantasy"}],
+            "content_warnings": [{"label": "violence", "severity": "moderate"}]
+        }"#;
+        let r: DnaResponse = serde_json::from_str(json).expect("parse");
+        assert_eq!(r.tag_hierarchy.len(), 1);
+        assert_eq!(r.tag_hierarchy[0].parent, "fantasy");
+        assert_eq!(r.tag_hierarchy[0].child, "high-fantasy");
+        assert_eq!(r.content_warnings.len(), 1);
+        assert_eq!(r.content_warnings[0].label, "violence");
+    }
+
+    #[test]
+    fn canonicalise_hierarchy_drops_self_and_unknown_tags() {
+        let dna = std::collections::HashSet::from(["fantasy", "high-fantasy"]);
+        let raw = vec![
+            HierarchyPair {
+                parent: "Fantasy".into(),
+                child: "High Fantasy".into(),
+            },
+            // self-ref → drop
+            HierarchyPair {
+                parent: "fantasy".into(),
+                child: "fantasy".into(),
+            },
+            // unknown parent → drop (not in dna set)
+            HierarchyPair {
+                parent: "scifi".into(),
+                child: "high-fantasy".into(),
+            },
+            // dup of first after normalisation → drop
+            HierarchyPair {
+                parent: "fantasy".into(),
+                child: "high-fantasy".into(),
+            },
+        ];
+        let out = canonicalise_hierarchy(&raw, &dna);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].parent, "fantasy");
+        assert_eq!(out[0].child, "high-fantasy");
+    }
+
+    #[test]
+    fn canonicalise_warnings_rejects_freeform_and_bad_severity() {
+        let raw = vec![
+            ContentWarning {
+                label: "Violence".into(),
+                severity: "Moderate".into(),
+            },
+            // unknown label → drop
+            ContentWarning {
+                label: "rudeness".into(),
+                severity: "mild".into(),
+            },
+            // bad severity → drop
+            ContentWarning {
+                label: "gore".into(),
+                severity: "extreme".into(),
+            },
+            // dup label → keep first only
+            ContentWarning {
+                label: "violence".into(),
+                severity: "graphic".into(),
+            },
+        ];
+        let out = canonicalise_warnings(&raw);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].label, "violence");
+        assert_eq!(out[0].severity, "moderate");
     }
 }
