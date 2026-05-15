@@ -1,0 +1,16 @@
+[package]
+name         = "ab-companion"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+authors      = { workspace = true }
+repository   = { workspace = true }
+description  = "Companion-file detection + parse-tier mapping (ADR-0043). Magic-byte format dispatch for PDF / EPUB / MOBI / CB* / etc."
+
+[lints]
+workspace = true
+
+[dependencies]
+serde     = { workspace = true }
+thiserror = { workspace = true }
