@@ -53,6 +53,8 @@
 //! `candidate` rows are normal pre-apply state; `rejected` rows
 //! are user-final decisions and shouldn't reappear as candidates.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 
 use ab_core::tunables::AudiologoTunables;
@@ -80,8 +82,11 @@ pub struct DetectAudiologoStage {
     /// Whole tunables ref kept for the auto-apply phase (4B.5).
     /// Auto-apply reads per-method confidence floors + padding
     /// defaults, so the stage hangs onto the full struct rather
-    /// than copying every field individually.
-    tunables: AudiologoTunables,
+    /// than copying every field individually. Stored in an `Arc`
+    /// so cloning the stage (background-task registry shares
+    /// stage handles) is `O(refcount-bump)` rather than a deep
+    /// copy of the whole tunable tree.
+    tunables: Arc<AudiologoTunables>,
 }
 
 impl Default for DetectAudiologoStage {
@@ -106,7 +111,7 @@ impl DetectAudiologoStage {
         Self {
             intro_window_ms,
             outro_window_ms,
-            tunables: tunables.clone(),
+            tunables: Arc::new(tunables.clone()),
         }
     }
 }
