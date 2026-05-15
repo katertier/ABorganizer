@@ -403,6 +403,10 @@ async fn main() -> Result<()> {
     // compilation errors are warned-and-dropped inside
     // `compile_excludes`.
     let scan_excludes = ab_scan::compile_excludes(&tunables.pipeline.scan_excludes);
+    let doctor_registry = ab_api::doctor::DoctorRegistry::new(vec![
+        Arc::new(ab_api::doctor::SpeechCheck),
+        Arc::new(ab_api::doctor::LlmCheck),
+    ]);
     let api_state = ab_api::ApiState::new(
         library.clone(),
         ephemeral.clone(),
@@ -413,6 +417,7 @@ async fn main() -> Result<()> {
         tunables.security.clone(),
         scan_excludes,
         background_registry,
+        doctor_registry,
     );
 
     // Build the unified Router for the API port (api + webuis).

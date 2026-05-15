@@ -12,6 +12,7 @@ dependencies = [
  "ab-core",
  "ab-db",
  "ab-fingerprint",
+ "ab-foundation-models",
  "ab-pipeline",
  "ab-progress",
  "ab-query",

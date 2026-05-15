@@ -110,6 +110,7 @@ async fn fresh_router() -> (Router, CancellationToken, TempDir) {
         SecurityTunables::default(),
         globset::GlobSet::empty(),
         ab_background::BackgroundRegistry::new(vec![]),
+        ab_api::doctor::DoctorRegistry::new(vec![]),
     );
     let router = build_router(state);
     (router, cancel, tmp)
@@ -236,6 +237,21 @@ async fn doctor_speech_protected() {
 #[tokio::test]
 async fn doctor_speech_install_protected() {
     assert_protected("POST", "/doctor/speech/install").await;
+}
+
+#[tokio::test]
+async fn doctor_index_protected() {
+    assert_protected("GET", "/doctor").await;
+}
+
+#[tokio::test]
+async fn doctor_all_protected() {
+    assert_protected("GET", "/doctor/all").await;
+}
+
+#[tokio::test]
+async fn doctor_one_protected() {
+    assert_protected("GET", "/doctor/llm").await;
 }
 
 #[tokio::test]

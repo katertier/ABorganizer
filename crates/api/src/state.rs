@@ -10,6 +10,7 @@ use ab_pipeline::{Dag, Scheduler};
 use globset::GlobSet;
 use tokio_util::sync::CancellationToken;
 
+use crate::doctor::DoctorRegistry;
 use crate::rate_limit::RateLimiter;
 
 /// Application state injected into every handler via axum's `State<>`.
@@ -68,6 +69,10 @@ pub struct ApiStateInner {
     /// (`/background/tasks` + manual triggers) and the
     /// autonomous tick agree on the registered set.
     pub background: BackgroundRegistry,
+    /// Registered doctor checks (ADR-0037, B.9). Read-only by
+    /// trait contract; consumed by `/doctor`, `/doctor/all`,
+    /// `/doctor/{name}` handlers.
+    pub doctor: DoctorRegistry,
 }
 
 impl ApiState {
@@ -91,6 +96,7 @@ impl ApiState {
         security: SecurityTunables,
         scan_excludes: GlobSet,
         background: BackgroundRegistry,
+        doctor: DoctorRegistry,
     ) -> Self {
         Self {
             inner: Arc::new(ApiStateInner {
@@ -105,6 +111,7 @@ impl ApiState {
                 pairing_consume_limiter: Arc::new(RateLimiter::default()),
                 scan_excludes,
                 background,
+                doctor,
             }),
         }
     }

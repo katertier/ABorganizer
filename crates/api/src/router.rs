@@ -59,6 +59,9 @@ pub fn build_router(state: ApiState) -> Router {
         )
         .route("/doctor/speech", get(doctor_speech))
         .route("/doctor/speech/install", post(doctor_speech_install))
+        .route("/doctor", get(crate::doctor::doctor_index))
+        .route("/doctor/all", get(crate::doctor::doctor_all))
+        .route("/doctor/{name}", get(crate::doctor::doctor_one))
         .route("/books", get(books_list))
         .route(
             "/books/{book_id}",
