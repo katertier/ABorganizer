@@ -26,6 +26,7 @@ members = [
     "crates/saved-queries",
     "crates/stats",
     "crates/journal",
+    "crates/archive",
     "crates/tag-read",
     "crates/tag-write",
     "bins/aborg",
@@ -142,6 +143,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"]
 url            = "2.5"
 uuid           = { version = "1.10", features = ["v4", "v7", "serde"] }
 walkdir        = "2.5"
+# Pure-Rust ZIP reader/writer for ab-archive's SafeUnzip
+# (ADR-0047). Default features disabled to drop bzip2 (custom
+# license cargo-deny refuses) + LZMA (rarely used in audiobook
+# bundles). Pure deflate-zlib-rs covers 99%+ of real-world
+# audiobook ZIPs; exotic compressors get rejected with a
+# ZipError surfaced to the operator.
+zip            = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 zstd           = "0.13"
 
 # Internal crates (use neutral names inside the workspace; one place if
@@ -171,6 +179,7 @@ ab-dispatcher  = { path = "crates/dispatcher" }
 ab-saved-queries = { path = "crates/saved-queries" }
 ab-stats       = { path = "crates/stats" }
 ab-journal     = { path = "crates/journal" }
+ab-archive     = { path = "crates/archive" }
 ab-tag-read    = { path = "crates/tag-read" }
 ab-tag-write   = { path = "crates/tag-write" }
 

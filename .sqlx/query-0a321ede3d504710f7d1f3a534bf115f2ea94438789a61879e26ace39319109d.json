@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO zip_archive_extracts\n            (source_path, extracted_path, source_hash, bytes_in, bytes_out, entries_count)\n         VALUES (?, ?, ?, ?, ?, ?)\n         ON CONFLICT(source_path) DO UPDATE SET\n            extracted_path = excluded.extracted_path,\n            source_hash    = excluded.source_hash,\n            bytes_in       = excluded.bytes_in,\n            bytes_out      = excluded.bytes_out,\n            entries_count  = excluded.entries_count,\n            extracted_at   = strftime('%s','now')\n         RETURNING archive_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "archive_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0a321ede3d504710f7d1f3a534bf115f2ea94438789a61879e26ace39319109d"
+}

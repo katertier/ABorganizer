@@ -1,0 +1,27 @@
+[package]
+name         = "ab-archive"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+authors      = { workspace = true }
+repository   = { workspace = true }
+description  = "SafeUnzip — ZIP-only extractor with zip-slip / depth / size caps. ADR-0047."
+
+[lints]
+workspace = true
+
+[dependencies]
+ab-core   = { workspace = true }
+ab-db     = { workspace = true }
+blake3    = { workspace = true }
+serde     = { workspace = true }
+sqlx      = { workspace = true }
+thiserror = { workspace = true }
+tokio     = { workspace = true, features = ["fs", "io-util"] }
+tracing   = { workspace = true }
+zip       = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio    = { workspace = true, features = ["macros", "rt-multi-thread"] }
