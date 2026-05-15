@@ -35,6 +35,24 @@
 //! `books.duration_ms` decreases by the sum of `cut_ms` across
 //! all applied rows for the book.
 //!
+//! ## Embedded-source classification (ADR-0024 Revision 4)
+//!
+//! `embedded` chapter rows may be **post-trim** if a prior
+//! processor (Libation, `AAXtoMP3` etc.) already cut the jingle
+//! and rewrote the file's chpl atoms. Shifting those rows would
+//! double-cut and produce wrong offsets. Before shifting, this
+//! crate classifies the book's embedded coverage:
+//!
+//! - **Full**: `MAX(embedded.end_ms) ≈ SUM(book_files.duration_ms)`
+//!   (within `embedded_class_tolerance_ms`). Shift applies to
+//!   every source including embedded.
+//! - **`PreStripped`**: `MAX(embedded.end_ms) ≈ SUM(duration_ms) - total_cut_ms`.
+//!   Embedded source's rows skip the shift; `audnexus` / `cue` /
+//!   future sources still shift.
+//! - **Ambiguous**: neither. Same skip behaviour as
+//!   `PreStripped` (safer default) plus a warning log for
+//!   operator review.
+//!
 //! ## What this slice deliberately does not do
 //!
 //! - Transcript / silence boundary verification
@@ -83,6 +101,35 @@ pub async fn apply_auto_applicable_candidates(
         .await
         .map_err(|e| Error::Database(format!("audiologo apply tx: {e}")))?;
 
+    // Classify the embedded chapter source before any shift fires.
+    // Total expected cut = sum of cut_ms across every candidate
+    // that will pass the auto-apply gate; we compute it here so
+    // the classification uses the right reference value.
+    let total_cut_ms = candidates
+        .iter()
+        .filter(|c| c.method.auto_applies() && c.confidence >= method_floor(c.method, tunables))
+        .map(|c| {
+            let padding_ms = c
+                .padding_ms
+                .unwrap_or_else(|| default_padding(c.kind, tunables));
+            cut_ms_from_row(c.jingle_start_ms, c.jingle_end_ms, padding_ms)
+        })
+        .sum::<u64>();
+    let embedded_coverage = classify_embedded_chapter_coverage(
+        library,
+        book_id,
+        total_cut_ms,
+        tunables.embedded_class_tolerance_ms,
+    )
+    .await?;
+    if matches!(embedded_coverage, EmbeddedCoverage::Ambiguous) {
+        tracing::warn!(
+            book = %book_id,
+            total_cut_ms,
+            "audiologo.apply.embedded_coverage_ambiguous"
+        );
+    }
+
     let mut applied_count = 0_usize;
     for c in candidates {
         if !c.method.auto_applies() {
@@ -102,6 +149,7 @@ pub async fn apply_auto_applicable_candidates(
             c.jingle_start_ms,
             c.jingle_end_ms,
             padding_ms,
+            embedded_coverage,
         )
         .await?;
         let cut_ms = cut_ms_from_row(c.jingle_start_ms, c.jingle_end_ms, padding_ms);
@@ -278,18 +326,103 @@ async fn promote_row_to_applied(tx: &mut Transaction<'_, Sqlite>, row_id: i64) -
     Ok(())
 }
 
+/// Embedded chapter source coverage classification (ADR-0024 R4).
+///
+/// Decides whether `source = 'embedded'` chapter rows should
+/// participate in the shift on audiologo cut apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmbeddedCoverage {
+    /// `MAX(embedded.end_ms) ≈ SUM(book_files.duration_ms)`. The
+    /// embedded chapters cover the full audio file — shifts
+    /// apply to every source including embedded.
+    Full,
+    /// `MAX(embedded.end_ms) ≈ SUM(duration_ms) − total_cut_ms`.
+    /// A prior processor cut the jingle + rewrote chpl. Embedded
+    /// rows skip the shift; other sources still shift.
+    PreStripped,
+    /// Neither condition holds within tolerance. Safer default:
+    /// treat as `PreStripped` (skip embedded shift) AND log a
+    /// warning for operator review.
+    Ambiguous,
+}
+
+impl EmbeddedCoverage {
+    /// Whether to skip embedded-source rows during chapter shift.
+    /// `PreStripped` and `Ambiguous` both skip; only `Full` shifts.
+    pub const fn skip_embedded_shift(self) -> bool {
+        !matches!(self, Self::Full)
+    }
+}
+
+/// Classify the book's embedded chapter coverage against its
+/// audio duration, given the total expected cut. See
+/// [`EmbeddedCoverage`] for the decision tree.
+///
+/// Returns `EmbeddedCoverage::Full` when there are no embedded
+/// chapters at all (nothing to skip) — keeps the call site simple.
+pub async fn classify_embedded_chapter_coverage(
+    library: &LibraryDb,
+    book_id: BookId,
+    total_cut_ms: u64,
+    tolerance_ms: u64,
+) -> Result<EmbeddedCoverage> {
+    let id = book_id.0;
+    let total_duration_ms: i64 = sqlx::query_scalar!(
+        r#"SELECT COALESCE(SUM(duration_ms), 0) AS "total!: i64"
+             FROM book_files
+            WHERE book_id = ? AND is_active = 1"#,
+        id,
+    )
+    .fetch_one(library.pool())
+    .await
+    .map_err(|e| Error::Database(format!("audiologo coverage sum duration: {e}")))?;
+
+    let max_embedded_end: Option<i64> = sqlx::query_scalar!(
+        r#"SELECT MAX(end_ms) AS "max?: i64"
+             FROM chapters
+            WHERE book_id = ? AND source = 'embedded'"#,
+        id,
+    )
+    .fetch_one(library.pool())
+    .await
+    .map_err(|e| Error::Database(format!("audiologo coverage max embedded: {e}")))?;
+
+    let Some(max_end) = max_embedded_end else {
+        // No embedded chapters at all → nothing to classify, no
+        // skip needed.
+        return Ok(EmbeddedCoverage::Full);
+    };
+
+    let tolerance: i64 = i64::try_from(tolerance_ms).unwrap_or(i64::MAX);
+    let cut: i64 = i64::try_from(total_cut_ms).unwrap_or(i64::MAX);
+
+    let diff_full = (total_duration_ms - max_end).abs();
+    let diff_stripped = (total_duration_ms - cut - max_end).abs();
+
+    if diff_full <= tolerance {
+        Ok(EmbeddedCoverage::Full)
+    } else if diff_stripped <= tolerance {
+        Ok(EmbeddedCoverage::PreStripped)
+    } else {
+        Ok(EmbeddedCoverage::Ambiguous)
+    }
+}
+
 /// Shift `chapters` rows for the cut at
 /// `[jingle_start_ms, jingle_end_ms]` with `padding_ms`. Applies
 /// the three-case maths from ADR-0024 § Chapter recomputation.
 /// Operates on every chapter row attached to the file's parent
-/// book (the schema doesn't tie chapters to files), across every
-/// `source` value.
+/// book (the schema doesn't tie chapters to files); the
+/// [`EmbeddedCoverage`] classification decides whether
+/// `source = 'embedded'` rows participate.
+#[allow(clippy::too_many_arguments, reason = "the (file_id, jingle_start_ms, jingle_end_ms, padding_ms) tuple maps directly onto the audiologo row schema; bundling adds noise without clarifying the call site")]
 async fn shift_chapters_for_cut(
     tx: &mut Transaction<'_, Sqlite>,
     file_id: i64,
     jingle_start_ms: u64,
     jingle_end_ms: u64,
     padding_ms: u32,
+    embedded_coverage: EmbeddedCoverage,
 ) -> Result<()> {
     let cut_ms = cut_ms_from_row(jingle_start_ms, jingle_end_ms, padding_ms);
     if cut_ms == 0 {
@@ -299,37 +432,79 @@ async fn shift_chapters_for_cut(
     let end_i64 = i64::try_from(jingle_end_ms).unwrap_or(i64::MAX);
     let cut_i64 = i64::try_from(cut_ms).unwrap_or(i64::MAX);
 
-    // Case 1: chapter starts at or after the jingle end → shift
-    // both start + end down by cut_ms.
-    sqlx::query!(
-        r#"UPDATE chapters
-              SET start_ms = start_ms - ?, end_ms = end_ms - ?
-            WHERE book_id = (SELECT book_id FROM book_files WHERE file_id = ?)
-              AND start_ms >= ?"#,
-        cut_i64,
-        cut_i64,
-        file_id,
-        end_i64,
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(|e| Error::Database(format!("audiologo apply chapter-shift case-1: {e}")))?;
+    if embedded_coverage.skip_embedded_shift() {
+        // Case 1 — skip embedded.
+        sqlx::query!(
+            r#"UPDATE chapters
+                  SET start_ms = start_ms - ?, end_ms = end_ms - ?
+                WHERE book_id = (SELECT book_id FROM book_files WHERE file_id = ?)
+                  AND start_ms >= ?
+                  AND source != 'embedded'"#,
+            cut_i64,
+            cut_i64,
+            file_id,
+            end_i64,
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| {
+            Error::Database(format!(
+                "audiologo apply chapter-shift case-1 (skip-embedded): {e}"
+            ))
+        })?;
 
-    // Case 2: chapter spans the cut → shift only end_ms down.
-    sqlx::query!(
-        r#"UPDATE chapters
-              SET end_ms = end_ms - ?
-            WHERE book_id = (SELECT book_id FROM book_files WHERE file_id = ?)
-              AND start_ms < ?
-              AND end_ms > ?"#,
-        cut_i64,
-        file_id,
-        start_i64,
-        end_i64,
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(|e| Error::Database(format!("audiologo apply chapter-shift case-2: {e}")))?;
+        // Case 2 — skip embedded.
+        sqlx::query!(
+            r#"UPDATE chapters
+                  SET end_ms = end_ms - ?
+                WHERE book_id = (SELECT book_id FROM book_files WHERE file_id = ?)
+                  AND start_ms < ?
+                  AND end_ms > ?
+                  AND source != 'embedded'"#,
+            cut_i64,
+            file_id,
+            start_i64,
+            end_i64,
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| {
+            Error::Database(format!(
+                "audiologo apply chapter-shift case-2 (skip-embedded): {e}"
+            ))
+        })?;
+    } else {
+        // Case 1 — all sources.
+        sqlx::query!(
+            r#"UPDATE chapters
+                  SET start_ms = start_ms - ?, end_ms = end_ms - ?
+                WHERE book_id = (SELECT book_id FROM book_files WHERE file_id = ?)
+                  AND start_ms >= ?"#,
+            cut_i64,
+            cut_i64,
+            file_id,
+            end_i64,
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| Error::Database(format!("audiologo apply chapter-shift case-1: {e}")))?;
+
+        // Case 2 — all sources.
+        sqlx::query!(
+            r#"UPDATE chapters
+                  SET end_ms = end_ms - ?
+                WHERE book_id = (SELECT book_id FROM book_files WHERE file_id = ?)
+                  AND start_ms < ?
+                  AND end_ms > ?"#,
+            cut_i64,
+            file_id,
+            start_i64,
+            end_i64,
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| Error::Database(format!("audiologo apply chapter-shift case-2: {e}")))?;
+    }
 
     Ok(())
 }
@@ -677,5 +852,171 @@ mod tests {
             .await
             .expect("apply");
         assert!(!did);
+    }
+
+    // ── classify_embedded_chapter_coverage tests (ADR-0024 R4) ──
+
+    async fn seed_embedded_chapters(library: &LibraryDb, book_id: i64, end_ms_max: i64) {
+        // Two chapters; the second's end_ms drives MAX.
+        sqlx::query(
+            "INSERT INTO chapters (book_id, idx, start_ms, end_ms, title, source) \
+             VALUES (?, 0, 0, ?, 'C1', 'embedded'), \
+                    (?, 1, ?, ?, 'C2', 'embedded')",
+        )
+        .bind(book_id)
+        .bind(end_ms_max / 2)
+        .bind(book_id)
+        .bind(end_ms_max / 2)
+        .bind(end_ms_max)
+        .execute(library.pool())
+        .await
+        .expect("seed embedded chapters");
+    }
+
+    #[tokio::test]
+    async fn classify_full_when_embedded_covers_whole_file() {
+        // file duration = 3_600_000, max embedded end = 3_599_500.
+        // diff_full = 500 ≤ tolerance 1500 → Full.
+        let tmp = TempDir::new().expect("tmpdir");
+        let library = fresh_library(tmp.path()).await;
+        seed_book_with_files(&library).await;
+        seed_embedded_chapters(&library, 1, 3_599_500).await;
+
+        let cov = classify_embedded_chapter_coverage(&library, BookId(1), 4_750, 1500)
+            .await
+            .expect("classify");
+        assert_eq!(cov, EmbeddedCoverage::Full);
+        assert!(!cov.skip_embedded_shift());
+    }
+
+    #[tokio::test]
+    async fn classify_pre_stripped_when_embedded_short_by_cut_ms() {
+        // file duration = 3_600_000, total_cut_ms = 5_000, max
+        // embedded end = 3_595_500. diff_stripped = |3_600_000 −
+        // 5_000 − 3_595_500| = 500 ≤ 1500 → PreStripped.
+        let tmp = TempDir::new().expect("tmpdir");
+        let library = fresh_library(tmp.path()).await;
+        seed_book_with_files(&library).await;
+        seed_embedded_chapters(&library, 1, 3_595_500).await;
+
+        let cov = classify_embedded_chapter_coverage(&library, BookId(1), 5_000, 1500)
+            .await
+            .expect("classify");
+        assert_eq!(cov, EmbeddedCoverage::PreStripped);
+        assert!(cov.skip_embedded_shift());
+    }
+
+    #[tokio::test]
+    async fn classify_ambiguous_when_neither_matches() {
+        // file duration = 3_600_000, total_cut_ms = 5_000, max
+        // embedded end = 3_400_000. Neither full nor stripped
+        // within tolerance → Ambiguous (still skips).
+        let tmp = TempDir::new().expect("tmpdir");
+        let library = fresh_library(tmp.path()).await;
+        seed_book_with_files(&library).await;
+        seed_embedded_chapters(&library, 1, 3_400_000).await;
+
+        let cov = classify_embedded_chapter_coverage(&library, BookId(1), 5_000, 1500)
+            .await
+            .expect("classify");
+        assert_eq!(cov, EmbeddedCoverage::Ambiguous);
+        assert!(cov.skip_embedded_shift());
+    }
+
+    #[tokio::test]
+    async fn classify_full_when_no_embedded_chapters() {
+        // No embedded rows → Full (nothing to skip).
+        let tmp = TempDir::new().expect("tmpdir");
+        let library = fresh_library(tmp.path()).await;
+        seed_book_with_files(&library).await;
+        // Insert chapters at a different source — should not
+        // affect the embedded-source classification.
+        sqlx::query(
+            "INSERT INTO chapters (book_id, idx, start_ms, end_ms, title, source) \
+             VALUES (1, 0, 0, 3_600_000, 'C', 'audnexus')",
+        )
+        .execute(library.pool())
+        .await
+        .expect("seed audnexus chapter");
+
+        let cov = classify_embedded_chapter_coverage(&library, BookId(1), 5_000, 1500)
+            .await
+            .expect("classify");
+        assert_eq!(cov, EmbeddedCoverage::Full);
+    }
+
+    #[tokio::test]
+    async fn shift_chapters_for_cut_skips_embedded_when_pre_stripped() {
+        // Two chapter sources for the same book: audnexus at
+        // start=10_000 end=20_000, embedded at start=10_000
+        // end=20_000. Jingle [0, 5_000] padding 0 → cut_ms 5_000.
+        // PreStripped → embedded stays at (10_000, 20_000);
+        // audnexus shifts to (5_000, 15_000).
+        let tmp = TempDir::new().expect("tmpdir");
+        let library = fresh_library(tmp.path()).await;
+        seed_book_with_files(&library).await;
+        sqlx::query(
+            "INSERT INTO chapters (book_id, idx, start_ms, end_ms, title, source) \
+             VALUES (1, 0, 10_000, 20_000, 'A', 'audnexus'), \
+                    (1, 0, 10_000, 20_000, 'E', 'embedded')",
+        )
+        .execute(library.pool())
+        .await
+        .expect("seed chapters");
+
+        let mut tx = library.pool().begin().await.expect("tx");
+        shift_chapters_for_cut(&mut tx, 10, 0, 5_000, 0, EmbeddedCoverage::PreStripped)
+            .await
+            .expect("shift");
+        tx.commit().await.expect("commit");
+
+        let audnexus_start: i64 =
+            sqlx::query_scalar("SELECT start_ms FROM chapters WHERE source = 'audnexus'")
+                .fetch_one(library.pool())
+                .await
+                .expect("query");
+        let embedded_start: i64 =
+            sqlx::query_scalar("SELECT start_ms FROM chapters WHERE source = 'embedded'")
+                .fetch_one(library.pool())
+                .await
+                .expect("query");
+        assert_eq!(audnexus_start, 5_000, "audnexus row should shift down");
+        assert_eq!(embedded_start, 10_000, "embedded row should NOT shift");
+    }
+
+    #[tokio::test]
+    async fn shift_chapters_for_cut_includes_embedded_when_full() {
+        // Same fixture as above but EmbeddedCoverage::Full →
+        // both rows shift.
+        let tmp = TempDir::new().expect("tmpdir");
+        let library = fresh_library(tmp.path()).await;
+        seed_book_with_files(&library).await;
+        sqlx::query(
+            "INSERT INTO chapters (book_id, idx, start_ms, end_ms, title, source) \
+             VALUES (1, 0, 10_000, 20_000, 'A', 'audnexus'), \
+                    (1, 0, 10_000, 20_000, 'E', 'embedded')",
+        )
+        .execute(library.pool())
+        .await
+        .expect("seed chapters");
+
+        let mut tx = library.pool().begin().await.expect("tx");
+        shift_chapters_for_cut(&mut tx, 10, 0, 5_000, 0, EmbeddedCoverage::Full)
+            .await
+            .expect("shift");
+        tx.commit().await.expect("commit");
+
+        let audnexus_start: i64 =
+            sqlx::query_scalar("SELECT start_ms FROM chapters WHERE source = 'audnexus'")
+                .fetch_one(library.pool())
+                .await
+                .expect("query");
+        let embedded_start: i64 =
+            sqlx::query_scalar("SELECT start_ms FROM chapters WHERE source = 'embedded'")
+                .fetch_one(library.pool())
+                .await
+                .expect("query");
+        assert_eq!(audnexus_start, 5_000);
+        assert_eq!(embedded_start, 5_000, "embedded should also shift on Full");
     }
 }
