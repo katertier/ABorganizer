@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM companion_nearby_books WHERE discovered_at < ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "bcc96f8b1380eb69672c5f36cf59c960408473d9a62ce1a79dabe2ff21e891c7"
+}

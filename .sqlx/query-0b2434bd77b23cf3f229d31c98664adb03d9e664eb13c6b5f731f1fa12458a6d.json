@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM companion_nearby_books",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "0b2434bd77b23cf3f229d31c98664adb03d9e664eb13c6b5f731f1fa12458a6d"
+}
