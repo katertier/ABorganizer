@@ -442,7 +442,7 @@ async fn upsert_book_file(
     // Hash-known: existing row at different path → update the path.
     if let Some(hash) = &file_hash {
         let existing_by_hash = sqlx::query!(
-            "SELECT file_id, book_id FROM book_files WHERE file_hash = ? LIMIT 1",
+            "SELECT file_id, book_id FROM book_files WHERE content_hash = ? LIMIT 1",
             hash
         )
         .fetch_optional(&mut *tx)
@@ -489,7 +489,7 @@ async fn upsert_book_file(
     let file_hash_str = file_hash.as_deref();
     sqlx::query!(
         "INSERT INTO book_files \
-             (book_id, file_path, file_size, modified_at, format, file_hash, is_active) \
+             (book_id, file_path, file_size, modified_at, format, content_hash, is_active) \
          VALUES (?, ?, ?, ?, ?, ?, 1)",
         book_id,
         file_path_str,

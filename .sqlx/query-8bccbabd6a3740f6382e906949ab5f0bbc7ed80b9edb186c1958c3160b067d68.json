@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT file_id, book_id FROM book_files WHERE file_hash = ? LIMIT 1",
+  "query": "SELECT file_id, book_id FROM book_files WHERE content_hash = ? LIMIT 1",
   "describe": {
     "columns": [
       {
@@ -22,5 +22,5 @@
       false
     ]
   },
-  "hash": "ea2e8e729699802e925efa88994be6965d6aeb40a52ca8a332ff7b7f3fee7dfc"
+  "hash": "8bccbabd6a3740f6382e906949ab5f0bbc7ed80b9edb186c1958c3160b067d68"
 }

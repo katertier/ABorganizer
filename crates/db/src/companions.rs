@@ -347,7 +347,7 @@ mod tests {
         // counter-maintenance UPDATE filter.
         sqlx::query(
             "INSERT INTO book_files \
-                (file_id, book_id, file_path, file_hash, is_active) \
+                (file_id, book_id, file_path, content_hash, is_active) \
              VALUES (?, ?, ?, ?, 1)",
         )
         .bind(file_id)
