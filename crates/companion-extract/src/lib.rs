@@ -35,6 +35,10 @@ use std::collections::HashMap;
 use scraper::{Html, Selector};
 use unicode_segmentation::UnicodeSegmentation;
 
+pub mod epub_walk;
+
+pub use epub_walk::{EpubBody, EpubWalkError, extract_name_dict_from_epub, walk_spine};
+
 /// One canonical proper-noun candidate with its observed
 /// frequency. The C.4 stage writes a serialised `Vec<NameEntry>`
 /// to `ai_cache.content` with `cache_type='epub_name_dict'`.

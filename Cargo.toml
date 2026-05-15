@@ -148,6 +148,12 @@ rand           = "0.8"
 regex          = "1.10"
 reqwest        = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 ring           = "0.17"
+# Read-only XML DOM. Used by `ab-companion-extract`'s EPUB spine
+# walk (ADR-0043 § C.4b) for `META-INF/container.xml` rootfile
+# lookup + `content.opf` manifest / spine traversal. Lighter
+# than a streaming parser; the OPF is small (handful of KB) so
+# DOM is fine. MIT.
+roxmltree      = "0.21"
 # (rusqlite removed: workspace standardised on sqlx for SQLite access.
 # See `docs/POLICIES.md` "One SQL crate per workspace" + ADR-0004.)
 secrecy        = { version = "0.10", features = ["serde"] }
