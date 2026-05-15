@@ -131,6 +131,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ab-companion"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "ab-core"
 version = "0.1.0"
 dependencies = [
