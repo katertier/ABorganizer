@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT source_hash AS \"hash!: String\"\n         FROM zip_archive_extracts\n         WHERE source_path = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "hash!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7eb5215fc446bacaf182e4556598c9f11e7bbf5bacb6ab86422fd5efe8cd8bcd"
+}
