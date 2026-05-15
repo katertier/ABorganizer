@@ -29,6 +29,10 @@ chrono     = { workspace = true }
 # `config.toml` + AB_* env identically.
 figment    = { workspace = true }
 once_cell  = { workspace = true }
+# Filesystem-jail validation for trust-zoned paths (ADR-0049).
+# Marker types live in `path_jail::types`; we wire them onto
+# our trust zones in `path_jail` module.
+path_jail  = { workspace = true }
 serde      = { workspace = true }
 # B.2a: ai_cache.content size-capped deserialiser
 # (`deserialize_cache_content` in `cache` module).
@@ -37,6 +41,10 @@ thiserror  = { workspace = true }
 toml       = { workspace = true }
 tracing    = { workspace = true }
 uuid       = { workspace = true }
+
+[dev-dependencies]
+# trust_zones tests build temp jail roots.
+tempfile = { workspace = true }
 
 [build-dependencies]
 toml = { workspace = true }
