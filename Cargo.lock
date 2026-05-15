@@ -134,8 +134,12 @@ dependencies = [
 name = "ab-companion"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "serde",
+ "tempfile",
  "thiserror",
+ "tracing",
+ "walkdir",
 ]
 
 [[package]]

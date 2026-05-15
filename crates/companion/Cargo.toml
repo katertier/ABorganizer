@@ -12,5 +12,11 @@ description  = "Companion-file detection + parse-tier mapping (ADR-0043). Magic-
 workspace = true
 
 [dependencies]
+blake3    = { workspace = true }
 serde     = { workspace = true }
 thiserror = { workspace = true }
+tracing   = { workspace = true }
+walkdir   = { workspace = true }
+
+[dev-dependencies]
+tempfile  = { workspace = true }
