@@ -11,7 +11,7 @@
 // fields don't render as nicely for human-readable diagnosis.
 #![allow(missing_docs, clippy::print_stdout)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -126,6 +126,27 @@ enum Command {
     },
     /// Show daemon health.
     Health,
+    /// Audible AAX inspector (read-only).
+    ///
+    /// AAX files are MP4 containers with encrypted audio samples
+    /// but **unencrypted** metadata atoms. `aborg aax info` reads
+    /// the codec tag + tags + duration without needing the
+    /// operator's account activation bytes — useful for verifying
+    /// a file *is* an AAX (`codec_tag = aavd`) before registering
+    /// the bytes that unlock decrypt.
+    Aax {
+        #[command(subcommand)]
+        action: AaxAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AaxAction {
+    /// Print tags + codec tag + duration for an AAX file.
+    Info {
+        /// Path to the `.aax` or `.aaxc` file.
+        path: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -635,8 +656,75 @@ async fn main() -> Result<()> {
             clean(&cli.daemon, &category, commit, force, cli.output).await?;
         }
         Command::Health => health(&cli.daemon, cli.output).await?,
+        Command::Aax { action } => match action {
+            AaxAction::Info { path } => aax_info(&path, cli.output)?,
+        },
     }
     Ok(())
+}
+
+// ── AAX inspector ────────────────────────────────────────────────────
+
+fn aax_info(path: &Path, output: OutputFormat) -> Result<()> {
+    let info = ab_audio::read_aax_info(path)
+        .with_context(|| format!("read AAX info from {}", path.display()))?;
+    match output {
+        OutputFormat::Json => {
+            let payload = serde_json::json!({
+                "path": path.display().to_string(),
+                "codec_tag": info.codec_tag,
+                "is_aax": info.is_aax,
+                "duration_ms": info.duration_ms,
+                "title": info.title,
+                "author": info.author,
+                "narrator": info.narrator,
+                "album": info.album,
+                "genre": info.genre,
+                "description": info.description,
+                "copyright": info.copyright,
+                "chapter_count": info.chapter_count,
+            });
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&payload).unwrap_or_default()
+            );
+        }
+        OutputFormat::Human => {
+            println!("path:          {}", path.display());
+            println!(
+                "codec_tag:     {} ({})",
+                info.codec_tag.as_deref().unwrap_or("?"),
+                if info.is_aax {
+                    "Audible AAX — decrypt needed"
+                } else {
+                    "not AAX"
+                },
+            );
+            if let Some(ms) = info.duration_ms {
+                let secs = ms / 1000;
+                println!(
+                    "duration:      {ms} ms  ({}h {}m)",
+                    secs / 3600,
+                    (secs / 60) % 60
+                );
+            }
+            print_field("title", info.title.as_deref());
+            print_field("author", info.author.as_deref());
+            print_field("narrator", info.narrator.as_deref());
+            print_field("album", info.album.as_deref());
+            print_field("genre", info.genre.as_deref());
+            print_field("copyright", info.copyright.as_deref());
+            print_field("description", info.description.as_deref());
+            println!("chapter_count: {}", info.chapter_count);
+        }
+    }
+    Ok(())
+}
+
+fn print_field(label: &str, value: Option<&str>) {
+    if let Some(v) = value {
+        println!("{label:<14} {v}");
+    }
 }
 
 // ── HTTP helpers ─────────────────────────────────────────────────────
@@ -666,7 +754,7 @@ struct ScanResponse {
     total_walked: u64,
 }
 
-async fn library_scan(daemon: &str, path: &std::path::Path, output: OutputFormat) -> Result<()> {
+async fn library_scan(daemon: &str, path: &Path, output: OutputFormat) -> Result<()> {
     let url = format!("{daemon}/api/v1/library/scan");
     let resp = client()
         .post(&url)
@@ -2128,7 +2216,7 @@ async fn audiologo_cut(
 /// `ABtagger` export format (mapped via the user's tmp HTML
 /// report). This is a deliberate stub — pre-flight the format
 /// before committing to a writer.
-async fn audiologo_import(path: &std::path::Path, _output: OutputFormat) -> Result<()> {
+async fn audiologo_import(path: &Path, _output: OutputFormat) -> Result<()> {
     if !path.exists() {
         anyhow::bail!("import path does not exist: {}", path.display());
     }

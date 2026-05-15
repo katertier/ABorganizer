@@ -16,6 +16,7 @@ name = "aborg"
 path = "src/main.rs"
 
 [dependencies]
+ab-audio   = { workspace = true }
 ab-core    = { workspace = true }
 anyhow     = { workspace = true }
 clap       = { workspace = true }

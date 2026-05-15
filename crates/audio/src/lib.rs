@@ -28,9 +28,11 @@
 //! and a `// SAFETY: …` comment explaining the invariant being
 //! upheld.
 
+pub mod aax;
 pub mod ffi;
 pub mod info;
 
+pub use aax::{AAX_CODEC_TAG, AaxInfo, read_info as read_aax_info};
 pub use ffi::{
     BridgeError, is_bridge_compiled, read_samples_window, read_samples_window_typed,
     transcode_to_m4b, transcode_to_m4b_typed,
