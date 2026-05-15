@@ -16,6 +16,7 @@ dependencies = [
  "ab-pipeline",
  "ab-progress",
  "ab-query",
+ "ab-saved-queries",
  "ab-scan",
  "ab-speech",
  "ab-stats",
@@ -252,6 +253,22 @@ dependencies = [
  "ab-core",
  "ab-db",
  "chrono",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ab-saved-queries"
+version = "0.1.0"
+dependencies = [
+ "ab-core",
+ "ab-db",
+ "ab-query",
  "serde",
  "serde_json",
  "sqlx",

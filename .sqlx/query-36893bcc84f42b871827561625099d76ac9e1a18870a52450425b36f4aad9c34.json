@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE saved_queries SET query_json = ?, updated_at = strftime('%s','now') WHERE query_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "36893bcc84f42b871827561625099d76ac9e1a18870a52450425b36f4aad9c34"
+}

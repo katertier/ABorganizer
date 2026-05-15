@@ -121,6 +121,25 @@ pub fn build_router(state: ApiState) -> Router {
         )
         .route("/report/gaps", get(crate::reports::report_gaps))
         .route("/upcoming", get(crate::reports::report_upcoming))
+        .route(
+            "/saved_queries",
+            get(crate::saved_queries::saved_queries_list)
+                .post(crate::saved_queries::saved_queries_create),
+        )
+        .route(
+            "/saved_queries/{id}",
+            get(crate::saved_queries::saved_queries_get)
+                .patch(crate::saved_queries::saved_queries_update)
+                .delete(crate::saved_queries::saved_queries_delete),
+        )
+        .route(
+            "/saved_queries/{id}/items",
+            get(crate::saved_queries::saved_queries_items),
+        )
+        .route(
+            "/saved_queries/{id}/count",
+            get(crate::saved_queries::saved_queries_count),
+        )
         .route("/stats", get(crate::stats::stats_get))
         .route("/stats/breakdown", get(crate::stats::breakdown_get))
         // Auth middleware applied to ALL routes. The middleware
