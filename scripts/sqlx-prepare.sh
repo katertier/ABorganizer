@@ -39,9 +39,18 @@ rm -f "$PREP_DB"
 # the second declaration is a no-op in the prep DB. Production
 # migrations run against separate DBs, so they stay strict — this
 # rewrite never touches the source files.
+# FTS5 is required by migration 030 (books_fts). macOS's bundled
+# `sqlite3` doesn't carry the FTS5 module — prefer the Homebrew
+# build (which does) when present. On Linux dev boxes the system
+# sqlite3 is fine.
+SQLITE=sqlite3
+if command -v brew >/dev/null 2>&1 && brew --prefix sqlite >/dev/null 2>&1; then
+    SQLITE="$(brew --prefix sqlite)/bin/sqlite3"
+fi
+
 for migration in crates/db/migrations/library/*.sql crates/db/migrations/ephemeral/*.sql; do
     sed -E 's/CREATE (UNIQUE )?(TABLE|INDEX) /CREATE \1\2 IF NOT EXISTS /g; s/INSERT INTO /INSERT OR IGNORE INTO /g' \
-        "$migration" | sqlite3 "$PREP_DB"
+        "$migration" | "$SQLITE" "$PREP_DB"
 done
 echo "prep DB ready: $PREP_DB"
 
