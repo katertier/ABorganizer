@@ -37,6 +37,13 @@ thiserror   = { workspace = true }
 tokio       = { workspace = true }
 tracing     = { workspace = true }
 url         = { workspace = true }
+# v4 (random) for the Android-screen endpoint's `session_id`
+# parameter (ADR-0050 § 2). The session_id isn't security-
+# relevant — Audible's screen endpoint takes it for telemetry —
+# but using a real UUIDv4 gives us a 32-char hex string that
+# matches Libex's session-id shape without an additional rand
+# dep on top of the workspace's existing uuid.
+uuid        = { workspace = true }
 
 [dev-dependencies]
 tempfile   = { workspace = true }
