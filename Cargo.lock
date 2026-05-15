@@ -7,6 +7,7 @@ name = "ab-api"
 version = "0.1.0"
 dependencies = [
  "ab-audiologo",
+ "ab-background",
  "ab-catalog",
  "ab-core",
  "ab-db",
@@ -63,6 +64,22 @@ dependencies = [
  "rusty-chromaprint",
  "serde",
  "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "ab-background"
+version = "0.1.0"
+dependencies = [
+ "ab-core",
+ "ab-db",
+ "async-trait",
+ "serde",
  "sqlx",
  "tempfile",
  "thiserror",
@@ -394,6 +411,7 @@ name = "aborg-daemon"
 version = "0.1.0"
 dependencies = [
  "ab-api",
+ "ab-background",
  "ab-catalog",
  "ab-core",
  "ab-db",

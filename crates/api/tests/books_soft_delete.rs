@@ -76,6 +76,7 @@ async fn fresh_setup() -> (axum::Router, ApiState, CancellationToken, TempDir) {
         cancel.clone(),
         SecurityTunables::default(),
         globset::GlobSet::empty(),
+        ab_background::BackgroundRegistry::new(vec![]),
         ab_api::doctor::DoctorRegistry::new(vec![]),
     );
     let router = build_router(state.clone());

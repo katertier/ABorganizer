@@ -109,6 +109,7 @@ async fn fresh_router() -> (Router, CancellationToken, TempDir) {
         cancel.clone(),
         SecurityTunables::default(),
         globset::GlobSet::empty(),
+        ab_background::BackgroundRegistry::new(vec![]),
         ab_api::doctor::DoctorRegistry::new(vec![]),
     );
     let router = build_router(state);
@@ -311,6 +312,16 @@ async fn books_progress_protected() {
 #[tokio::test]
 async fn session_sync_protected() {
     assert_protected("POST", "/session/1/sync").await;
+}
+
+#[tokio::test]
+async fn background_tasks_protected() {
+    assert_protected("GET", "/background/tasks").await;
+}
+
+#[tokio::test]
+async fn background_task_run_protected() {
+    assert_protected("POST", "/background/tasks/heartbeat/run").await;
 }
 
 #[tokio::test]

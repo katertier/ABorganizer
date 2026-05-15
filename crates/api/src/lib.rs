@@ -21,6 +21,7 @@
 pub mod audiologo_apply;
 pub mod audiologo_review;
 pub mod auth;
+pub mod background;
 pub mod cleanup_targets;
 pub mod doctor;
 pub mod error;

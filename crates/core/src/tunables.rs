@@ -81,6 +81,10 @@ pub struct Tunables {
     /// Bearer-token authentication + path-validation roots.
     /// See [`SecurityTunables`].
     pub security: SecurityTunables,
+
+    /// Background-task registry (ADR-0035) — scheduling tick
+    /// interval, set `tick_secs = 0` to disable the loop.
+    pub background: BackgroundTunables,
 }
 
 impl Default for Tunables {
@@ -104,7 +108,24 @@ impl Default for Tunables {
             library_display: LibraryDisplayTunables::default(),
             cleanup: CleanupTunables::default(),
             security: SecurityTunables::default(),
+            background: BackgroundTunables::default(),
         }
+    }
+}
+
+/// Background-task registry knobs (ADR-0035).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BackgroundTunables {
+    /// How often the registry walks its task list. Set `0` to
+    /// disable the loop entirely (manual triggers via API still
+    /// work — the registry is shared with the handlers).
+    pub tick_secs: u64,
+}
+
+impl Default for BackgroundTunables {
+    fn default() -> Self {
+        Self { tick_secs: 60 }
     }
 }
 
