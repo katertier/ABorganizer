@@ -11,13 +11,15 @@
 //! existing). End result: one m4b per source file, replacing
 //! the source on disk + in `book_files` once cleanup runs.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use async_trait::async_trait;
 
 use ab_core::{BookId, FileId, Result};
 use ab_db::book_file_refs;
 use ab_pipeline::{Stage, StageContext, StageId, StageOutcome};
+
+use crate::output_resolve::{Resolved, SkipReason, library_roots_canonical, resolve_for_source};
 
 /// Typed stage identifier.
 pub const STAGE_ID: StageId = StageId::new("transcode-m4b");
@@ -46,15 +48,127 @@ impl TranscodeM4bStage {
     }
 }
 
-/// Derive the m4b output path next to the source. We swap the
-/// extension to `.m4b`; the .m4a container is identical to .m4b
-/// on disk, the extension is the audiobook-convention marker.
-/// Collision with a literal existing `.m4b` neighbour is
-/// extremely unlikely in practice (the source-filter rejects
-/// existing m4b rows), but if it happens the Swift bridge
-/// removes the stale output before exporting.
-fn derive_output_path(source: &Path) -> PathBuf {
-    source.with_extension("m4b")
+// Output path derivation lives in `crate::output_resolve`. Both
+// input and output are validated through a
+// `TrustZoneJail<LibraryRoot>` (ADR-0049 step 3) before the
+// Swift FFI is invoked; the m4b extension swap happens inside
+// the jail, so the output is guaranteed to land inside the same
+// library root as the source.
+
+/// Process one source row: trust-zone-jail validation,
+/// `book_file_refs` lifecycle, Swift-FFI transcode, m4b row
+/// insertion. Returns `Ok(true)` on a successful transcode +
+/// insert, `Ok(false)` on a per-source skip (jail rejection,
+/// FFI failure). `Err` only on a DB-level failure that the
+/// caller can't continue past.
+///
+/// Extracted from the run loop to keep `Stage::run` under the
+/// `clippy::too_many_lines` cap. The jail-validation context
+/// for the loop is in `crate::output_resolve`.
+async fn process_one_source(
+    ctx: &StageContext,
+    book_id: BookId,
+    file_id_raw: i64,
+    file_path_raw: &str,
+    library_roots: &[PathBuf],
+) -> Result<bool> {
+    let book_id_raw = book_id.0;
+    let file_id = FileId(file_id_raw);
+    let input_path = PathBuf::from(file_path_raw);
+
+    // Trust-zone-jail validation (ADR-0049 step 3).
+    // Canonicalize + library-root prefix + jail join. Skip on
+    // any failure; the cleanup target leaves the source row
+    // active so the next pipeline pass can retry after the
+    // operator fixes the underlying issue (missing mount,
+    // broken symlink, removed library_root).
+    let Resolved { input, output, .. } = match resolve_for_source(&input_path, library_roots).await
+    {
+        Ok(r) => r,
+        Err(SkipReason::NotInAnyLibraryRoot { canonical }) => {
+            tracing::warn!(
+                book = %book_id,
+                file_id = file_id_raw,
+                source = %canonical.display(),
+                "transcode.skip_path_outside_library_roots"
+            );
+            return Ok(false);
+        }
+        Err(other) => {
+            tracing::warn!(
+                book = %book_id,
+                file_id = file_id_raw,
+                source = %input_path.display(),
+                reason = %other,
+                "transcode.skip_jail_validation_failed"
+            );
+            return Ok(false);
+        }
+    };
+
+    // Acquire ref before any work. Release on every exit path
+    // (success + failure).
+    let handle = book_file_refs::acquire(ctx.library.pool(), file_id, STAGE_NAME, book_id).await?;
+
+    let result = ab_audio::transcode_to_m4b(input.as_path(), output.as_path()).await;
+
+    // Release the ref before we touch `book_files` so a long
+    // INSERT can't accidentally hold the source alive past the
+    // transcode itself.
+    handle.release(ctx.library.pool()).await?;
+
+    if let Err(e) = result {
+        tracing::warn!(
+            book = %book_id,
+            file_id = file_id_raw,
+            source = %input.as_path().display(),
+            error = %e,
+            "transcode.file_failed"
+        );
+        return Ok(false);
+    }
+
+    // Insert the m4b row. The cleanup target uses
+    // `format = 'm4b' AND is_active = 1` as its m4b-exists gate,
+    // so getting this row's format right matters more than the
+    // file_size precision.
+    let size: Option<i64> = match tokio::fs::metadata(output.as_path()).await {
+        Ok(m) => i64::try_from(m.len()).ok(),
+        Err(e) => {
+            tracing::warn!(
+                book = %book_id,
+                file_id = file_id_raw,
+                output = %output.as_path().display(),
+                error = %e,
+                "transcode.output_stat_failed"
+            );
+            // Output stat failed but the transcode reported
+            // success — surface the path anyway; the cleanup
+            // target won't reap the source until refs settle.
+            None
+        }
+    };
+    let output_str = output.as_path().to_string_lossy().into_owned();
+    sqlx::query!(
+        "INSERT INTO book_files \
+           (book_id, file_path, file_size, format, is_active) \
+         VALUES (?, ?, ?, 'm4b', 1)",
+        book_id_raw,
+        output_str,
+        size,
+    )
+    .execute(ctx.library.pool())
+    .await
+    .map_err(|e| ab_core::Error::Database(format!("transcode insert m4b row: {e}")))?;
+
+    tracing::info!(
+        book = %book_id,
+        src_file_id = file_id_raw,
+        source = %input.as_path().display(),
+        output = %output.as_path().display(),
+        "transcode.file_completed"
+    );
+    Ok(true)
 }
 
 #[async_trait]
@@ -117,6 +231,14 @@ impl Stage for TranscodeM4bStage {
             return Ok(StageOutcome::Skipped);
         }
 
+        // Load the active library_roots canonicalized once per
+        // book — same list serves every source for this book.
+        // Stage-time freshness is fine; roots change rarely and
+        // the next book starts the cycle over.
+        let library_roots = library_roots_canonical(ctx.library.pool())
+            .await
+            .map_err(|e| ab_core::Error::Database(format!("transcode library_roots: {e}")))?;
+
         let mut any_succeeded = false;
         for src in sources {
             // Daemon shutdown / SIGTERM cancellation: bail
@@ -128,75 +250,10 @@ impl Stage for TranscodeM4bStage {
                 break;
             }
 
-            let file_id = FileId(src.file_id);
-            let input = PathBuf::from(&src.file_path);
-            let output = derive_output_path(&input);
-
-            // Acquire ref before any work. Release on every
-            // exit path (success + failure).
-            let handle =
-                book_file_refs::acquire(ctx.library.pool(), file_id, STAGE_NAME, book_id).await?;
-
-            let result = ab_audio::transcode_to_m4b(&input, &output).await;
-
-            // Release the ref before we touch `book_files` so
-            // a long INSERT can't accidentally hold the source
-            // alive past the transcode itself.
-            handle.release(ctx.library.pool()).await?;
-
-            if let Err(e) = result {
-                tracing::warn!(
-                    book = %book_id,
-                    file_id = src.file_id,
-                    source = %input.display(),
-                    error = %e,
-                    "transcode.file_failed"
-                );
-                continue;
+            if process_one_source(ctx, book_id, src.file_id, &src.file_path, &library_roots).await?
+            {
+                any_succeeded = true;
             }
-
-            // Insert the m4b row. The cleanup target uses
-            // `format = 'm4b' AND is_active = 1` as its
-            // m4b-exists gate, so getting this row's format
-            // right matters more than the file_size precision.
-            let size: Option<i64> = match tokio::fs::metadata(&output).await {
-                Ok(m) => i64::try_from(m.len()).ok(),
-                Err(e) => {
-                    tracing::warn!(
-                        book = %book_id,
-                        file_id = src.file_id,
-                        output = %output.display(),
-                        error = %e,
-                        "transcode.output_stat_failed"
-                    );
-                    // Output stat failed but the transcode
-                    // reported success — surface the path
-                    // anyway; the cleanup target won't reap
-                    // the source until refs settle.
-                    None
-                }
-            };
-            let output_str = output.to_string_lossy().into_owned();
-            sqlx::query!(
-                "INSERT INTO book_files \
-                   (book_id, file_path, file_size, format, is_active) \
-                 VALUES (?, ?, ?, 'm4b', 1)",
-                book_id_raw,
-                output_str,
-                size,
-            )
-            .execute(ctx.library.pool())
-            .await
-            .map_err(|e| ab_core::Error::Database(format!("transcode insert m4b row: {e}")))?;
-            any_succeeded = true;
-
-            tracing::info!(
-                book = %book_id,
-                src_file_id = src.file_id,
-                source = %input.display(),
-                output = %output.display(),
-                "transcode.file_completed"
-            );
         }
 
         if any_succeeded {
@@ -332,6 +389,20 @@ mod tests {
         Some(out_m4a)
     }
 
+    /// Seed an active `library_roots` row pointing at `root`. The
+    /// transcode stage requires the source path to live under an
+    /// active library root before the jail validates it; tests
+    /// using `seed_book_with_source` should call this with the
+    /// temp dir hosting the m4a fixture.
+    async fn seed_library_root(library: &LibraryDb, root: &StdPath) {
+        let s = root.to_str().expect("utf8 root");
+        sqlx::query("INSERT INTO library_roots (path, is_active) VALUES (?, 1)")
+            .bind(s)
+            .execute(library.pool())
+            .await
+            .expect("seed library_root");
+    }
+
     async fn seed_book_with_source(library: &LibraryDb, source_path: &StdPath) -> (i64, i64) {
         sqlx::query("INSERT INTO books (book_id, title) VALUES (1, 'Fixture Book')")
             .execute(library.pool())
@@ -420,6 +491,7 @@ mod tests {
         let Some(source) = seed_m4a_fixture(tmp.path()).await else {
             return; // no bridge / no system fixture — skip.
         };
+        seed_library_root(&ctx.library, tmp.path()).await;
         let (book_id, src_file_id) = seed_book_with_source(&ctx.library, &source).await;
 
         let outcome = TranscodeM4bStage::new()
@@ -474,6 +546,7 @@ mod tests {
         let Some(source) = seed_m4a_fixture(tmp.path()).await else {
             return;
         };
+        seed_library_root(&ctx.library, tmp.path()).await;
         let (book_id, _) = seed_book_with_source(&ctx.library, &source).await;
 
         let stage = TranscodeM4bStage::new();
@@ -495,6 +568,7 @@ mod tests {
         let Some(source) = seed_m4a_fixture(tmp.path()).await else {
             return;
         };
+        seed_library_root(&ctx.library, tmp.path()).await;
         let (book_id, _) = seed_book_with_source(&ctx.library, &source).await;
         let stage = TranscodeM4bStage::new();
         stage.run(&ctx, BookId(book_id)).await.expect("run");
