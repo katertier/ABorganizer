@@ -26,10 +26,23 @@
 //! first means each follow-up slice is a pure consumer.
 
 mod detect;
+mod pair;
 
 pub use detect::{detect_format, is_companion_extension};
+pub use pair::{
+    AudiobookCandidate, AutoPairResult, auto_pair, is_ancestor_or_equal, path_diverges,
+};
 
 use serde::{Deserialize, Serialize};
+
+/// Caller-supplied identifier in [`auto_pair`].
+///
+/// Any `Clone + Eq` type works — the geometry helper is generic
+/// so production code passes `BookId` while tests pass plain
+/// integers for readability. Trait alias pattern; no methods.
+pub trait BookKey: Clone + Eq {}
+
+impl<T: Clone + Eq> BookKey for T {}
 
 /// Companion-file format. Mirrors the `book_companions.format`
 /// CHECK constraint exactly — every variant maps to a single
