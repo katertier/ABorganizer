@@ -606,7 +606,7 @@ mod tests {
             let w = FieldWinner {
                 field: Field::Explicit,
                 value: Some(value.to_owned()),
-                source: "audnexus-enrich".to_owned(),
+                source: "enrich-from-audnexus".to_owned(),
             };
             assert!(
                 matches!(
@@ -630,7 +630,7 @@ mod tests {
             let w = FieldWinner {
                 field: Field::Explicit,
                 value: Some(value.to_owned()),
-                source: "audnexus-enrich".to_owned(),
+                source: "enrich-from-audnexus".to_owned(),
             };
             assert!(
                 matches!(
@@ -656,7 +656,7 @@ mod tests {
         let w = FieldWinner {
             field: Field::Explicit,
             value: Some("kinda?".to_owned()),
-            source: "audnexus-enrich".to_owned(),
+            source: "enrich-from-audnexus".to_owned(),
         };
         assert_eq!(
             apply_winner(&mut tag, &w, None),
@@ -677,7 +677,7 @@ mod tests {
         let w = FieldWinner {
             field: Field::Explicit,
             value: Some("true".to_owned()),
-            source: "audnexus-enrich".to_owned(),
+            source: "enrich-from-audnexus".to_owned(),
         };
         assert_eq!(
             apply_winner(&mut tag, &w, None),
@@ -709,7 +709,7 @@ mod tests {
         let w = FieldWinner {
             field: Field::CoverUrl,
             value: Some("https://example.invalid/cover.jpg".to_owned()),
-            source: "audnexus-enrich".to_owned(),
+            source: "enrich-from-audnexus".to_owned(),
         };
         assert_eq!(
             apply_winner(&mut tag, &w, None),
@@ -728,7 +728,7 @@ mod tests {
         let w = FieldWinner {
             field: Field::CoverUrl,
             value: Some("https://example.invalid/cover.png".to_owned()),
-            source: "audnexus-enrich".to_owned(),
+            source: "enrich-from-audnexus".to_owned(),
         };
         let outcome = apply_winner(&mut tag, &w, Some(&png));
         assert!(
@@ -755,7 +755,7 @@ mod tests {
         let w = FieldWinner {
             field: Field::CoverUrl,
             value: Some("https://example.invalid/cover.jpg".to_owned()),
-            source: "audnexus-enrich".to_owned(),
+            source: "enrich-from-audnexus".to_owned(),
         };
         let outcome = apply_winner(&mut tag, &w, Some(&jpeg));
         assert_eq!(
@@ -776,7 +776,7 @@ mod tests {
         let w = FieldWinner {
             field: Field::CoverUrl,
             value: Some("https://example.invalid/cover".to_owned()),
-            source: "audnexus-enrich".to_owned(),
+            source: "enrich-from-audnexus".to_owned(),
         };
         assert_eq!(
             apply_winner(&mut tag, &w, Some(&garbage)),
@@ -825,7 +825,7 @@ mod tests {
             let w = FieldWinner {
                 field: *field,
                 value: Some((*value).to_owned()),
-                source: "audnexus-enrich".to_owned(),
+                source: "enrich-from-audnexus".to_owned(),
             };
             // Newly-mapped fields: before is None (Tag::new starts empty)
             // so we expect `Changed { before: None }`.

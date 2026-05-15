@@ -130,7 +130,7 @@ pub trait Stage: Send + Sync + 'static {
     ///
     /// Stages whose outputs aren't captured by the default
     /// (audiologo-detect's `book_file_audiologos` rows;
-    /// tag-read's `book_field_provenance` rows; etc.) override
+    /// read-tags's `book_field_provenance` rows; etc.) override
     /// to extend or replace the cleanup. **Calling the default
     /// from an override is the recommended pattern** — extend,
     /// don't replace:
@@ -287,7 +287,7 @@ mod tests {
             "INSERT INTO book_field_provenance \
              (book_id, field, value, source, stage, confidence) VALUES \
                (?, 'genre', 'fantasy', 'dna-text', 'extract-dna-tags', 0.8), \
-               (?, 'author', 'X',       'tag_file', 'tag-read',        0.7)",
+               (?, 'author', 'X',       'tag_file', 'read-tags',        0.7)",
         )
         .bind(book_id)
         .bind(book_id)
@@ -298,7 +298,7 @@ mod tests {
         sqlx::query(
             "INSERT INTO pipeline_progress (book_id, stage, status) VALUES \
                (?, 'extract-dna-tags', 'succeeded'), \
-               (?, 'tag-read',         'succeeded')",
+               (?, 'read-tags',         'succeeded')",
         )
         .bind(book_id)
         .bind(book_id)
@@ -321,7 +321,7 @@ mod tests {
         .expect("cache rows");
         assert_eq!(cache_rows, vec!["transcript_head".to_owned()]);
 
-        // book_field_provenance: dna_tags row gone, tag-read row
+        // book_field_provenance: dna_tags row gone, read-tags row
         // untouched.
         let prov_stages: Vec<String> = sqlx::query_scalar(
             "SELECT stage FROM book_field_provenance WHERE book_id = ? ORDER BY stage",
@@ -330,9 +330,9 @@ mod tests {
         .fetch_all(ctx.library.pool())
         .await
         .expect("prov rows");
-        assert_eq!(prov_stages, vec!["tag-read".to_owned()]);
+        assert_eq!(prov_stages, vec!["read-tags".to_owned()]);
 
-        // pipeline_progress: extract-dna-tags row gone, tag-read
+        // pipeline_progress: extract-dna-tags row gone, read-tags
         // row untouched.
         let pp_stages: Vec<String> = sqlx::query_scalar(
             "SELECT stage FROM pipeline_progress WHERE book_id = ? ORDER BY stage",
@@ -341,7 +341,7 @@ mod tests {
         .fetch_all(ctx.ephemeral.pool())
         .await
         .expect("progress rows");
-        assert_eq!(pp_stages, vec!["tag-read".to_owned()]);
+        assert_eq!(pp_stages, vec!["read-tags".to_owned()]);
     }
 
     #[tokio::test]
@@ -360,7 +360,7 @@ mod tests {
 
     #[tokio::test]
     async fn default_reset_noop_for_stages_with_no_ai_cache_keys() {
-        // `tag-read` has no `ai_cache` keys but does have a
+        // `read-tags` has no `ai_cache` keys but does have a
         // pipeline_progress row + book_field_provenance rows.
         // The default reset must still wipe those, just skip
         // the ai_cache branch.
@@ -370,7 +370,7 @@ mod tests {
         sqlx::query(
             "INSERT INTO book_field_provenance \
              (book_id, field, value, source, stage, confidence) \
-             VALUES (?, 'title', 'X', 'tag_file', 'tag-read', 0.7)",
+             VALUES (?, 'title', 'X', 'tag_file', 'read-tags', 0.7)",
         )
         .bind(book_id)
         .execute(ctx.library.pool())
@@ -378,14 +378,14 @@ mod tests {
         .expect("seed");
         sqlx::query(
             "INSERT INTO pipeline_progress (book_id, stage, status) \
-             VALUES (?, 'tag-read', 'succeeded')",
+             VALUES (?, 'read-tags', 'succeeded')",
         )
         .bind(book_id)
         .execute(ctx.ephemeral.pool())
         .await
         .expect("seed progress");
 
-        default_reset("tag-read", &ctx, BookId(book_id))
+        default_reset("read-tags", &ctx, BookId(book_id))
             .await
             .expect("reset");
 

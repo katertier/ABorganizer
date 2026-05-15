@@ -365,7 +365,7 @@ fn intern_stage_name(s: &str) -> &'static str {
 /// stage won't auto-dispatch via the periodic loop" — its
 /// in-line A.2 path still works.)
 const KNOWN_STAGE_NAMES: &[&str] = &[
-    "tag-read",
+    "read-tags",
     "fingerprint-book",
     "catalog-audnexus",
     "catalog-google-books",
@@ -475,8 +475,8 @@ mod tests {
         // book leaves behind.
         let book_real = insert_active_book(&lib, "kept").await;
         let book_ghost: i64 = 999;
-        seed_progress(&eph, book_ghost, "tag-read", "succeeded").await;
-        seed_progress(&eph, book_real, "tag-read", "succeeded").await;
+        seed_progress(&eph, book_ghost, "read-tags", "succeeded").await;
+        seed_progress(&eph, book_real, "read-tags", "succeeded").await;
 
         let deleted = reap_orphans(&lib, &eph).await.expect("reap");
         assert_eq!(deleted, 1, "the orphan gets reaped");
@@ -496,7 +496,7 @@ mod tests {
             .execute(lib.pool())
             .await
             .expect("drop files");
-        seed_progress(&eph, book, "tag-read", "succeeded").await;
+        seed_progress(&eph, book, "read-tags", "succeeded").await;
 
         let deleted = reap_orphans(&lib, &eph).await.expect("reap");
         assert_eq!(deleted, 1, "filespace-less books also count as orphan");
@@ -507,7 +507,7 @@ mod tests {
     async fn reaper_idempotent_on_clean_state() {
         let (lib, eph, _tmp) = fresh_dbs().await;
         let book = insert_active_book(&lib, "clean").await;
-        seed_progress(&eph, book, "tag-read", "succeeded").await;
+        seed_progress(&eph, book, "read-tags", "succeeded").await;
         let first = reap_orphans(&lib, &eph).await.expect("reap1");
         let second = reap_orphans(&lib, &eph).await.expect("reap2");
         assert_eq!(first, 0);
@@ -517,13 +517,13 @@ mod tests {
 
     /// Build a tiny DAG using stages that ARE in
     /// `KNOWN_STAGE_NAMES` so the dispatcher's intern-lookup
-    /// recognises them. Using "tag-read" and "fingerprint-book"
+    /// recognises them. Using "read-tags" and "fingerprint-book"
     /// as the stand-ins.
     fn dag_tagread_then_fingerprint() -> Arc<Dag> {
-        const TAG_READ: StageId = StageId::new("tag-read");
+        const TAG_READ: StageId = StageId::new("read-tags");
         let stages: Vec<Arc<dyn Stage>> = vec![
             Arc::new(TestStage {
-                name_str: "tag-read",
+                name_str: "read-tags",
                 deps: &[],
             }),
             Arc::new(TestStage {
@@ -537,7 +537,7 @@ mod tests {
     #[tokio::test]
     async fn sweep_submits_first_stage_for_new_book() {
         // Brand-new book in library, no progress rows. The
-        // dispatcher must submit `tag-read` (root stage).
+        // dispatcher must submit `read-tags` (root stage).
         let (lib, eph, _tmp) = fresh_dbs().await;
         let book = insert_active_book(&lib, "fresh").await;
         let dag = dag_tagread_then_fingerprint();
@@ -548,10 +548,10 @@ mod tests {
             .expect("sweep");
         assert_eq!(n, 1);
 
-        // The submitted job is (book, tag-read).
+        // The submitted job is (book, read-tags).
         let job = rx.try_recv().expect("got a job");
         assert_eq!(job.book_id.0, book);
-        assert_eq!(job.stage.as_str(), "tag-read");
+        assert_eq!(job.stage.as_str(), "read-tags");
     }
 
     #[tokio::test]
@@ -559,7 +559,7 @@ mod tests {
         let (lib, eph, _tmp) = fresh_dbs().await;
         let book = insert_active_book(&lib, "done-already").await;
         // Both stages already terminal; nothing to dispatch.
-        seed_progress(&eph, book, "tag-read", "succeeded").await;
+        seed_progress(&eph, book, "read-tags", "succeeded").await;
         seed_progress(&eph, book, "fingerprint-book", "succeeded").await;
         let dag = dag_tagread_then_fingerprint();
         let (tx, _rx) = mpsc::channel::<Job>(8);
@@ -572,11 +572,11 @@ mod tests {
 
     #[tokio::test]
     async fn sweep_dispatches_second_stage_when_first_done() {
-        // tag-read=succeeded, fingerprint-book=no row →
+        // read-tags=succeeded, fingerprint-book=no row →
         // dispatcher must submit fingerprint-book.
         let (lib, eph, _tmp) = fresh_dbs().await;
         let book = insert_active_book(&lib, "halfway").await;
-        seed_progress(&eph, book, "tag-read", "succeeded").await;
+        seed_progress(&eph, book, "read-tags", "succeeded").await;
         let dag = dag_tagread_then_fingerprint();
         let (tx, mut rx) = mpsc::channel::<Job>(8);
 
@@ -611,7 +611,7 @@ mod tests {
         // Stage already 'running' must NOT be re-submitted.
         let (lib, eph, _tmp) = fresh_dbs().await;
         let book = insert_active_book(&lib, "busy").await;
-        seed_progress(&eph, book, "tag-read", "running").await;
+        seed_progress(&eph, book, "read-tags", "running").await;
         let dag = dag_tagread_then_fingerprint();
         let (tx, _rx) = mpsc::channel::<Job>(8);
 
@@ -627,7 +627,7 @@ mod tests {
         // retry semantics are "the dispatcher tries again."
         let (lib, eph, _tmp) = fresh_dbs().await;
         let book = insert_active_book(&lib, "retry").await;
-        seed_progress(&eph, book, "tag-read", "failed").await;
+        seed_progress(&eph, book, "read-tags", "failed").await;
         let dag = dag_tagread_then_fingerprint();
         let (tx, mut rx) = mpsc::channel::<Job>(8);
 
@@ -636,7 +636,7 @@ mod tests {
             .expect("sweep");
         assert_eq!(n, 1);
         let job = rx.try_recv().expect("retry job");
-        assert_eq!(job.stage.as_str(), "tag-read");
+        assert_eq!(job.stage.as_str(), "read-tags");
     }
 
     /// Silence the unused-import warning that strikes when

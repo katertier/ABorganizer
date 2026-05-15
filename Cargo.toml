@@ -114,7 +114,7 @@ scraper        = "0.27"
 # EPUB body text the way humans do (handles non-ASCII
 # punctuation, joining hyphens, etc. better than `split_whitespace`).
 unicode-segmentation = "1.13"
-# Pure-Rust audio tag + property reader. Used by the tag-read stage
+# Pure-Rust audio tag + property reader. Used by the read-tags stage
 # for duration/bitrate/codec probing + ID3/MP4-atom tag extraction.
 # Pinned to a current minor; verify API on each minor bump.
 lofty          = "0.24"
@@ -139,7 +139,7 @@ mp4ameta       = "0.13"
 # 0.6 dropped `mp3`, `aac`, `isomp4` from the default feature set;
 # we list them explicitly. Formats with no decoder (notably `.opus`,
 # `.aax`, `.wma`) fall through the decode path, get logged, and are
-# skipped by the fingerprint stage. Other pipeline stages (tag-read,
+# skipped by the fingerprint stage. Other pipeline stages (read-tags,
 # audiologo via separate codepath) aren't affected.
 symphonia      = { version = "0.6", default-features = false, features = ["mp3", "aac", "isomp4", "flac", "ogg", "vorbis", "all-meta", "opt-simd"] }
 # Pure-Rust AcoustID-compatible chromaprint. Whole-book identity

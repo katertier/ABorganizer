@@ -1,4 +1,4 @@
-//! `tag-write-early` + `tag-write-final` Stage impls (ADR-0028).
+//! `write-tags-early` + `write-tags-final` Stage impls (ADR-0028).
 //!
 //! Both stages share the per-book write pattern: load winners
 //! from `book_field_provenance`, derive a per-run `batch_id`,
@@ -10,8 +10,8 @@
 //!
 //! The stages differ in two ways:
 //!
-//! - **When they run.** Early sits right after `tag-read` +
-//!   `identity-resolve` + `extract-dna-tags`; Final sits after
+//! - **When they run.** Early sits right after `read-tags` +
+//!   `resolve-identity` + `extract-dna-tags`; Final sits after
 //!   every AI extractor (`extract-summary-spoiler-free`,
 //!   `extract-story-arc`, `extract-characters`, `extract-setting`,
 //!   `extract-summary-spoiler-free-series`) plus `consensus` and
@@ -43,23 +43,23 @@ use crate::winners::{FieldWinner, select_winners_for_book};
 use crate::write::{FieldChange, WriteReport, write_winners};
 
 /// Typed stage identifier for the early tag-write pass.
-pub const TAG_WRITE_EARLY_STAGE_ID: StageId = StageId::new("tag-write-early");
+pub const TAG_WRITE_EARLY_STAGE_ID: StageId = StageId::new("write-tags-early");
 /// Stable `&'static str` mirror of [`TAG_WRITE_EARLY_STAGE_ID`].
 pub const TAG_WRITE_EARLY_STAGE_NAME: &str = TAG_WRITE_EARLY_STAGE_ID.as_str();
 
 /// Typed stage identifier for the final tag-write pass.
-pub const TAG_WRITE_FINAL_STAGE_ID: StageId = StageId::new("tag-write-final");
+pub const TAG_WRITE_FINAL_STAGE_ID: StageId = StageId::new("write-tags-final");
 /// Stable `&'static str` mirror of [`TAG_WRITE_FINAL_STAGE_ID`].
 pub const TAG_WRITE_FINAL_STAGE_NAME: &str = TAG_WRITE_FINAL_STAGE_ID.as_str();
 
 /// `Stage::requires` set for the early pass.
 ///
-/// Per ADR-0028: `tag-read`, `identity-resolve`, `extract-dna-tags`.
-/// Only `tag-read` exists as a referenceable `StageId` today; the
+/// Per ADR-0028: `read-tags`, `resolve-identity`, `extract-dna-tags`.
+/// Only `read-tags` exists as a referenceable `StageId` today; the
 /// other two land on their owning crates' typed-`StageId` slices
 /// and get appended here. The scheduler treats `Skipped` outcomes
 /// as satisfied so partial lists don't deadlock.
-const TAG_WRITE_EARLY_REQUIRES: &[StageId] = &[StageId::new("tag-read")];
+const TAG_WRITE_EARLY_REQUIRES: &[StageId] = &[StageId::new("read-tags")];
 
 /// `Stage::requires` set for the final pass.
 ///
@@ -77,7 +77,7 @@ const TAG_WRITE_EARLY_REQUIRES: &[StageId] = &[StageId::new("tag-read")];
 /// stage rename would surface as a `Dag::build` "unknown
 /// dependency" error at daemon startup — a fast failure.
 const TAG_WRITE_FINAL_REQUIRES: &[StageId] = &[
-    StageId::new("tag-read"),
+    StageId::new("read-tags"),
     StageId::new("promote-consensus"),
     StageId::new("extract-summary-spoiler-free"),
     StageId::new("extract-story-arc"),
@@ -410,7 +410,7 @@ async fn load_active_file_paths(
     )
     .fetch_all(ctx.library.pool())
     .await
-    .map_err(|e| Error::Database(format!("tag-write-early load files: {e}")))?;
+    .map_err(|e| Error::Database(format!("write-tags-early load files: {e}")))?;
     Ok(rows
         .into_iter()
         .map(|r| (FileId(r.file_id), r.file_path))
@@ -455,7 +455,7 @@ async fn write_one_file(
         )
     })
     .await
-    .map_err(|e| Error::Io(std::io::Error::other(format!("tag-write-early join: {e}"))))?;
+    .map_err(|e| Error::Io(std::io::Error::other(format!("write-tags-early join: {e}"))))?;
 
     // Release happens regardless of write outcome — never leak
     // a ref on the error path.
@@ -765,8 +765,8 @@ mod tests {
 
     #[test]
     fn typed_stage_ids_pin_strings() {
-        assert_eq!(TAG_WRITE_EARLY_STAGE_ID.as_str(), "tag-write-early");
-        assert_eq!(TAG_WRITE_FINAL_STAGE_ID.as_str(), "tag-write-final");
+        assert_eq!(TAG_WRITE_EARLY_STAGE_ID.as_str(), "write-tags-early");
+        assert_eq!(TAG_WRITE_FINAL_STAGE_ID.as_str(), "write-tags-final");
         assert_eq!(
             TAG_WRITE_EARLY_STAGE_NAME,
             TAG_WRITE_EARLY_STAGE_ID.as_str()
@@ -780,16 +780,16 @@ mod tests {
     #[tokio::test]
     async fn early_stage_metadata() {
         let s = TagWriteEarlyStage::new();
-        assert_eq!(s.name(), "tag-write-early");
-        assert_eq!(s.requires(), &[StageId::new("tag-read")]);
+        assert_eq!(s.name(), "write-tags-early");
+        assert_eq!(s.requires(), &[StageId::new("read-tags")]);
     }
 
     #[tokio::test]
     async fn final_stage_metadata() {
         let s = TagWriteFinalStage::new();
-        assert_eq!(s.name(), "tag-write-final");
+        assert_eq!(s.name(), "write-tags-final");
         // ADR-0028 § "TagWriteFinal `requires()`": all AI
-        // extractors + consensus + transcode-m4b + tag-read.
+        // extractors + consensus + transcode-m4b + read-tags.
         // Order matters here because the const is laid out that
         // way for readability — the assertion pins both the set
         // and the listing order so a rename surfaces as a diff,
@@ -797,7 +797,7 @@ mod tests {
         assert_eq!(
             s.requires(),
             &[
-                StageId::new("tag-read"),
+                StageId::new("read-tags"),
                 StageId::new("promote-consensus"),
                 StageId::new("extract-summary-spoiler-free"),
                 StageId::new("extract-story-arc"),
@@ -814,7 +814,7 @@ mod tests {
         // No `book_field_provenance` rows for this book → the
         // first guard in `run` short-circuits before any file
         // I/O. Steady-state "this book hasn't progressed past
-        // tag-read yet" path.
+        // read-tags yet" path.
         let tmp = TempDir::new().expect("tmpdir");
         let ctx = fresh_ctx(tmp.path(), TAG_WRITE_FINAL_STAGE_NAME).await;
         let outcome = TagWriteFinalStage::new()
@@ -938,7 +938,7 @@ mod tests {
         seed_book(&ctx, 1).await;
         // Winner from audnexus, NOT tag_file — survives the
         // tautology filter — but no active file rows.
-        seed_winner(&ctx, 1, "title", "Foundation", "audnexus-enrich").await;
+        seed_winner(&ctx, 1, "title", "Foundation", "enrich-from-audnexus").await;
 
         let outcome = TagWriteEarlyStage::new()
             .run(&ctx, BookId(1))
@@ -959,7 +959,7 @@ mod tests {
         let tmp = TempDir::new().expect("tmpdir");
         let ctx = fresh_ctx(tmp.path(), TAG_WRITE_EARLY_STAGE_NAME).await;
         seed_book(&ctx, 1).await;
-        seed_winner(&ctx, 1, "title", "Foundation", "audnexus-enrich").await;
+        seed_winner(&ctx, 1, "title", "Foundation", "enrich-from-audnexus").await;
         sqlx::query(
             "INSERT INTO book_files (file_id, book_id, file_path, is_active) \
              VALUES (1, 1, '/nonexistent/path/should/never/exist.mp3', 1)",

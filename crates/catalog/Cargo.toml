@@ -15,7 +15,7 @@ workspace = true
 ab-core     = { workspace = true }
 ab-db       = { workspace = true }
 ab-pipeline = { workspace = true }
-# For Stage::requires() typed dependencies on tag-read.
+# For Stage::requires() typed dependencies on read-tags.
 ab-tag-read = { workspace = true }
 async-trait = { workspace = true }
 # Used for MP3 CHAP-frame access: lofty parses the ID3v2 tag,

@@ -391,7 +391,7 @@ mod tests {
         let id = record(
             db.pool(),
             &NewEntry {
-                op_kind: "tag-write-final",
+                op_kind: "write-tags-final",
                 target: Target {
                     kind: "book".into(),
                     id: bid,
@@ -418,7 +418,7 @@ mod tests {
         let id = record(
             db.pool(),
             &NewEntry {
-                op_kind: "tag-write-final",
+                op_kind: "write-tags-final",
                 target: Target {
                     kind: "book".into(),
                     id: bid,
@@ -461,7 +461,7 @@ mod tests {
         let lone = record(
             db.pool(),
             &NewEntry {
-                op_kind: "tag-write-final",
+                op_kind: "write-tags-final",
                 target: Target {
                     kind: "book".into(),
                     id: bid,

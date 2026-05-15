@@ -2,7 +2,7 @@
 //!
 //! The pipeline produces metadata on two distinct timescales:
 //!
-//! 1. **5-minute DNA tags** — `tag-read` + `identity-resolve` +
+//! 1. **5-minute DNA tags** — `read-tags` + `resolve-identity` +
 //!    `extract-dna-tags`. Visible to the user within minutes of
 //!    import.
 //! 2. **Long-running AI outputs** — `extract-summary-spoiler-free`,
@@ -22,7 +22,7 @@
 //! Scaffolding only. The two `Stage` impls
 //! ([`TagWriteEarlyStage`] / [`TagWriteFinalStage`]) ship as
 //! `Skipped` skeletons — they exist so [`Stage::requires`] graphs
-//! that name `tag-write-early` / `tag-write-final` upstream can
+//! that name `write-tags-early` / `write-tags-final` upstream can
 //! reference the live `StageId` constants. The `lofty`-based
 //! file-write integration, the on-disk-match dedup, the m4b /
 //! mp3 / flac per-format dispatcher, and the cover-art write path
@@ -109,7 +109,7 @@ mod tests {
     #[test]
     fn skip_for_final_pass_matches_only_user_edit() {
         assert!(skip_for_final_pass("user_edit"), "exact match wins");
-        assert!(!skip_for_final_pass("audnexus-enrich"));
+        assert!(!skip_for_final_pass("enrich-from-audnexus"));
         assert!(!skip_for_final_pass("tag_file"));
         assert!(!skip_for_final_pass("extract-summary-spoiler-free"));
         assert!(!skip_for_final_pass(""), "empty != user_edit");

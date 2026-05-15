@@ -50,7 +50,7 @@ pub(crate) const USER_EDIT_CONFIDENCE: f64 = 1.0;
 ///    promotes into a scalar column. Keeping the column-write
 ///    outside this helper means it can be skipped for join-driven
 ///    fields (`author`, `narrator`, `series`, `genre`) without
-///    putting their identity-resolve plumbing inside an edits
+///    putting their resolve-identity plumbing inside an edits
 ///    helper.
 ///
 /// # Errors

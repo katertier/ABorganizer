@@ -43,7 +43,7 @@ pub fn probe_duration_ms(file: &Path) -> Result<Option<u64>> {
 
     let Ok(tagged) = lofty::read_from_path(file) else {
         // Parse failure — best-effort returns None per the doc.
-        // No log here: callers (tag-read stage, audiologo probe)
+        // No log here: callers (read-tags stage, audiologo probe)
         // already log the "couldn't probe" decision at their own
         // semantic level.
         return Ok(None);

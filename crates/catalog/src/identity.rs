@@ -36,7 +36,7 @@
 //!    differently between books (different romanisation,
 //!    "First Last" vs "Last, First", etc.) but the ASIN matches.
 //! 2. **By case-insensitive name** (fallback): `lower(name)`
-//!    match. Wins for sources with no canonical id (tag-read).
+//!    match. Wins for sources with no canonical id (read-tags).
 //!
 //! When inserting a new row that has an ASIN, the ASIN is stored
 //! in `audible_id` so subsequent runs benefit from the unique
@@ -99,7 +99,7 @@ impl Default for IdentityResolveStage {
 }
 
 /// Typed identifier for this stage.
-pub const STAGE_ID: StageId = StageId::new("identity-resolve");
+pub const STAGE_ID: StageId = StageId::new("resolve-identity");
 
 #[async_trait]
 impl Stage for IdentityResolveStage {
@@ -109,7 +109,7 @@ impl Stage for IdentityResolveStage {
 
     fn requires(&self) -> &'static [StageId] {
         // After consensus runs so the direct-column promotions are
-        // already in place. Consensus depends on audnexus-enrich,
+        // already in place. Consensus depends on enrich-from-audnexus,
         // which writes the contributor candidates this stage needs;
         // transitivity covers the ordering.
         &[crate::consensus::STAGE_ID]
@@ -1203,14 +1203,14 @@ mod tests {
             library: lib,
             ephemeral: eph,
             cancel: tokio_util::sync::CancellationToken::new(),
-            stage_name: "identity-resolve",
+            stage_name: "resolve-identity",
         }
     }
 
     #[tokio::test]
     async fn stage_metadata_matches_pipeline_expectations() {
         let stage = IdentityResolveStage::new();
-        assert_eq!(stage.name(), "identity-resolve");
+        assert_eq!(stage.name(), "resolve-identity");
         assert_eq!(stage.requires(), &[crate::consensus::STAGE_ID]);
     }
 
@@ -1226,11 +1226,11 @@ mod tests {
             "INSERT INTO book_field_provenance \
              (book_id, field, value, source, stage, confidence) \
              VALUES \
-               (1, 'author', 'Brandon Sanderson', 'audnexus_asin_us', 'audnexus-enrich', 0.95), \
-               (1, 'author', 'brandon sanderson', 'tag_file',         'tag-read',        0.7), \
-               (1, 'publisher', 'Recorded Books', 'audnexus_asin_us', 'audnexus-enrich', 0.95), \
-               (1, 'narrator', 'Michael Kramer',  'audnexus_asin_us', 'audnexus-enrich', 0.95), \
-               (1, 'narrator', 'Kate Reading',    'audnexus_asin_us', 'audnexus-enrich', 0.95)",
+               (1, 'author', 'Brandon Sanderson', 'audnexus_asin_us', 'enrich-from-audnexus', 0.95), \
+               (1, 'author', 'brandon sanderson', 'tag_file',         'read-tags',        0.7), \
+               (1, 'publisher', 'Recorded Books', 'audnexus_asin_us', 'enrich-from-audnexus', 0.95), \
+               (1, 'narrator', 'Michael Kramer',  'audnexus_asin_us', 'enrich-from-audnexus', 0.95), \
+               (1, 'narrator', 'Kate Reading',    'audnexus_asin_us', 'enrich-from-audnexus', 0.95)",
         )
         .execute(ctx.library.pool())
         .await
@@ -1298,7 +1298,7 @@ mod tests {
         sqlx::query(
             "INSERT INTO book_field_provenance \
              (book_id, field, value, source, stage, confidence) \
-             VALUES (1, 'narrator', 'Original Reader', 'tag_file', 'tag-read', 0.7)",
+             VALUES (1, 'narrator', 'Original Reader', 'tag_file', 'read-tags', 0.7)",
         )
         .execute(ctx.library.pool())
         .await
@@ -1315,7 +1315,7 @@ mod tests {
         sqlx::query(
             "INSERT INTO book_field_provenance \
              (book_id, field, value, source, stage, confidence) \
-             VALUES (1, 'narrator', 'New Reader', 'audnexus_asin_us', 'audnexus-enrich', 0.95)",
+             VALUES (1, 'narrator', 'New Reader', 'audnexus_asin_us', 'enrich-from-audnexus', 0.95)",
         )
         .execute(ctx.library.pool())
         .await
@@ -1369,8 +1369,8 @@ mod tests {
             "INSERT INTO book_field_provenance \
              (book_id, field, value, source, stage, confidence, external_id) \
              VALUES \
-               (1, 'author', 'Haruki Murakami',  'audnexus_asin_us', 'audnexus-enrich', 0.95, 'B0AUTHORX'), \
-               (2, 'author', 'Murakami, Haruki', 'audnexus_asin_jp', 'audnexus-enrich', 0.95, 'B0AUTHORX')",
+               (1, 'author', 'Haruki Murakami',  'audnexus_asin_us', 'enrich-from-audnexus', 0.95, 'B0AUTHORX'), \
+               (2, 'author', 'Murakami, Haruki', 'audnexus_asin_jp', 'enrich-from-audnexus', 0.95, 'B0AUTHORX')",
         )
         .execute(ctx.library.pool())
         .await
@@ -1401,7 +1401,7 @@ mod tests {
     #[tokio::test]
     async fn alias_junction_seeded_on_insert_and_observation() {
         // Single book, two provenance rows: Audnexus brings the
-        // ASIN-stamped canonical, tag-read brings a variant
+        // ASIN-stamped canonical, read-tags brings a variant
         // spelling. Result: one `authors` row, two
         // `author_aliases` rows — canonical (is_prime=1) and the
         // variant (is_prime=0).
@@ -1415,8 +1415,8 @@ mod tests {
             "INSERT INTO book_field_provenance \
              (book_id, field, value, source, stage, confidence, external_id) \
              VALUES \
-               (1, 'author', 'Brandon Sanderson', 'audnexus_asin_us', 'audnexus-enrich', 0.95, 'B0SANDXYZ'), \
-               (1, 'author', 'brandon sanderson', 'tag_file',         'tag-read',        0.7,  NULL)",
+               (1, 'author', 'Brandon Sanderson', 'audnexus_asin_us', 'enrich-from-audnexus', 0.95, 'B0SANDXYZ'), \
+               (1, 'author', 'brandon sanderson', 'tag_file',         'read-tags',        0.7,  NULL)",
         )
         .execute(ctx.library.pool())
         .await
@@ -1474,8 +1474,8 @@ mod tests {
             "INSERT INTO book_field_provenance \
              (book_id, field, value, source, stage, confidence, external_id) \
              VALUES \
-               (1, 'author', 'Haruki Murakami',  'audnexus_asin_us', 'audnexus-enrich', 0.95, 'B0AUTHOR'), \
-               (2, 'author', 'Murakami, Haruki', 'audnexus_asin_jp', 'audnexus-enrich', 0.95, 'B0AUTHOR')",
+               (1, 'author', 'Haruki Murakami',  'audnexus_asin_us', 'enrich-from-audnexus', 0.95, 'B0AUTHOR'), \
+               (2, 'author', 'Murakami, Haruki', 'audnexus_asin_jp', 'enrich-from-audnexus', 0.95, 'B0AUTHOR')",
         )
         .execute(ctx.library.pool())
         .await
@@ -1533,7 +1533,7 @@ mod tests {
         sqlx::query(
             "INSERT INTO book_field_provenance \
              (book_id, field, value, source, stage, confidence) \
-             VALUES (1, 'author', 'David Mitchell', 'tag_file', 'tag-read', 0.7)",
+             VALUES (1, 'author', 'David Mitchell', 'tag_file', 'read-tags', 0.7)",
         )
         .execute(ctx.library.pool())
         .await
@@ -1629,8 +1629,8 @@ mod tests {
             .execute(ctx.library.pool())
             .await
             .expect("seed target book");
-        // Wire its narrator before identity-resolve runs (in real
-        // pipeline that's `audnexus-enrich`'s job; we simulate).
+        // Wire its narrator before resolve-identity runs (in real
+        // pipeline that's `enrich-from-audnexus`'s job; we simulate).
         sqlx::query("INSERT INTO book_narrator (book_id, narrator_id) VALUES (1, 10)")
             .execute(ctx.library.pool())
             .await
@@ -1638,7 +1638,7 @@ mod tests {
         sqlx::query(
             "INSERT INTO book_field_provenance \
              (book_id, field, value, source, stage, confidence) \
-             VALUES (1, 'author', 'David Mitchell', 'tag_file', 'tag-read', 0.7)",
+             VALUES (1, 'author', 'David Mitchell', 'tag_file', 'read-tags', 0.7)",
         )
         .execute(ctx.library.pool())
         .await
@@ -1670,8 +1670,8 @@ mod tests {
 
     #[tokio::test]
     async fn name_match_back_fills_audible_id_on_later_run() {
-        // First run: tag-read inserted "Brandon Sanderson" without
-        // an ASIN. Second run: audnexus-enrich brings the ASIN.
+        // First run: read-tags inserted "Brandon Sanderson" without
+        // an ASIN. Second run: enrich-from-audnexus brings the ASIN.
         // The existing row should get its `audible_id` filled in,
         // not a new row created.
         let tmp = TempDir::new().expect("tmpdir");
@@ -1680,11 +1680,11 @@ mod tests {
             .execute(ctx.library.pool())
             .await
             .expect("seed book");
-        // Run 1: tag-read style, no external_id.
+        // Run 1: read-tags style, no external_id.
         sqlx::query(
             "INSERT INTO book_field_provenance \
              (book_id, field, value, source, stage, confidence) \
-             VALUES (1, 'author', 'Brandon Sanderson', 'tag_file', 'tag-read', 0.7)",
+             VALUES (1, 'author', 'Brandon Sanderson', 'tag_file', 'read-tags', 0.7)",
         )
         .execute(ctx.library.pool())
         .await
@@ -1704,11 +1704,11 @@ mod tests {
             "no ASIN yet"
         );
 
-        // Run 2: audnexus-enrich brings the ASIN. Append candidate.
+        // Run 2: enrich-from-audnexus brings the ASIN. Append candidate.
         sqlx::query(
             "INSERT INTO book_field_provenance \
              (book_id, field, value, source, stage, confidence, external_id) \
-             VALUES (1, 'author', 'Brandon Sanderson', 'audnexus_asin_us', 'audnexus-enrich', 0.95, 'B0SANDXYZ')",
+             VALUES (1, 'author', 'Brandon Sanderson', 'audnexus_asin_us', 'enrich-from-audnexus', 0.95, 'B0SANDXYZ')",
         )
         .execute(ctx.library.pool())
         .await

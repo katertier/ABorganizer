@@ -216,7 +216,7 @@ mod tests {
     // literals below can reference them statically.
     const SCAN: StageId = StageId::new("scan");
     const FP: StageId = StageId::new("fingerprint-book");
-    const TR: StageId = StageId::new("tag-read");
+    const TR: StageId = StageId::new("read-tags");
     const A: StageId = StageId::new("a");
     const B: StageId = StageId::new("b");
 
@@ -225,11 +225,11 @@ mod tests {
         let stages: Vec<Arc<dyn Stage>> = vec![
             Arc::new(S("scan", &[])),
             Arc::new(S("fingerprint-book", &[SCAN])),
-            Arc::new(S("tag-read", &[FP])),
+            Arc::new(S("read-tags", &[FP])),
         ];
         let dag = Dag::build(stages).expect("valid");
         let order: Vec<&str> = dag.iter_topo().map(|(n, _)| n).collect();
-        assert_eq!(order, vec!["scan", "fingerprint-book", "tag-read"]);
+        assert_eq!(order, vec!["scan", "fingerprint-book", "read-tags"]);
         let _ = TR;
     }
 

@@ -330,8 +330,8 @@ enum BookAction {
     ///
     /// Examples:
     ///
-    ///   aborg book retry 42 --stage tag-read
-    ///   aborg book retry 42 --stage tag-read,fingerprint
+    ///   aborg book retry 42 --stage read-tags
+    ///   aborg book retry 42 --stage read-tags,fingerprint
     ///   aborg book retry 42 --stage all
     Retry {
         /// Book ID — matches `books.book_id`.
@@ -354,7 +354,7 @@ enum BookAction {
     ///
     /// Join-driven fields (`author`, `narrator`, `publisher`,
     /// `series`, `genre`, `cover_url`) defer to a follow-up
-    /// slice — they need identity-resolve plumbing on the
+    /// slice — they need resolve-identity plumbing on the
     /// server. v1 covers the scalar fields.
     ///
     /// Examples:
@@ -786,7 +786,7 @@ async fn book_retry(
     let url = format!("{daemon}/api/v1/books/{book_id}/retry");
     // Detect the `all` wildcard. Accept both
     // `--stage all` and `--stage ALL`; reject mixed usage
-    // (`--stage tag-read,all`) since that's ambiguous.
+    // (`--stage read-tags,all`) since that's ambiguous.
     let is_all = stage.iter().any(|s| s.eq_ignore_ascii_case("all"));
     if is_all && stage.len() > 1 {
         anyhow::bail!("--stage all must appear alone; got mixed list: {stage:?}");

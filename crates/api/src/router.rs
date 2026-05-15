@@ -445,7 +445,7 @@ async fn library_scan(
             .await?;
 
     // Submit each newly-discovered book to the scheduler for
-    // downstream pipeline work (tag-read in slice 1B; more stages
+    // downstream pipeline work (read-tags in slice 1B; more stages
     // wire in here later). Priority::Interactive — scan is a
     // user-initiated request, should preempt background drainage.
     // Submit each new BookId to every per-book stage. Stages run
@@ -536,17 +536,17 @@ async fn library_scan(
         // `book_file_refs` lifecycle keeps sources alive for
         // concurrent AI reads.
         //
-        // `tag-write-early` and `tag-write-final` (ADR-0028) are
+        // `write-tags-early` and `write-tags-final` (ADR-0028) are
         // **deliberately absent** from this list. Both have
         // non-empty `requires()` chains terminating at stages
-        // already submitted here (Early on `tag-read`; Final on
+        // already submitted here (Early on `read-tags`; Final on
         // `consensus` + every AI extractor + `transcode-m4b`).
         // The scheduler's `dispatch_ready_dependents` fires them
         // automatically once their last dependency completes
         // per book; a redundant scan-time submit would just
         // execute them with empty winner sets and Skip. For
         // already-imported books where the auto-dispatch window
-        // has passed, `aborg book retry --stage tag-write-final`
+        // has passed, `aborg book retry --stage write-tags-final`
         // (ADR-0023) is the manual trigger.
     ];
     for book_id in &report.new_book_ids {
@@ -580,7 +580,7 @@ async fn library_scan(
 }
 
 /// One row of `GET /books`. Minimal columns for slice 1A; expands
-/// in 1B once `tag-read` fills in author/duration/etc.
+/// in 1B once `read-tags` fills in author/duration/etc.
 #[derive(Serialize)]
 struct BookRow {
     book_id: i64,
@@ -1115,7 +1115,7 @@ async fn books_get(
 /// **v1 scope (slice #89):** the simple-mapping fields whose
 /// values land in a single `books.<col>`. The join-driven fields
 /// (`author`, `narrator`, `publisher`, `series`, `genre`) and
-/// the set-typed `cover_url` need their own identity-resolve
+/// the set-typed `cover_url` need their own resolve-identity
 /// plumbing and ship as follow-up slices.
 #[derive(Deserialize)]
 struct BooksPatchRequest {
@@ -1150,7 +1150,7 @@ struct BooksPatchResponse {
 ///    'api-user-edit'`, `confidence = 1.0`, `is_winner = 1`
 ///    row into `book_field_provenance`.
 /// 3. Updates the matching `books.<col>` so subsequent reads
-///    (including the next `tag-write-final` run) see the user's
+///    (including the next `write-tags-final` run) see the user's
 ///    value immediately, not the next-cycle AI alternative.
 ///
 /// All three steps run inside a single transaction; partial
@@ -1768,13 +1768,13 @@ async fn doctor_speech_install(
 /// Body for `POST /api/v1/books/{book_id}/retry`.
 ///
 /// See ADR-0023 for the full design. Generic over any
-/// registered pipeline stage (`tag-read`, `fingerprint`,
+/// registered pipeline stage (`read-tags`, `fingerprint`,
 /// `extract-summary-spoiler-free`, …); not limited to LLM
 /// extractors.
 ///
 /// `stages` accepts either:
 ///
-/// - a list of stage names: `{"stages": ["tag-read", "fingerprint"]}`
+/// - a list of stage names: `{"stages": ["read-tags", "fingerprint"]}`
 /// - the literal string `"all"`: `{"stages": "all"}` → every
 ///   registered stage.
 ///

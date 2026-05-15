@@ -11,7 +11,7 @@
 //!   stripped). Sort by `title_sort`, display by `title`, search
 //!   strips the franchise on miss.
 //!
-//! Triggered from `identity-resolve` after series resolution lands
+//! Triggered from `resolve-identity` after series resolution lands
 //! the `book_series` rows for a book. Runs once per series the
 //! book belongs to; computes the LCP from the series' member
 //! titles and either updates `franchise_prefix` (and the affected

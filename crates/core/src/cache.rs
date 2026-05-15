@@ -208,15 +208,15 @@ pub fn cache_keys_for_stage(stage: &str) -> Option<&'static [CacheKey]> {
         // Stages without ai_cache output. They still have
         // pipeline_progress rows the retry endpoint clears,
         // but no cache-side cleanup.
-        "tag-read"
+        "read-tags"
         | "fingerprint-book"
-        | "audible-search"
-        | "audnexus-enrich"
-        | "audnexus-chapters"
+        | "search-audible"
+        | "enrich-from-audnexus"
+        | "fetch-audnexus-chapters"
         | "promote-consensus"
-        | "identity-resolve"
-        | "embedded-chapters"
-        | "chapter-pick-winner"
+        | "resolve-identity"
+        | "read-embedded-chapters"
+        | "pick-chapter-winner"
         | "detect-description-lang"
         | "run-transcript-extractors"
         | "extract-summary-spoiler-free-series" => NONE,
@@ -443,12 +443,12 @@ mod tests {
         // "stage not registered". An empty slice is the right
         // signal for "registered, but no caches to clear".
         for stage in [
-            "tag-read",
+            "read-tags",
             "fingerprint-book",
-            "audnexus-enrich",
+            "enrich-from-audnexus",
             "promote-consensus",
-            "identity-resolve",
-            "chapter-pick-winner",
+            "resolve-identity",
+            "pick-chapter-winner",
             "detect-description-lang",
             "run-transcript-extractors",
             "extract-summary-spoiler-free-series",
