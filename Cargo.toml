@@ -22,6 +22,7 @@ members = [
     "crates/progress",
     "crates/background",
     "crates/query",
+    "crates/saved-queries",
     "crates/tag-read",
     "crates/tag-write",
     "bins/aborg",
@@ -163,6 +164,7 @@ ab-scan        = { path = "crates/scan" }
 ab-progress    = { path = "crates/progress" }
 ab-background  = { path = "crates/background" }
 ab-query       = { path = "crates/query" }
+ab-saved-queries = { path = "crates/saved-queries" }
 ab-tag-read    = { path = "crates/tag-read" }
 ab-tag-write   = { path = "crates/tag-write" }
 

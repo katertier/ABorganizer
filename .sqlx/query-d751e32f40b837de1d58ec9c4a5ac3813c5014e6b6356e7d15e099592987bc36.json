@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO saved_queries\n                (kind, name, query_json, owner_kind)\n             VALUES ('system', 'all books', ?, 'system')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "d751e32f40b837de1d58ec9c4a5ac3813c5014e6b6356e7d15e099592987bc36"
+}

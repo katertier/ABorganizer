@@ -325,6 +325,26 @@ async fn background_task_run_protected() {
 }
 
 #[tokio::test]
+async fn saved_queries_list_protected() {
+    assert_protected("GET", "/saved_queries").await;
+}
+
+#[tokio::test]
+async fn saved_queries_get_protected() {
+    assert_protected("GET", "/saved_queries/1").await;
+}
+
+#[tokio::test]
+async fn saved_queries_items_protected() {
+    assert_protected("GET", "/saved_queries/1/items").await;
+}
+
+#[tokio::test]
+async fn saved_queries_count_protected() {
+    assert_protected("GET", "/saved_queries/1/count").await;
+}
+
+#[tokio::test]
 async fn audiologos_review_protected() {
     assert_protected("GET", "/audiologos/review").await;
 }

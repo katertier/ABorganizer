@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM saved_queries WHERE query_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "b4d60a0dbc07710a8c64f6be5a1a1d25daf89019284ce8ecc53439a5cebb2dd3"
+}
