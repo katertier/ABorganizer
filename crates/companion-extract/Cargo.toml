@@ -12,5 +12,11 @@ description  = "Pure-function name-dictionary extraction from EPUB body HTML (AD
 workspace = true
 
 [dependencies]
+# Read-only XML DOM for EPUB OPF (container.xml + content.opf).
+# See ADR-0043 § C.4b.
+roxmltree            = { workspace = true }
 scraper              = { workspace = true }
+thiserror            = { workspace = true }
 unicode-segmentation = { workspace = true }
+# Pure-Rust ZIP reader for EPUB containers (EPUB is a ZIP).
+zip                  = { workspace = true }
