@@ -59,6 +59,9 @@ pub fn build_router(state: ApiState) -> Router {
         )
         .route("/doctor/speech", get(doctor_speech))
         .route("/doctor/speech/install", post(doctor_speech_install))
+        .route("/doctor", get(crate::doctor::doctor_index))
+        .route("/doctor/all", get(crate::doctor::doctor_all))
+        .route("/doctor/{name}", get(crate::doctor::doctor_one))
         .route("/books", get(books_list))
         .route(
             "/books/{book_id}",
@@ -790,121 +793,25 @@ struct BooksQuery {
     include_deleted: bool,
 }
 
-/// Raw row shape pulled from the dynamic `books_list` SQL.
-/// Lives at module scope (not inside `books_list`) so clippy's
-/// `items_after_statements` lint doesn't fire.
-#[derive(sqlx::FromRow)]
-struct BooksListRow {
-    book_id: i64,
-    title: String,
-    file_path: Option<String>,
-    author: Option<String>,
-    narrators: Option<String>,
-    series: Option<String>,
-}
-
-/// Hard cap on `?limit=`. 500 rows × the narrator `GROUP_CONCAT`
-/// subquery is the largest one-page workload we expect; rejecting
-/// caller-supplied values larger than this defends the daemon's
-/// memory + the JSON encoder.
-const BOOKS_LIST_MAX_LIMIT: u32 = 500;
-/// Default `?limit=` when callers don't pass one.
-const BOOKS_LIST_DEFAULT_LIMIT: u32 = 100;
-
 async fn books_list(
     State(state): State<ApiState>,
     axum::extract::Query(q): axum::extract::Query<BooksQuery>,
 ) -> Result<Json<BooksResponse>, ApiError> {
-    use sqlx::QueryBuilder;
-    // Implementation note. The previous handler used
-    // `sqlx::query!` macro on a hardcoded SQL string — but that
-    // forecloses dynamic filtering since the macro requires a
-    // literal. Per `.claude/CLAUDE.md` § "SQL stack",
-    // dynamic-SQL paths drop to runtime `sqlx::query`/
-    // `QueryBuilder`. We lose compile-time check on the column
-    // list but gain the documented query-param contract.
-    //
-    // `author` / `series` filter against the SAME COALESCE
-    // expression used for display (prime alias else parent
-    // name) so the operator's filter intent matches what they
-    // see in the response.
-    let mut qb: QueryBuilder<sqlx::Sqlite> = QueryBuilder::new(
-        "SELECT
-              b.book_id,
-              b.title,
-              (SELECT file_path FROM book_files
-                WHERE book_id = b.book_id LIMIT 1) AS file_path,
-              COALESCE(
-                  (SELECT alias FROM author_aliases
-                     WHERE author_id = b.author_id AND is_prime = 1 LIMIT 1),
-                  (SELECT name FROM authors WHERE author_id = b.author_id LIMIT 1)
-              ) AS author,
-              (SELECT GROUP_CONCAT(
-                          COALESCE(
-                              (SELECT alias FROM narrator_aliases na
-                                 WHERE na.narrator_id = n.narrator_id AND is_prime = 1 LIMIT 1),
-                              n.name
-                          ), ', ')
-                 FROM book_narrator bn
-                 JOIN narrators n ON n.narrator_id = bn.narrator_id
-                 WHERE bn.book_id = b.book_id) AS narrators,
-              (SELECT COALESCE(
-                          (SELECT alias FROM series_aliases sa
-                             WHERE sa.series_id = s.series_id AND is_prime = 1 LIMIT 1),
-                          s.name)
-                 FROM book_series bs
-                 JOIN series s ON s.series_id = bs.series_id
-                 WHERE bs.book_id = b.book_id AND bs.is_primary = 1 LIMIT 1) AS series
-           FROM books b
-           WHERE 1 = 1 ",
-    );
-    // Soft-delete filter (migration 024). Default: hide
-    // soft-deleted; opt-in via `?include_deleted=true` so
-    // operators can audit / restore them.
-    if !q.include_deleted {
-        qb.push(" AND b.deleted_at IS NULL ");
-    }
-    if let Some(needle) = q.q.as_deref().filter(|s| !s.is_empty()) {
-        qb.push(" AND b.title LIKE ")
-            .push_bind(format!("%{needle}%"));
-    }
-    if let Some(needle) = q.author.as_deref().filter(|s| !s.is_empty()) {
-        qb.push(
-            " AND COALESCE(\
-                (SELECT alias FROM author_aliases \
-                   WHERE author_id = b.author_id AND is_prime = 1 LIMIT 1),\
-                (SELECT name FROM authors WHERE author_id = b.author_id LIMIT 1)\
-              ) LIKE ",
-        )
-        .push_bind(format!("%{needle}%"));
-    }
-    if let Some(needle) = q.series.as_deref().filter(|s| !s.is_empty()) {
-        qb.push(
-            " AND EXISTS (\
-                SELECT 1 FROM book_series bs \
-                JOIN series s ON s.series_id = bs.series_id \
-                WHERE bs.book_id = b.book_id AND bs.is_primary = 1 \
-                  AND COALESCE(\
-                      (SELECT alias FROM series_aliases sa \
-                         WHERE sa.series_id = s.series_id AND is_prime = 1 LIMIT 1),\
-                      s.name) LIKE ",
-        )
-        .push_bind(format!("%{needle}%"))
-        .push(") ");
-    }
-    let limit = q
-        .limit
-        .unwrap_or(BOOKS_LIST_DEFAULT_LIMIT)
-        .min(BOOKS_LIST_MAX_LIMIT);
-    let offset = q.offset.unwrap_or(0);
-    qb.push(" ORDER BY b.book_id LIMIT ")
-        .push_bind(i64::from(limit))
-        .push(" OFFSET ")
-        .push_bind(i64::from(offset));
-
-    let rows: Vec<BooksListRow> = qb
-        .build_query_as::<BooksListRow>()
-        .fetch_all(state.inner.library.pool())
+    // Delegate to the canonical executor (ADR-0031). The native
+    // `GET /books?q=&author=&series=&...` query-string surface is
+    // translated to `QueryFilter` here; future callers
+    // (saved_queries, dispatcher, search) hit `ab_query::execute`
+    // directly with the JSON-encoded struct.
+    let filter = ab_query::QueryFilter {
+        q: q.q,
+        author: q.author,
+        series: q.series,
+        limit: q.limit,
+        offset: q.offset,
+        include_deleted: q.include_deleted,
+        ..Default::default()
+    };
+    let rows = ab_query::execute(state.inner.library.pool(), &filter)
         .await
         .map_err(|e| ab_core::Error::Database(format!("books list: {e}")))?;
 

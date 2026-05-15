@@ -29,10 +29,12 @@ ab-fingerprint  = { workspace = true }
 ab-transcode    = { workspace = true }
 ab-pipeline     = { workspace = true }
 ab-progress     = { workspace = true }
+ab-query        = { workspace = true }
 ab-stats        = { workspace = true }
 ab-scan         = { workspace = true }
 ab-transcript   = { workspace = true }
 ab-speech       = { workspace = true }
+ab-foundation-models = { workspace = true }
 # Direct dep so `crate::pairing` can reach
 # `argon2::password_hash::rand_core::OsRng` for the pairing-code
 # mint. `ab_core::auth` already pulls it; the explicit declaration

@@ -388,6 +388,7 @@ mod tests {
             SecurityTunables::default(),
             globset::GlobSet::empty(),
             ab_background::BackgroundRegistry::new(vec![]),
+            crate::doctor::DoctorRegistry::new(vec![]),
         );
         (state, tmp)
     }
