@@ -28,7 +28,7 @@
 //! * `.mp3` ✓ (MPEG layer 3)
 //! * `.m4a`, `.m4b` ✓ (AAC inside the MP4 / ISO-MP4 container)
 //! * `.flac` ✓
-//! * `.ogg` ✓ (Vorbis only; symphonia 0.5 has no Opus codec yet)
+//! * `.ogg` ✓ (Vorbis only; symphonia 0.6 has no Opus codec yet)
 //! * `.opus`, `.aax`, `.wma` — decode fails → file skipped, logged
 //!
 //! Skipped files don't fail the stage; they just don't get a
@@ -46,12 +46,12 @@ use std::path::Path;
 
 use async_trait::async_trait;
 use rusty_chromaprint::{Configuration, Fingerprinter};
-use symphonia::core::audio::{AudioBufferRef, Signal as _};
-use symphonia::core::codecs::DecoderOptions;
-use symphonia::core::formats::FormatOptions;
+use symphonia::core::codecs::CodecParameters;
+use symphonia::core::codecs::audio::AudioDecoderOptions;
+use symphonia::core::formats::probe::Hint;
+use symphonia::core::formats::{FormatOptions, TrackType};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
 
 use ab_core::{BookId, Error, Result};
 use ab_db::LibraryDb;
@@ -152,24 +152,26 @@ fn probe_duration_secs(file: &Path) -> Result<f64> {
     if let Some(ext) = file.extension().and_then(|e| e.to_str()) {
         hint.with_extension(ext);
     }
-    let probe = symphonia::default::get_probe()
-        .format(
+    let format = symphonia::default::get_probe()
+        .probe(
             &hint,
             mss,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
+            FormatOptions::default(),
+            MetadataOptions::default(),
         )
         .map_err(|e| Error::stage("fingerprint", format!("probe: {e}")))?;
-    let track = probe
-        .format
-        .default_track()
-        .ok_or_else(|| Error::stage("fingerprint", "no default track"))?;
-    let codec_params = &track.codec_params;
-    let sample_rate = codec_params
+    let track = format
+        .default_track(TrackType::Audio)
+        .ok_or_else(|| Error::stage("fingerprint", "no default audio track"))?;
+    let Some(CodecParameters::Audio(audio_params)) = track.codec_params.as_ref() else {
+        return Err(Error::stage("fingerprint", "track has no audio params"));
+    };
+    let sample_rate = audio_params
         .sample_rate
         .ok_or_else(|| Error::stage("fingerprint", "no sample rate"))?;
-    let frames = codec_params
-        .n_frames
+    // 0.6 moved `n_frames` off CodecParameters and onto Track.
+    let frames = track
+        .num_frames
         .ok_or_else(|| Error::stage("fingerprint", "no frame count"))?;
     // u64→f64 loses precision above 2^52 frames; for a single audio
     // file that's ~12 days at 44.1 kHz. Audiobooks are nowhere near.
@@ -202,29 +204,31 @@ fn fingerprint_window(
         hint.with_extension(ext);
     }
 
-    let probe = symphonia::default::get_probe()
-        .format(
+    let mut format = symphonia::default::get_probe()
+        .probe(
             &hint,
             mss,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
+            FormatOptions::default(),
+            MetadataOptions::default(),
         )
         .map_err(|e| format!("probe: {e}"))?;
-    let mut format = probe.format;
     let track = format
-        .default_track()
-        .ok_or_else(|| "no default track".to_owned())?;
+        .default_track(TrackType::Audio)
+        .ok_or_else(|| "no default audio track".to_owned())?;
     let track_id = track.id;
-    let codec_params = track.codec_params.clone();
-    let sample_rate = codec_params
+    let Some(CodecParameters::Audio(audio_params)) = track.codec_params.clone() else {
+        return Err("track has no audio params".to_owned());
+    };
+    let sample_rate = audio_params
         .sample_rate
         .ok_or_else(|| "no sample rate".to_owned())?;
-    let channels = codec_params
+    let channels = audio_params
         .channels
+        .as_ref()
         .map_or(2, symphonia::core::audio::Channels::count);
 
     let mut decoder = symphonia::default::get_codecs()
-        .make(&codec_params, &DecoderOptions::default())
+        .make_audio_decoder(&audio_params, &AudioDecoderOptions::default())
         .map_err(|e| format!("codec: {e}"))?;
 
     let start_frame = u64::from(offset_sec) * u64::from(sample_rate);
@@ -240,17 +244,13 @@ fn fingerprint_window(
     let mut frames_seen: u64 = 0;
     let mut samples_pushed: u64 = 0;
 
-    loop {
-        let packet = match format.next_packet() {
-            Ok(p) => p,
-            Err(symphonia::core::errors::Error::IoError(ref io))
-                if io.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
-                break;
-            }
-            Err(e) => return Err(format!("read packet: {e}")),
-        };
-        if packet.track_id() != track_id {
+    // 0.6: `next_packet()` returns `Ok(None)` at EOF; an end-of-file
+    // `Error::IoError` is now genuinely unexpected.
+    while let Some(packet) = format
+        .next_packet()
+        .map_err(|e| format!("read packet: {e}"))?
+    {
+        if packet.track_id != track_id {
             continue;
         }
 
@@ -294,54 +294,34 @@ fn fingerprint_window(
     Ok(fp.fingerprint().to_vec())
 }
 
-/// Convert a Symphonia `AudioBufferRef` to interleaved i16 samples
-/// covering the frame range `[clip_start, clip_end)`. Chromaprint
-/// takes signed 16-bit input.
+/// Convert a Symphonia `GenericAudioBufferRef` to interleaved i16
+/// samples covering the frame range `[clip_start, clip_end)`.
+/// Chromaprint takes signed 16-bit input.
+///
+/// 0.6 unified the per-sample-format match: `GenericAudioBufferRef`
+/// exposes `copy_to_vec_interleaved::<i16>` directly with format
+/// conversion baked in. We copy the whole decoded buffer once and
+/// slice the resulting interleaved Vec by `frame * channels`.
 fn decoded_to_interleaved_i16(
-    buf: &AudioBufferRef<'_>,
+    buf: &symphonia::core::audio::GenericAudioBufferRef<'_>,
     clip_start: usize,
     clip_end: usize,
 ) -> Vec<i16> {
-    let channels = buf.spec().channels.count();
+    let channels = buf.spec().channels().count();
     let len = clip_end.saturating_sub(clip_start);
     if len == 0 {
         return Vec::new();
     }
-    let mut out = Vec::with_capacity(len * channels);
-
-    match buf {
-        AudioBufferRef::U8(b) => copy_interleaved(b, channels, clip_start, len, &mut out),
-        AudioBufferRef::U16(b) => copy_interleaved(b, channels, clip_start, len, &mut out),
-        AudioBufferRef::U24(b) => copy_interleaved(b, channels, clip_start, len, &mut out),
-        AudioBufferRef::U32(b) => copy_interleaved(b, channels, clip_start, len, &mut out),
-        AudioBufferRef::S8(b) => copy_interleaved(b, channels, clip_start, len, &mut out),
-        AudioBufferRef::S16(b) => copy_interleaved(b, channels, clip_start, len, &mut out),
-        AudioBufferRef::S24(b) => copy_interleaved(b, channels, clip_start, len, &mut out),
-        AudioBufferRef::S32(b) => copy_interleaved(b, channels, clip_start, len, &mut out),
-        AudioBufferRef::F32(b) => copy_interleaved(b, channels, clip_start, len, &mut out),
-        AudioBufferRef::F64(b) => copy_interleaved(b, channels, clip_start, len, &mut out),
+    let mut full: Vec<i16> = Vec::with_capacity(buf.samples_interleaved());
+    buf.copy_to_vec_interleaved::<i16>(&mut full);
+    let start = clip_start.saturating_mul(channels);
+    let end = start
+        .saturating_add(len.saturating_mul(channels))
+        .min(full.len());
+    if end <= start {
+        return Vec::new();
     }
-    out
-}
-
-fn copy_interleaved<S>(
-    buf: &symphonia::core::audio::AudioBuffer<S>,
-    channels: usize,
-    clip_start: usize,
-    len: usize,
-    out: &mut Vec<i16>,
-) where
-    S: symphonia::core::sample::Sample + symphonia::core::conv::IntoSample<i16> + Copy,
-{
-    for frame in 0..len {
-        let i = clip_start + frame;
-        for ch in 0..channels {
-            let plane = buf.chan(ch);
-            if let Some(&s) = plane.get(i) {
-                out.push(s.into_sample());
-            }
-        }
-    }
+    full[start..end].to_vec()
 }
 
 /// Hamming distance between two `u32`-sequence fingerprints.
