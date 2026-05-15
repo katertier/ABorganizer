@@ -13,7 +13,6 @@ workspace = true
 
 [dependencies]
 ab-core   = { workspace = true }
-bytes     = { workspace = true }
 futures   = { workspace = true }
 image     = { workspace = true }
 reqwest   = { workspace = true }
