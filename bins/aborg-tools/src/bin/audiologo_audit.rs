@@ -37,6 +37,7 @@ use aborg_tools::audit::{
     AuditEntry, DetectionInfo,
     clips::{self, CLIP_DURATION_SECS},
     report,
+    seed::SeedDb,
     walk::{self, SourceFile},
     waveform,
 };
@@ -54,6 +55,15 @@ struct Args {
     /// against a large library.
     #[arg(long)]
     limit: Option<usize>,
+    /// Path to an `ABtagger` `audiologo_findings_*.json` (or any
+    /// future seed format) to load as known-fingerprint seeds.
+    /// Repeatable to merge multiple sources.
+    ///
+    /// Phase 2B: the seeds are loaded + reported in the startup
+    /// banner but not yet consulted by the (still-stub) detection
+    /// cascade. Phase 2C wires them into per-clip matching.
+    #[arg(long = "seed-fingerprints", num_args = 0..)]
+    seed_fingerprints: Vec<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -68,6 +78,41 @@ fn main() -> Result<()> {
     }
 
     clips::ensure_ffmpeg_present().context("ffmpeg is required for clip extraction")?;
+
+    let seeds = SeedDb::load(&args.seed_fingerprints).context("load --seed-fingerprints inputs")?;
+    if !seeds.is_empty() {
+        let by_pub = seeds.group_by_publisher();
+        let publishers = by_pub.len();
+        tracing::info!(
+            seed_count = seeds.len(),
+            publishers = publishers,
+            paths = ?args.seed_fingerprints,
+            "audiologo_audit.seed_fingerprints.loaded"
+        );
+        // One-line per-publisher tally so the operator can sanity-
+        // check coverage at startup.
+        let mut tallies: Vec<(String, usize)> =
+            by_pub.iter().map(|(k, v)| (k.clone(), v.len())).collect();
+        tallies.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        for (publisher, count) in tallies.iter().take(20) {
+            tracing::info!(
+                publisher = %publisher,
+                seeds = count,
+                "audiologo_audit.seed_fingerprints.publisher"
+            );
+        }
+        if tallies.len() > 20 {
+            tracing::info!(
+                remaining = tallies.len() - 20,
+                "audiologo_audit.seed_fingerprints.publishers_truncated"
+            );
+        }
+    } else if !args.seed_fingerprints.is_empty() {
+        tracing::warn!(
+            paths = ?args.seed_fingerprints,
+            "audiologo_audit.seed_fingerprints.empty"
+        );
+    }
 
     tracing::info!(corpus = %args.corpus.display(), "audiologo_audit.walk.start");
     let sources = walk::walk_corpus(&args.corpus, args.limit)?;
