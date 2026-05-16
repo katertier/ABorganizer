@@ -31,6 +31,7 @@ pub mod error;
 pub mod library_roots;
 pub mod names;
 pub mod narrators;
+pub mod pagination;
 pub mod pairing;
 pub mod progress;
 pub mod rate_limit;

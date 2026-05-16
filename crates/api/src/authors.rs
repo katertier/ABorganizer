@@ -22,15 +22,8 @@ use axum::{Json, response::Response};
 use serde::{Deserialize, Serialize};
 
 use crate::ApiError;
+use crate::pagination::{clamp_limit, clamp_offset};
 use crate::state::ApiState;
-
-/// Default `limit` when callers omit it. Picked to keep the
-/// most common "browse the authors catalogue" call cheap while
-/// still being one screen of results on a typical UI.
-const DEFAULT_LIMIT: i64 = 50;
-/// Hard ceiling on `limit`. Larger requests get clamped (no 400)
-/// — same posture as the `books_list` endpoint.
-const MAX_LIMIT: i64 = 200;
 
 /// Author detail JSON returned by the GET endpoint.
 #[derive(Debug, Serialize)]
@@ -156,9 +149,10 @@ pub struct AuthorsListResponse {
 /// Query-string params for the authors list endpoint.
 #[derive(Debug, Deserialize, Default)]
 pub struct AuthorsListQuery {
-    /// Page size. Defaults to [`DEFAULT_LIMIT`] (50); clamped to
-    /// [`MAX_LIMIT`] (200) silently — same posture as `books_list`.
-    /// Negative / zero values are clamped to 1.
+    /// Page size. Defaults to [`crate::pagination::DEFAULT_LIMIT`]
+    /// (50); clamped to [`crate::pagination::MAX_LIMIT`] (200)
+    /// silently — same posture as `books_list`. Negative / zero
+    /// values are clamped to 1.
     #[serde(default)]
     pub limit: Option<i64>,
     /// Offset into the result set. Defaults to 0; negatives
@@ -202,26 +196,6 @@ impl AuthorsSort {
                 "unknown sort {other:?}; expected one of name / name_sort / book_count"
             ))),
         }
-    }
-}
-
-/// Clamp `limit` to the `[1, MAX_LIMIT]` range with [`DEFAULT_LIMIT`]
-/// as the fallback for absent / non-positive values.
-const fn clamp_limit(raw: Option<i64>) -> i64 {
-    match raw {
-        None => DEFAULT_LIMIT,
-        Some(n) if n <= 0 => 1,
-        Some(n) if n > MAX_LIMIT => MAX_LIMIT,
-        Some(n) => n,
-    }
-}
-
-/// Clamp `offset` to non-negative. Absent → 0.
-const fn clamp_offset(raw: Option<i64>) -> i64 {
-    match raw {
-        None => 0,
-        Some(n) if n < 0 => 0,
-        Some(n) => n,
     }
 }
 
@@ -434,24 +408,6 @@ mod tests {
         assert!(json["audible_id"].is_null());
         let aliases = json["aliases"].as_array().expect("aliases is array");
         assert!(aliases.is_empty());
-    }
-
-    #[test]
-    fn clamp_limit_respects_bounds() {
-        assert_eq!(clamp_limit(None), DEFAULT_LIMIT);
-        assert_eq!(clamp_limit(Some(0)), 1);
-        assert_eq!(clamp_limit(Some(-5)), 1);
-        assert_eq!(clamp_limit(Some(MAX_LIMIT)), MAX_LIMIT);
-        assert_eq!(clamp_limit(Some(MAX_LIMIT + 100)), MAX_LIMIT);
-        assert_eq!(clamp_limit(Some(75)), 75);
-    }
-
-    #[test]
-    fn clamp_offset_respects_bounds() {
-        assert_eq!(clamp_offset(None), 0);
-        assert_eq!(clamp_offset(Some(-1)), 0);
-        assert_eq!(clamp_offset(Some(0)), 0);
-        assert_eq!(clamp_offset(Some(250)), 250);
     }
 
     #[test]
