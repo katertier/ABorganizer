@@ -589,6 +589,7 @@ dependencies = [
 name = "aborg-daemon"
 version = "0.1.0"
 dependencies = [
+ "ab-aax-decrypt",
  "ab-api",
  "ab-background",
  "ab-catalog",
