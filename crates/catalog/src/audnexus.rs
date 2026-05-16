@@ -119,6 +119,49 @@ impl AudnexusClient {
         Ok(Some(chapters))
     }
 
+    /// Look up an author by ASIN within a single region. Returns
+    /// `None` when the author isn't in Audnexus's index (404).
+    ///
+    /// Used by the future `canonical-author-enrich` stage to
+    /// backfill `authors.bio` + `authors.image_url` after
+    /// `identity-resolve` has consolidated the author rows.
+    ///
+    /// The author bio Audnexus returns may contain HTML markup
+    /// (Goodreads / publisher copy carries `<i>` / `<br>` etc.);
+    /// callers that want plain text should strip tags before
+    /// presenting. The catalog writer keeps the raw HTML in
+    /// `authors.bio` and the player UI sanitises on render.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ab_core::Error::Network`] on transport failures
+    /// or non-success status codes other than 404.
+    pub async fn lookup_author(&self, region: &str, asin: &str) -> Result<Option<AudnexusAuthor>> {
+        let url = format!("https://api.audnex.us/authors/{asin}?region={region}");
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| Error::Network(format!("audnexus author get: {e}")))?;
+
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            return Err(Error::Network(format!(
+                "audnexus author {}: HTTP {}",
+                asin,
+                resp.status()
+            )));
+        }
+        let author = resp
+            .json::<AudnexusAuthor>()
+            .await
+            .map_err(|e| Error::Network(format!("audnexus author parse: {e}")))?;
+        Ok(Some(author))
+    }
+
     /// User agent string in use.
     pub fn user_agent(&self) -> &str {
         &self.user_agent
@@ -261,4 +304,112 @@ pub struct AudnexusChapter {
     pub start_offset_ms: u64,
     #[serde(default)]
     pub title: String,
+}
+
+/// `/authors/{asin}` response.
+///
+/// Audnexus aggregates author metadata from Audible + Goodreads + the
+/// publisher's own copy. The `description` field is the bio text (may
+/// contain HTML markup); `image` is the canonical author headshot
+/// URL. `genres` mirrors the book response shape — top-level genres +
+/// Audible "tags" share the same array with a `type` discriminator.
+///
+/// Optional fields default to `None` / empty so a sparse author row
+/// (newer indie authors with little metadata) round-trips cleanly
+/// through serde.
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)] // scaffold — consumer stage in a follow-up slice
+pub struct AudnexusAuthor {
+    pub asin: String,
+    pub name: String,
+    /// Bio / blurb. May contain HTML markup (Goodreads carries
+    /// `<i>`, `<br>`, embedded links); the catalog writer stores
+    /// the raw string and the player UI sanitises on render.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Canonical headshot URL. Usually a 1:1 portrait on Audible's
+    /// CDN; some indies use a Goodreads / publisher-hosted image.
+    #[serde(default)]
+    pub image: Option<String>,
+    /// Top-level genres + sub-genre tags the author is associated
+    /// with across their bibliography. Same shape as
+    /// `AudnexusBook::genres` so the catalog stage can reuse the
+    /// existing genre-normalisation path.
+    #[serde(default)]
+    pub genres: Vec<AudnexusGenre>,
+    /// Audnexus-region the response was fetched from. Useful when
+    /// the same author has region-specific bios (translated
+    /// editions, regional publisher copy).
+    #[serde(default)]
+    pub region: Option<String>,
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn audnexus_author_parse_full_response() {
+        let raw = r#"{
+            "asin": "B0034NFIOI",
+            "name": "Brandon Sanderson",
+            "description": "<p>Brandon Sanderson grew up in Lincoln, Nebraska.</p>",
+            "image": "https://m.media-amazon.com/images/I/abc.jpg",
+            "genres": [
+                {"name": "Fantasy", "asin": "G1", "type": "Genres"},
+                {"name": "Epic", "asin": "T1", "type": "Tags"}
+            ],
+            "region": "us"
+        }"#;
+        let author: AudnexusAuthor = serde_json::from_str(raw).expect("parse");
+        assert_eq!(author.asin, "B0034NFIOI");
+        assert_eq!(author.name, "Brandon Sanderson");
+        assert!(author.description.as_ref().unwrap().contains("Lincoln"));
+        assert!(author.image.as_ref().unwrap().ends_with("abc.jpg"));
+        assert_eq!(author.genres.len(), 2);
+        assert_eq!(author.genres[0].name, "Fantasy");
+        assert_eq!(author.genres[1].kind.as_deref(), Some("Tags"));
+        assert_eq!(author.region.as_deref(), Some("us"));
+    }
+
+    #[test]
+    fn audnexus_author_parse_sparse_response() {
+        let raw = r#"{"asin": "B099X", "name": "Indie Author"}"#;
+        let author: AudnexusAuthor = serde_json::from_str(raw).expect("parse sparse");
+        assert_eq!(author.asin, "B099X");
+        assert_eq!(author.name, "Indie Author");
+        assert!(author.description.is_none());
+        assert!(author.image.is_none());
+        assert!(author.genres.is_empty());
+        assert!(author.region.is_none());
+    }
+
+    #[test]
+    fn audnexus_author_parse_missing_required_field_errors() {
+        // `name` is required.
+        let raw = r#"{"asin": "B099X"}"#;
+        let result: Result<AudnexusAuthor, _> = serde_json::from_str(raw);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn audnexus_author_parse_html_in_description_preserved() {
+        // We deliberately preserve markup; the player UI sanitises
+        // on render. Regression-guard so a future "clean parser"
+        // refactor doesn't silently strip the HTML and break the
+        // round-trip. Build the JSON via a serde Value so we can
+        // safely embed the HTML without raw-string escaping
+        // quirks (`r#""..."#"` can't carry escaped `\"` inside).
+        let raw = serde_json::json!({
+            "asin": "X",
+            "name": "Y",
+            "description": "<i>Award-winning</i> author of <a href='#'>things</a>."
+        })
+        .to_string();
+        let author: AudnexusAuthor = serde_json::from_str(&raw).expect("parse");
+        let desc = author.description.as_deref().unwrap_or_default();
+        assert!(desc.contains("<i>"));
+        assert!(desc.contains("<a href="));
+    }
 }
