@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT a.author_id AS \"author_id!: i64\",\n                      a.name AS \"name!: String\",\n                      a.name_sort AS \"name_sort?: String\",\n                      a.audible_id AS \"audible_id?: String\",\n                      a.image_url AS \"image_url?: String\",\n                      (SELECT COUNT(*) FROM books WHERE author_id = a.author_id)\n                          AS \"book_count!: i64\"\n                 FROM authors a\n                WHERE ?1 IS NULL OR a.name LIKE ?1 COLLATE NOCASE\n                ORDER BY (SELECT COUNT(*) FROM books WHERE author_id = a.author_id) DESC,\n                         a.name COLLATE NOCASE\n                LIMIT ?2 OFFSET ?3",
+  "describe": {
+    "columns": [
+      {
+        "name": "author_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "name!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "name_sort?: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "audible_id?: String",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "image_url?: String",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "book_count!: i64",
+        "ordinal": 5,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "69ab65013705db0cb56377aea8a8cd7054f2c0a7faf61844d718b86d18fe3954"
+}
