@@ -83,6 +83,7 @@ pub fn build_router(state: ApiState) -> Router {
             "/narrators/{narrator_id}",
             get(crate::narrators::narrators_get),
         )
+        .route("/series/{series_id}", get(crate::series::series_get))
         .route(
             "/books/{book_id}/status",
             axum::routing::patch(crate::progress::books_status_patch),

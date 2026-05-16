@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT alias AS \"alias!: String\"\n             FROM series_aliases\n            WHERE series_id = ?\n            ORDER BY alias_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "alias!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "4f5e0733c4b225d1551c8a8b410eb3dd47df72eef8fdc6bb42e2763649b93b94"
+}
