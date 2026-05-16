@@ -32,7 +32,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use super::seed::SeedDb;
-use super::{AuditEntry, DetectionInfo};
+use super::{AuditEntry, DetectionInfo, SeedMatchSummary};
 
 /// Books per HTML page. Picked to keep per-page DOM count under
 /// what Safari handles smoothly even with inline SVG waveforms
@@ -134,6 +134,17 @@ fn seed_count_for(counts: &HashMap<String, usize>, publisher: Option<&str>) -> u
     counts.get(key).copied().unwrap_or(0)
 }
 
+fn seed_match_to_json(m: &SeedMatchSummary) -> serde_json::Value {
+    serde_json::json!({
+        "publisher": m.publisher,
+        "confidence": m.confidence,
+        "hamming": m.hamming,
+        "needle_hashes": m.needle_hashes,
+        "hash_offset": m.hash_offset,
+        "approx_offset_ms": m.approx_offset_ms,
+    })
+}
+
 fn publisher_sort_key(p: Option<&str>) -> String {
     match p {
         Some(s) if !s.trim().is_empty() => s.to_lowercase(),
@@ -156,6 +167,11 @@ fn book_to_json(e: &AuditEntry, seed_counts: &HashMap<String, usize>) -> serde_j
     let detection = match &e.detection {
         DetectionInfo::Stub => serde_json::json!({"state": "stub"}),
         DetectionInfo::NoCandidate => serde_json::json!({"state": "no_candidate"}),
+        DetectionInfo::SeedMatch { front, end } => serde_json::json!({
+            "state": "seed_match",
+            "front": front.as_ref().map(seed_match_to_json),
+            "end": end.as_ref().map(seed_match_to_json),
+        }),
         DetectionInfo::Detected {
             method_label,
             trigger_summary,
@@ -379,8 +395,8 @@ fn render_book_section(e: &AuditEntry, seed_counts: &HashMap<String, usize>) -> 
     };
     let (method_html, trigger_html, front_cut_disp, end_cut_disp) = match &e.detection {
         DetectionInfo::Stub => (
-            r#"<span class="badge stub">Phase 1 — detection wiring pending</span>"#.to_string(),
-            "<em>Operator rates the clips themselves. Real detection results land in Phase 2 wiring.</em>".to_string(),
+            r#"<span class="badge stub">No seed match</span>"#.to_string(),
+            "<em>No publisher-compatible seed matched. Operator rates the clips; transcript / silence cascade not yet wired.</em>".to_string(),
             "—".to_string(),
             "—".to_string(),
         ),
@@ -391,6 +407,21 @@ fn render_book_section(e: &AuditEntry, seed_counts: &HashMap<String, usize>) -> 
             "—".to_string(),
             "—".to_string(),
         ),
+        DetectionInfo::SeedMatch { front, end } => {
+            let trigger = format_seed_match_trigger(front.as_ref(), end.as_ref());
+            let front_disp = front
+                .as_ref()
+                .map_or_else(|| "—".to_string(), |m| format_ms(Some(m.approx_offset_ms)));
+            let end_disp = end
+                .as_ref()
+                .map_or_else(|| "—".to_string(), |m| format_ms(Some(m.approx_offset_ms)));
+            (
+                r#"<span class="badge seed-match">Seed match</span>"#.to_string(),
+                trigger,
+                front_disp,
+                end_disp,
+            )
+        }
         DetectionInfo::Detected {
             method_label,
             trigger_summary,
@@ -469,6 +500,42 @@ fn render_book_section(e: &AuditEntry, seed_counts: &HashMap<String, usize>) -> 
         front_clip = html_escape(&e.front_clip_rel),
         end_clip = html_escape(&e.end_clip_rel),
     )
+}
+
+/// Build the per-book "Trigger" cell body for a `SeedMatch`.
+/// Surfaces the matched publisher + confidence per side so the
+/// operator sees at a glance which jingle matched (and how
+/// confidently).
+fn format_seed_match_trigger(
+    front: Option<&SeedMatchSummary>,
+    end: Option<&SeedMatchSummary>,
+) -> String {
+    let mut out = String::new();
+    if let Some(f) = front {
+        let _ = write!(
+            out,
+            r#"<div>Front: <strong>{pub}</strong> · confidence {conf:.2} <span class="muted">({hamming}/{needle} hamming)</span></div>"#,
+            pub = html_escape(f.publisher.as_deref().unwrap_or("?")),
+            conf = f.confidence,
+            hamming = f.hamming,
+            needle = f.needle_hashes,
+        );
+    }
+    if let Some(e) = end {
+        let _ = write!(
+            out,
+            r#"<div>End: <strong>{pub}</strong> · confidence {conf:.2} <span class="muted">({hamming}/{needle} hamming)</span></div>"#,
+            pub = html_escape(e.publisher.as_deref().unwrap_or("?")),
+            conf = e.confidence,
+            hamming = e.hamming,
+            needle = e.needle_hashes,
+        );
+    }
+    if out.is_empty() {
+        "<em>(no side matched)</em>".to_owned()
+    } else {
+        out
+    }
 }
 
 fn format_ms(ms: Option<u64>) -> String {
@@ -613,6 +680,7 @@ main {
 .badge.stub { background: #fef3c7; color: #92400e; }
 .badge.none { background: #e0e7ff; color: #3730a3; }
 .badge.detected { background: #dcfce7; color: #166534; }
+.badge.seed-match { background: #ede9fe; color: #5b21b6; }
 .seed-badge {
   display: inline-block;
   margin-left: 8px;

@@ -9,6 +9,7 @@
 //! * [`report`] — HTML emitter + embedded JS rating UI
 
 pub mod clips;
+pub mod match_seed;
 pub mod report;
 pub mod seed;
 pub mod walk;
@@ -52,16 +53,31 @@ pub struct AuditEntry {
 
 /// Per-book detection metadata for the report.
 ///
-/// Phase 1 only emits [`DetectionInfo::Stub`] — Phase 2 wires
-/// the real `DetectAudiologoStage` against an ephemeral DB and
-/// fills in `Detected` with method + trigger + cut offsets.
+/// Phase 1 only emitted [`DetectionInfo::Stub`]. Phase 2C adds
+/// [`DetectionInfo::SeedMatch`] for the cascade's first cut
+/// (known publisher fingerprint hit). Future Phase 2 work wires
+/// the full `DetectAudiologoStage` against an ephemeral DB to
+/// fill in `Detected` with method + trigger + cut offsets when
+/// no seed matches.
 #[derive(Debug, Clone)]
 pub enum DetectionInfo {
     /// Detection pipeline not yet wired into the audit binary.
-    /// Phase 1 placeholder. Operator can still rate the clips
-    /// from start + end of the file — useful for ground-truth
-    /// "is there a jingle at all?" annotations.
+    /// Operator can still rate the clips themselves. Used when
+    /// no `--seed-fingerprints` were provided OR neither the
+    /// front nor end clip matched any seed.
     Stub,
+    /// Cascade's first cut: a known-publisher fingerprint from
+    /// the seed DB matched the clip's chromaprint. The match
+    /// includes confidence + which seed (so the operator can
+    /// cross-reference against the seed's transcript excerpt).
+    /// Front and end are independent — a book may match a known
+    /// intro jingle without matching any outro.
+    SeedMatch {
+        /// Best front-clip match if any seed matched it.
+        front: Option<SeedMatchSummary>,
+        /// Best end-clip match if any seed matched it.
+        end: Option<SeedMatchSummary>,
+    },
     /// Pipeline ran; cut proposed at the given offsets.
     Detected {
         /// Detection method (the `Method` enum variant).
@@ -79,4 +95,46 @@ pub enum DetectionInfo {
     /// Pipeline ran but produced no candidate (clean book; no
     /// detection methods fired above threshold).
     NoCandidate,
+}
+
+/// Display-friendly summary of a seed match. Lifted from
+/// [`match_seed::SeedMatch`] so the report renderer doesn't
+/// depend on that crate's exact field layout.
+#[derive(Debug, Clone)]
+pub struct SeedMatchSummary {
+    /// Publisher tag from the matched seed.
+    pub publisher: Option<String>,
+    /// Confidence ∈ [0.0, 1.0].
+    pub confidence: f32,
+    /// Hamming distance at the best alignment offset.
+    pub hamming: u32,
+    /// Seed's needle length (chromaprint hashes).
+    pub needle_hashes: usize,
+    /// Hash-position offset inside the clip where the alignment
+    /// begins (chromaprint hash unit ≈ 0.124 s).
+    pub hash_offset: usize,
+    /// Approximate offset within the clip in milliseconds
+    /// (`hash_offset * 124`). Useful for human display + the
+    /// future cut-mark insertion UI.
+    pub approx_offset_ms: u64,
+}
+
+impl SeedMatchSummary {
+    /// Build a summary from a [`match_seed::SeedMatch`].
+    ///
+    /// Lives here (not in `match_seed`) to keep the renderer-
+    /// facing API decoupled from the matcher's internal types.
+    #[must_use]
+    pub fn from_match(m: &match_seed::SeedMatch) -> Self {
+        Self {
+            publisher: m.publisher.clone(),
+            confidence: m.confidence,
+            hamming: m.hamming,
+            needle_hashes: m.needle_hashes,
+            hash_offset: m.hash_offset,
+            // chromaprint hash unit ≈ 0.1238 s; 124 ms is close
+            // enough for human display.
+            approx_offset_ms: (m.hash_offset as u64).saturating_mul(124),
+        }
+    }
 }
