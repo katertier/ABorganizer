@@ -50,6 +50,11 @@ pub struct BookSearchHit {
     /// returned an empty snippet (rare; happens when only a
     /// column header matched without surrounding context).
     pub snippet: Option<String>,
+    /// `true` when this row came from the trigram fallback
+    /// (typo recovery via `books_trigram`); `false` for the
+    /// primary `unicode61` path. Clients can render
+    /// fuzzy rows under a "did you mean" header.
+    pub fuzzy: bool,
 }
 
 /// One author/narrator/series result. Same compact shape across
@@ -67,6 +72,10 @@ pub struct EntitySearchHit {
     /// snippet-aware widget. `None` when FTS5 returned an empty
     /// snippet.
     pub snippet: Option<String>,
+    /// `true` when this row came from the trigram fallback;
+    /// `false` for the primary `unicode61` path. See
+    /// [`BookSearchHit::fuzzy`].
+    pub fuzzy: bool,
 }
 
 /// Per-entity result bucket.
@@ -150,6 +159,26 @@ fn build_fts_match(sanitized: &str) -> String {
         .join(" ")
 }
 
+/// Build the FTS5 MATCH expression for a trigram-tokenized index.
+///
+/// The trigram tokenizer treats the query as one phrase and
+/// decomposes it into overlapping 3-grams. Wrapping in double
+/// quotes keeps the whole sanitized query as a single phrase so
+/// `"mistbron"` matches rows whose trigram set overlaps —
+/// `"Mistborn"` shares 5 of 6 trigrams. No prefix-suffix needed;
+/// the trigram tokenizer's nature is fuzzy.
+fn build_trigram_match(sanitized: &str) -> String {
+    format!("\"{sanitized}\"")
+}
+
+/// Minimum query length to bother with the trigram fallback.
+///
+/// Below 4 characters, the operator's input has at most 2 trigrams
+/// (a 3-char query produces 1 trigram; a 4-char query produces 2).
+/// Single-trigram matches are noisy — most rows in any non-trivial
+/// catalog contain `"the"`, `"and"`, etc.
+const TRIGRAM_MIN_LEN: usize = 4;
+
 /// `GET /api/v1/search?q=<text>[&limit=&offset=]`
 ///
 /// Returns `200 OK` with [`SearchResponse`] JSON. Empty query
@@ -159,7 +188,18 @@ fn build_fts_match(sanitized: &str) -> String {
 /// # Errors
 ///
 /// Database access failures surface as [`ApiError::Internal`].
-#[allow(clippy::missing_panics_doc, clippy::too_many_lines)]
+#[allow(
+    clippy::missing_panics_doc,
+    clippy::too_many_lines,
+    // Each entity follows a "fetch primary results; if empty,
+    // fetch fuzzy fallback" pattern that's easier to read as
+    // `let mut hits = primary; if hits.is_empty() { hits =
+    // fuzzy; }` than as a one-shot `let hits = if … { fuzzy }
+    // else { primary };` that hides the fact that the fuzzy
+    // branch only fires conditionally. The nursery lint
+    // suggests the latter; we override.
+    clippy::useless_let_if_seq
+)]
 pub async fn search(
     State(state): State<ApiState>,
     Query(params): Query<SearchQuery>,
@@ -195,6 +235,8 @@ pub async fn search(
 
     let pool = state.inner.library.pool();
     let fts_match = build_fts_match(&query);
+    let trigram_match = build_trigram_match(&query);
+    let trigram_eligible = query.len() >= TRIGRAM_MIN_LEN;
 
     // ── Books via FTS5 ────────────────────────────────────────
     let book_rows = sqlx::query!(
@@ -228,15 +270,68 @@ pub async fn search(
         ApiError::Internal(ab_core::Error::Database(format!("books search count: {e}")))
     })?;
 
-    let book_hits: Vec<BookSearchHit> = book_rows
+    let mut book_hits: Vec<BookSearchHit> = book_rows
         .into_iter()
         .map(|r| BookSearchHit {
             book_id: r.book_id,
             title: r.title,
             subtitle: r.subtitle,
             snippet: r.snippet,
+            fuzzy: false,
         })
         .collect();
+    let mut books_total = books_total;
+
+    // Trigram fallback for typo recovery — only fires when the
+    // primary unicode61 path returned zero hits and the query is
+    // long enough for trigrams to mean something.
+    if book_hits.is_empty() && trigram_eligible {
+        let fuzzy_rows = sqlx::query!(
+            r#"SELECT b.book_id AS "book_id!: i64",
+                      b.title AS "title!: String",
+                      b.subtitle AS "subtitle?: String",
+                      snippet(books_trigram, -1, '[match]', '[/match]', '…', 16)
+                          AS "snippet?: String"
+                 FROM books_trigram
+                 JOIN books b ON b.book_id = books_trigram.rowid
+                WHERE books_trigram MATCH ?1
+                ORDER BY bm25(books_trigram), b.title COLLATE NOCASE
+                LIMIT ?2 OFFSET ?3"#,
+            trigram_match,
+            limit,
+            offset,
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|e| {
+            ApiError::Internal(ab_core::Error::Database(format!(
+                "books trigram search: {e}"
+            )))
+        })?;
+        let fuzzy_total: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "n!: i64"
+                 FROM books_trigram WHERE books_trigram MATCH ?1"#,
+            trigram_match,
+        )
+        .fetch_one(pool)
+        .await
+        .map_err(|e| {
+            ApiError::Internal(ab_core::Error::Database(format!(
+                "books trigram count: {e}"
+            )))
+        })?;
+        book_hits = fuzzy_rows
+            .into_iter()
+            .map(|r| BookSearchHit {
+                book_id: r.book_id,
+                title: r.title,
+                subtitle: r.subtitle,
+                snippet: r.snippet,
+                fuzzy: true,
+            })
+            .collect();
+        books_total = fuzzy_total;
+    }
 
     // ── Authors via FTS5 ──────────────────────────────────────
     let author_rows = sqlx::query!(
@@ -272,15 +367,66 @@ pub async fn search(
         )))
     })?;
 
-    let author_hits: Vec<EntitySearchHit> = author_rows
+    let mut author_hits: Vec<EntitySearchHit> = author_rows
         .into_iter()
         .map(|r| EntitySearchHit {
             id: r.author_id,
             name: r.name,
             book_count: r.book_count,
             snippet: r.snippet,
+            fuzzy: false,
         })
         .collect();
+    let mut authors_total = authors_total;
+
+    if author_hits.is_empty() && trigram_eligible {
+        let fuzzy_rows = sqlx::query!(
+            r#"SELECT a.author_id AS "author_id!: i64",
+                      a.name AS "name!: String",
+                      (SELECT COUNT(*) FROM books WHERE author_id = a.author_id)
+                          AS "book_count!: i64",
+                      snippet(authors_trigram, -1, '[match]', '[/match]', '…', 16)
+                          AS "snippet?: String"
+                 FROM authors_trigram
+                 JOIN authors a ON a.author_id = authors_trigram.rowid
+                WHERE authors_trigram MATCH ?1
+                ORDER BY bm25(authors_trigram), a.name COLLATE NOCASE
+                LIMIT ?2 OFFSET ?3"#,
+            trigram_match,
+            limit,
+            offset,
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|e| {
+            ApiError::Internal(ab_core::Error::Database(format!(
+                "authors trigram search: {e}"
+            )))
+        })?;
+        let fuzzy_total: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "n!: i64"
+                 FROM authors_trigram WHERE authors_trigram MATCH ?1"#,
+            trigram_match,
+        )
+        .fetch_one(pool)
+        .await
+        .map_err(|e| {
+            ApiError::Internal(ab_core::Error::Database(format!(
+                "authors trigram count: {e}"
+            )))
+        })?;
+        author_hits = fuzzy_rows
+            .into_iter()
+            .map(|r| EntitySearchHit {
+                id: r.author_id,
+                name: r.name,
+                book_count: r.book_count,
+                snippet: r.snippet,
+                fuzzy: true,
+            })
+            .collect();
+        authors_total = fuzzy_total;
+    }
 
     // ── Narrators via FTS5 ────────────────────────────────────
     let narrator_rows = sqlx::query!(
@@ -316,15 +462,66 @@ pub async fn search(
         )))
     })?;
 
-    let narrator_hits: Vec<EntitySearchHit> = narrator_rows
+    let mut narrator_hits: Vec<EntitySearchHit> = narrator_rows
         .into_iter()
         .map(|r| EntitySearchHit {
             id: r.narrator_id,
             name: r.name,
             book_count: r.book_count,
             snippet: r.snippet,
+            fuzzy: false,
         })
         .collect();
+    let mut narrators_total = narrators_total;
+
+    if narrator_hits.is_empty() && trigram_eligible {
+        let fuzzy_rows = sqlx::query!(
+            r#"SELECT n.narrator_id AS "narrator_id!: i64",
+                      n.name AS "name!: String",
+                      (SELECT COUNT(*) FROM book_narrator WHERE narrator_id = n.narrator_id)
+                          AS "book_count!: i64",
+                      snippet(narrators_trigram, -1, '[match]', '[/match]', '…', 16)
+                          AS "snippet?: String"
+                 FROM narrators_trigram
+                 JOIN narrators n ON n.narrator_id = narrators_trigram.rowid
+                WHERE narrators_trigram MATCH ?1
+                ORDER BY bm25(narrators_trigram), n.name COLLATE NOCASE
+                LIMIT ?2 OFFSET ?3"#,
+            trigram_match,
+            limit,
+            offset,
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|e| {
+            ApiError::Internal(ab_core::Error::Database(format!(
+                "narrators trigram search: {e}"
+            )))
+        })?;
+        let fuzzy_total: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "n!: i64"
+                 FROM narrators_trigram WHERE narrators_trigram MATCH ?1"#,
+            trigram_match,
+        )
+        .fetch_one(pool)
+        .await
+        .map_err(|e| {
+            ApiError::Internal(ab_core::Error::Database(format!(
+                "narrators trigram count: {e}"
+            )))
+        })?;
+        narrator_hits = fuzzy_rows
+            .into_iter()
+            .map(|r| EntitySearchHit {
+                id: r.narrator_id,
+                name: r.name,
+                book_count: r.book_count,
+                snippet: r.snippet,
+                fuzzy: true,
+            })
+            .collect();
+        narrators_total = fuzzy_total;
+    }
 
     // ── Series via FTS5 ───────────────────────────────────────
     let series_rows = sqlx::query!(
@@ -360,15 +557,66 @@ pub async fn search(
         )))
     })?;
 
-    let series_hits: Vec<EntitySearchHit> = series_rows
+    let mut series_hits: Vec<EntitySearchHit> = series_rows
         .into_iter()
         .map(|r| EntitySearchHit {
             id: r.series_id,
             name: r.name,
             book_count: r.book_count,
             snippet: r.snippet,
+            fuzzy: false,
         })
         .collect();
+    let mut series_total = series_total;
+
+    if series_hits.is_empty() && trigram_eligible {
+        let fuzzy_rows = sqlx::query!(
+            r#"SELECT s.series_id AS "series_id!: i64",
+                      s.name AS "name!: String",
+                      (SELECT COUNT(*) FROM book_series WHERE series_id = s.series_id)
+                          AS "book_count!: i64",
+                      snippet(series_trigram, -1, '[match]', '[/match]', '…', 16)
+                          AS "snippet?: String"
+                 FROM series_trigram
+                 JOIN series s ON s.series_id = series_trigram.rowid
+                WHERE series_trigram MATCH ?1
+                ORDER BY bm25(series_trigram), s.name COLLATE NOCASE
+                LIMIT ?2 OFFSET ?3"#,
+            trigram_match,
+            limit,
+            offset,
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|e| {
+            ApiError::Internal(ab_core::Error::Database(format!(
+                "series trigram search: {e}"
+            )))
+        })?;
+        let fuzzy_total: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "n!: i64"
+                 FROM series_trigram WHERE series_trigram MATCH ?1"#,
+            trigram_match,
+        )
+        .fetch_one(pool)
+        .await
+        .map_err(|e| {
+            ApiError::Internal(ab_core::Error::Database(format!(
+                "series trigram count: {e}"
+            )))
+        })?;
+        series_hits = fuzzy_rows
+            .into_iter()
+            .map(|r| EntitySearchHit {
+                id: r.series_id,
+                name: r.name,
+                book_count: r.book_count,
+                snippet: r.snippet,
+                fuzzy: true,
+            })
+            .collect();
+        series_total = fuzzy_total;
+    }
 
     Ok((
         StatusCode::OK,
@@ -456,6 +704,23 @@ mod tests {
     }
 
     #[test]
+    fn trigram_match_wraps_in_double_quotes_as_one_phrase() {
+        // Trigram tokenizer takes the whole quoted phrase and
+        // decomposes it into 3-grams internally; no per-word
+        // wrapping needed (unlike build_fts_match for unicode61).
+        assert_eq!(build_trigram_match("mistbron"), r#""mistbron""#);
+        assert_eq!(build_trigram_match("hello world"), r#""hello world""#);
+    }
+
+    #[test]
+    fn trigram_min_len_is_four_chars() {
+        // At 3 chars input → 1 trigram (the whole word), noisy.
+        // At 4 chars → 2 trigrams (overlapping), meaningfully
+        // distinguishes "mist" from "best".
+        assert_eq!(TRIGRAM_MIN_LEN, 4);
+    }
+
+    #[test]
     fn search_response_serializes_with_per_entity_buckets() {
         let resp = SearchResponse {
             query: "mistbo".into(),
@@ -465,6 +730,7 @@ mod tests {
                     title: "Mistborn: The Final Empire".into(),
                     subtitle: Some("Mistborn book 1".into()),
                     snippet: Some("[match]Mistbo[/match]rn: The Final Empire".into()),
+                    fuzzy: false,
                 }],
                 total: 7,
             },
@@ -482,6 +748,7 @@ mod tests {
                     name: "Mistborn".into(),
                     book_count: 7,
                     snippet: Some("[match]Mistbo[/match]rn".into()),
+                    fuzzy: false,
                 }],
                 total: 1,
             },
@@ -514,6 +781,7 @@ mod tests {
             name: "Brandon Sanderson".into(),
             book_count: 30,
             snippet: None,
+            fuzzy: false,
         };
         let json = serde_json::to_value(&hit).unwrap();
         assert_eq!(json["id"], 42);
@@ -522,5 +790,30 @@ mod tests {
         // Snippet present even when null — JSON shape stable.
         assert!(json.get("snippet").is_some());
         assert!(json["snippet"].is_null());
+        // Fuzzy flag is present, defaulting to false for primary
+        // unicode61 hits.
+        assert_eq!(json["fuzzy"], false);
+    }
+
+    #[test]
+    fn fuzzy_flag_distinguishes_trigram_hits_in_json() {
+        let exact = BookSearchHit {
+            book_id: 1,
+            title: "Mistborn".into(),
+            subtitle: None,
+            snippet: None,
+            fuzzy: false,
+        };
+        let fuzzy = BookSearchHit {
+            book_id: 2,
+            title: "Mistborn".into(),
+            subtitle: None,
+            snippet: None,
+            fuzzy: true,
+        };
+        let exact_json = serde_json::to_value(&exact).unwrap();
+        let fuzzy_json = serde_json::to_value(&fuzzy).unwrap();
+        assert_eq!(exact_json["fuzzy"], false);
+        assert_eq!(fuzzy_json["fuzzy"], true);
     }
 }

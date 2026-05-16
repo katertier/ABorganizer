@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT b.book_id AS \"book_id!: i64\",\n                      b.title AS \"title!: String\",\n                      b.subtitle AS \"subtitle?: String\",\n                      snippet(books_trigram, -1, '[match]', '[/match]', '…', 16)\n                          AS \"snippet?: String\"\n                 FROM books_trigram\n                 JOIN books b ON b.book_id = books_trigram.rowid\n                WHERE books_trigram MATCH ?1\n                ORDER BY bm25(books_trigram), b.title COLLATE NOCASE\n                LIMIT ?2 OFFSET ?3",
+  "describe": {
+    "columns": [
+      {
+        "name": "book_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "title!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "subtitle?: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "snippet?: String",
+        "ordinal": 3,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "132e69094a7850e1cbd894d2442226a12654fa5f291371bc56492d682157361a"
+}
