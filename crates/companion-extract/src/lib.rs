@@ -8,7 +8,9 @@
 //!
 //! ## Algorithm (ADR-0043 § C.4)
 //!
-//! 1. Strip HTML via [`scraper`] — keep the body's textContent.
+//! 1. Strip HTML via a small hand-rolled state machine — keep the
+//!    body's textContent. EPUB spine documents are well-formed
+//!    XHTML in practice, so we don't need a full parser DOM.
 //! 2. Tokenise via [`unicode_segmentation`] word boundaries.
 //! 3. Track sentence-initial position with a tiny state machine
 //!    over `.` / `!` / `?` / newline punctuation (within ±2
@@ -32,7 +34,6 @@
 
 use std::collections::HashMap;
 
-use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -62,27 +63,164 @@ pub const MIN_FREQUENCY: u32 = 3;
 /// Falls back to the full document's text-content if no `body`
 /// element is found (EPUB spine entries occasionally ship without
 /// the wrapping `body` tag — strict-XHTML they're not).
+///
+/// Implementation is a small state machine. EPUB spine HTML is
+/// well-formed XHTML in practice; we do not try to be a generous
+/// browser-grade parser. Comments and CDATA sections are skipped;
+/// tag interiors are dropped; HTML entities (`&amp;` / `&lt;` /
+/// `&gt;` / `&quot;` / `&apos;` / `&nbsp;` plus numeric `&#NNN;` /
+/// `&#xHH;`) are decoded; other named entities pass through as
+/// raw `&name;` (good enough for the proper-noun frequency floor).
 #[must_use]
 pub fn strip_html(html: &str) -> String {
-    let doc = Html::parse_document(html);
-    // `body *` text is the canonical body content; fall back to
-    // the document root if no body present.
-    if let Ok(sel) = Selector::parse("body") {
-        if let Some(body) = doc.select(&sel).next() {
-            return collect_text(body);
-        }
-    }
-    // Fallback: every text node in the doc.
-    doc.tree
-        .root()
-        .descendants()
-        .filter_map(|n| n.value().as_text().map(|t| (**t).to_string()))
-        .collect::<Vec<_>>()
-        .join(" ")
+    let body_slice = locate_body(html);
+    let target = body_slice.unwrap_or(html);
+    strip_tags_and_decode(target)
 }
 
-fn collect_text(node: scraper::element_ref::ElementRef<'_>) -> String {
-    node.text().collect::<Vec<_>>().join(" ")
+/// Find the substring between `<body...>` and `</body>` (case
+/// insensitive). Returns `None` when no body element is present.
+fn locate_body(html: &str) -> Option<&str> {
+    let lower = html.to_ascii_lowercase();
+    let open_start = lower.find("<body")?;
+    // Skip past the opening tag's `>`.
+    let after_open_tag = html[open_start..].find('>').map(|i| open_start + i + 1)?;
+    let end = lower[after_open_tag..]
+        .find("</body")
+        .map_or(html.len(), |i| after_open_tag + i);
+    Some(&html[after_open_tag..end])
+}
+
+/// Walk the slice once, emitting text outside tags / comments /
+/// CDATA wrappers. Whitespace is collapsed to single spaces so
+/// the downstream tokeniser doesn't see HTML line-wrap artefacts.
+fn strip_tags_and_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    let mut prev_was_space = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'<' {
+            // CDATA: `<![CDATA[ ... ]]>` — keep contents.
+            if bytes[i..].starts_with(b"<![CDATA[") {
+                let start = i + b"<![CDATA[".len();
+                if let Some(rel) = find_subsequence(&bytes[start..], b"]]>") {
+                    let end = start + rel;
+                    push_decoded(&input[start..end], &mut out, &mut prev_was_space);
+                    i = end + b"]]>".len();
+                    continue;
+                }
+                // Unterminated CDATA — eat to end.
+                push_decoded(&input[start..], &mut out, &mut prev_was_space);
+                break;
+            }
+            // Comment: `<!-- ... -->`.
+            if bytes[i..].starts_with(b"<!--") {
+                if let Some(rel) = find_subsequence(&bytes[i + 4..], b"-->") {
+                    i = i + 4 + rel + 3;
+                    continue;
+                }
+                break;
+            }
+            // Regular tag — skip until `>`.
+            match find_subsequence(&bytes[i + 1..], b">") {
+                Some(rel) => {
+                    i = i + 1 + rel + 1;
+                    if !prev_was_space && !out.is_empty() {
+                        out.push(' ');
+                        prev_was_space = true;
+                    }
+                }
+                None => break,
+            }
+            continue;
+        }
+        // Outside any tag — copy chars, decoding entities and
+        // collapsing whitespace.
+        if b == b'&' {
+            let (decoded, advance) = decode_entity(&input[i..]);
+            for ch in decoded.chars() {
+                push_char(ch, &mut out, &mut prev_was_space);
+            }
+            i += advance;
+            continue;
+        }
+        let ch = input[i..].chars().next().unwrap_or('\0');
+        push_char(ch, &mut out, &mut prev_was_space);
+        i += ch.len_utf8();
+    }
+    if out.ends_with(' ') {
+        out.pop();
+    }
+    out
+}
+
+fn push_char(ch: char, out: &mut String, prev_was_space: &mut bool) {
+    if ch.is_whitespace() {
+        if !*prev_was_space && !out.is_empty() {
+            out.push(' ');
+            *prev_was_space = true;
+        }
+    } else {
+        out.push(ch);
+        *prev_was_space = false;
+    }
+}
+
+fn push_decoded(s: &str, out: &mut String, prev_was_space: &mut bool) {
+    for ch in s.chars() {
+        push_char(ch, out, prev_was_space);
+    }
+}
+
+fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    (0..=haystack.len() - needle.len()).find(|&i| &haystack[i..i + needle.len()] == needle)
+}
+
+/// Decode a single HTML entity starting at `s[0] == '&'`. Returns
+/// the decoded text (borrowed where possible) plus the number of
+/// input bytes consumed.
+fn decode_entity(s: &str) -> (std::borrow::Cow<'_, str>, usize) {
+    debug_assert!(s.starts_with('&'));
+    // Bounded scan for `;`. HTML entities are short — a 16-byte
+    // window catches every named + numeric form we care about and
+    // prevents O(n) scans on `&` characters in prose.
+    let scan_end = s.len().min(16);
+    let Some(semi_idx) = s[..scan_end].find(';') else {
+        return (std::borrow::Cow::Borrowed("&"), 1);
+    };
+    let body = &s[1..semi_idx];
+    let consumed = semi_idx + 1;
+    let decoded: std::borrow::Cow<'_, str> = match body {
+        "amp" => std::borrow::Cow::Borrowed("&"),
+        "lt" => std::borrow::Cow::Borrowed("<"),
+        "gt" => std::borrow::Cow::Borrowed(">"),
+        "quot" => std::borrow::Cow::Borrowed("\""),
+        "apos" => std::borrow::Cow::Borrowed("'"),
+        "nbsp" => std::borrow::Cow::Borrowed("\u{00A0}"),
+        _ if body.starts_with('#') => decode_numeric(&body[1..]).map_or_else(
+            // Malformed numeric — pass the literal through.
+            || std::borrow::Cow::Borrowed(&s[..consumed]),
+            std::borrow::Cow::Owned,
+        ),
+        // Unknown named entity — pass through. Rare for EPUB body
+        // text; the frequency floor absorbs the noise.
+        _ => std::borrow::Cow::Borrowed(&s[..consumed]),
+    };
+    (decoded, consumed)
+}
+
+fn decode_numeric(spec: &str) -> Option<String> {
+    let code = if let Some(hex) = spec.strip_prefix(['x', 'X']) {
+        u32::from_str_radix(hex, 16).ok()?
+    } else {
+        spec.parse::<u32>().ok()?
+    };
+    char::from_u32(code).map(|c| c.to_string())
 }
 
 /// Run the full ADR-0043 § C.4 pipeline against a body of text.
@@ -210,6 +348,53 @@ mod tests {
         let text = strip_html(html);
         assert!(text.contains("Hello"));
         assert!(text.contains("world"));
+    }
+
+    #[test]
+    fn strip_html_decodes_common_entities() {
+        let html = r"<body>Caf&eacute; &amp; bar &mdash; Tom&apos;s &quot;place&quot; &#x2014; nice.</body>";
+        let text = strip_html(html);
+        // Numeric entity decoded.
+        assert!(
+            text.contains('\u{2014}'),
+            "expected em-dash from &#x2014; in: {text}"
+        );
+        // XML entities decoded.
+        assert!(text.contains('&'));
+        assert!(text.contains('\''));
+        assert!(text.contains('"'));
+    }
+
+    #[test]
+    fn strip_html_handles_no_body_tag() {
+        // Some EPUB spine entries omit the body wrapper. The
+        // stripper falls back to the entire input.
+        let html = r"<p>Just <em>some</em> prose.</p>";
+        let text = strip_html(html);
+        assert!(text.contains("Just"));
+        assert!(text.contains("some"));
+        assert!(text.contains("prose"));
+    }
+
+    #[test]
+    fn strip_html_handles_comments_and_cdata() {
+        let html = r"<body>Before <!-- hidden --> Middle <![CDATA[ data ]]> After</body>";
+        let text = strip_html(html);
+        assert!(text.contains("Before"));
+        assert!(text.contains("Middle"));
+        assert!(text.contains("After"));
+        assert!(text.contains("data"));
+        assert!(!text.contains("hidden"), "comment text should be stripped");
+    }
+
+    #[test]
+    fn strip_html_body_tag_with_attributes() {
+        let html = r#"<body class="chapter" id="ch01">Inner content here.</body>"#;
+        let text = strip_html(html);
+        assert!(text.contains("Inner"));
+        assert!(text.contains("content"));
+        assert!(!text.contains("chapter"), "body attrs should be stripped");
+        assert!(!text.contains("ch01"));
     }
 
     #[test]
