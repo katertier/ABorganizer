@@ -300,6 +300,11 @@ async fn books_transcript_get_protected() {
 }
 
 #[tokio::test]
+async fn authors_get_protected() {
+    assert_protected("GET", "/authors/1").await;
+}
+
+#[tokio::test]
 async fn books_status_protected() {
     assert_protected("PATCH", "/books/1/status").await;
 }

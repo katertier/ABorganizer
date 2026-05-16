@@ -1,0 +1,68 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT a.author_id AS \"author_id!: i64\",\n                  a.name AS \"name!: String\",\n                  a.name_sort AS \"name_sort?: String\",\n                  a.bio AS \"bio?: String\",\n                  a.image_url AS \"image_url?: String\",\n                  a.audible_id AS \"audible_id?: String\",\n                  a.created_at AS \"created_at!: i64\",\n                  a.updated_at AS \"updated_at!: i64\",\n                  (SELECT COUNT(*) FROM books WHERE author_id = a.author_id)\n                      AS \"book_count!: i64\"\n           FROM authors a\n           WHERE a.author_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "author_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "name!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "name_sort?: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "bio?: String",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "image_url?: String",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "audible_id?: String",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at!: i64",
+        "ordinal": 6,
+        "type_info": "Integer"
+      },
+      {
+        "name": "updated_at!: i64",
+        "ordinal": 7,
+        "type_info": "Integer"
+      },
+      {
+        "name": "book_count!: i64",
+        "ordinal": 8,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "81d96e40d00c15d7c2d2d28edb17da1bc398b9a941cc6b0262f1ccaae755e463"
+}
