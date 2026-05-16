@@ -151,7 +151,7 @@ rusty-chromaprint = "0.3"
 mime_guess     = "2.0"
 nix            = { version = "0.29", features = ["signal", "fs"] }
 regex          = "1.10"
-reqwest        = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+reqwest        = { version = "0.12", default-features = false, features = ["json", "native-tls", "stream"] }
 ring           = "0.17"
 # Read-only XML DOM. Used by `ab-companion-extract`'s EPUB spine
 # walk (ADR-0043 § C.4b) for `META-INF/container.xml` rootfile
