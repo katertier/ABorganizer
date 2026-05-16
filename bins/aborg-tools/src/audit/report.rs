@@ -24,13 +24,14 @@
     clippy::missing_const_for_fn
 )]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 
+use super::seed::SeedDb;
 use super::{AuditEntry, DetectionInfo};
 
 /// Books per HTML page. Picked to keep per-page DOM count under
@@ -50,7 +51,12 @@ const NO_PUBLISHER_DISPLAY: &str = "(no publisher)";
 /// # Errors
 ///
 /// I/O errors creating the output files surface as anyhow.
-pub fn write_report(out_dir: &Path, corpus_path: &Path, entries: &[AuditEntry]) -> Result<()> {
+pub fn write_report(
+    out_dir: &Path,
+    corpus_path: &Path,
+    entries: &[AuditEntry],
+    seeds: &SeedDb,
+) -> Result<()> {
     fs::create_dir_all(out_dir).with_context(|| format!("create {}", out_dir.display()))?;
 
     // Sort: publisher ASC (no-publisher bucket last), then title ASC.
@@ -63,6 +69,8 @@ pub fn write_report(out_dir: &Path, corpus_path: &Path, entries: &[AuditEntry]) 
 
     let total_books = sorted.len();
     let total_pages = total_books.div_ceil(PAGE_SIZE).max(1);
+
+    let seed_counts = seed_publisher_counts(seeds);
 
     // toc_rows[page_idx] = Vec<(publisher_display, &AuditEntry)>
     // We also build a global TOC view grouped by publisher → pages.
@@ -77,12 +85,18 @@ pub fn write_report(out_dir: &Path, corpus_path: &Path, entries: &[AuditEntry]) 
     for (idx, page_entries) in pages.iter().enumerate() {
         let page_num = idx + 1;
         let page_name = page_filename(page_num);
-        let html = render_page(corpus_path, page_entries, page_num, total_pages);
+        let html = render_page(
+            corpus_path,
+            page_entries,
+            page_num,
+            total_pages,
+            &seed_counts,
+        );
         let page_path = out_dir.join(&page_name);
         fs::write(&page_path, html).with_context(|| format!("write {}", page_path.display()))?;
     }
 
-    let toc_html = render_toc(corpus_path, &pages, total_books);
+    let toc_html = render_toc(corpus_path, &pages, total_books, &seed_counts);
     let toc_path = out_dir.join("index.html");
     fs::write(&toc_path, toc_html).with_context(|| format!("write {}", toc_path.display()))?;
 
@@ -92,13 +106,32 @@ pub fn write_report(out_dir: &Path, corpus_path: &Path, entries: &[AuditEntry]) 
         "total_books": total_books,
         "total_pages": total_pages,
         "page_size": PAGE_SIZE,
-        "books": sorted.iter().map(|e| book_to_json(e)).collect::<Vec<_>>(),
+        "seed_publishers": seeds.group_by_publisher().len(),
+        "seed_fingerprints": seeds.len(),
+        "books": sorted.iter().map(|e| book_to_json(e, &seed_counts)).collect::<Vec<_>>(),
     });
     let data_path = out_dir.join("data.json");
     fs::write(&data_path, serde_json::to_string_pretty(&data)?)
         .with_context(|| format!("write {}", data_path.display()))?;
 
     Ok(())
+}
+
+/// `publisher_display_string -> count`. Lookup helper for the
+/// per-book + TOC seed-coverage badge. Reads via
+/// [`publisher_display`] so the "(no publisher)" sentinel
+/// matches what the report renders.
+fn seed_publisher_counts(seeds: &SeedDb) -> HashMap<String, usize> {
+    seeds
+        .group_by_publisher()
+        .into_iter()
+        .map(|(k, v)| (k, v.len()))
+        .collect()
+}
+
+fn seed_count_for(counts: &HashMap<String, usize>, publisher: Option<&str>) -> usize {
+    let key = publisher_display(publisher);
+    counts.get(key).copied().unwrap_or(0)
 }
 
 fn publisher_sort_key(p: Option<&str>) -> String {
@@ -119,7 +152,7 @@ fn page_filename(page_num: usize) -> String {
     format!("page-{page_num:02}.html")
 }
 
-fn book_to_json(e: &AuditEntry) -> serde_json::Value {
+fn book_to_json(e: &AuditEntry, seed_counts: &HashMap<String, usize>) -> serde_json::Value {
     let detection = match &e.detection {
         DetectionInfo::Stub => serde_json::json!({"state": "stub"}),
         DetectionInfo::NoCandidate => serde_json::json!({"state": "no_candidate"}),
@@ -142,6 +175,7 @@ fn book_to_json(e: &AuditEntry) -> serde_json::Value {
         "source_path": e.source_path.display().to_string(),
         "duration_ms": e.duration_ms,
         "publisher": e.publisher,
+        "publisher_seed_count": seed_count_for(seed_counts, e.publisher.as_deref()),
         "copyright": e.copyright,
         "detection": detection,
         "front_clip": e.front_clip_rel,
@@ -149,7 +183,12 @@ fn book_to_json(e: &AuditEntry) -> serde_json::Value {
     })
 }
 
-fn render_toc(corpus_path: &Path, pages: &[Vec<&AuditEntry>], total_books: usize) -> String {
+fn render_toc(
+    corpus_path: &Path,
+    pages: &[Vec<&AuditEntry>],
+    total_books: usize,
+    seed_counts: &HashMap<String, usize>,
+) -> String {
     // Group every book by publisher → list of (page_num, &AuditEntry).
     let mut by_publisher: BTreeMap<String, Vec<(usize, &AuditEntry)>> = BTreeMap::new();
     for (page_idx, page_entries) in pages.iter().enumerate() {
@@ -164,10 +203,19 @@ fn render_toc(corpus_path: &Path, pages: &[Vec<&AuditEntry>], total_books: usize
     for items in by_publisher.values() {
         let pub_display = publisher_display(items[0].1.publisher.as_deref());
         let label = if items.len() == 1 { "book" } else { "books" };
+        let seeds = seed_count_for(seed_counts, items[0].1.publisher.as_deref());
+        let seed_badge = if seeds > 0 {
+            format!(
+                r#" <span class="seed-badge" title="known fingerprint seeds for this publisher">{seeds} seed{plural}</span>"#,
+                plural = if seeds == 1 { "" } else { "s" },
+            )
+        } else {
+            String::new()
+        };
         let _ = write!(
             groups_html,
             r#"<section class="pub-group">
-  <h2>{pub} <span class="count">({count} {label})</span></h2>
+  <h2>{pub} <span class="count">({count} {label})</span>{seed_badge}</h2>
   <ul class="book-list">
 "#,
             pub = html_escape(pub_display),
@@ -185,7 +233,41 @@ fn render_toc(corpus_path: &Path, pages: &[Vec<&AuditEntry>], total_books: usize
         groups_html.push_str("  </ul>\n</section>\n");
     }
 
+    // "Seed coverage" addendum: publishers we have seed fingerprints
+    // for whose audiobooks AREN'T in this corpus — useful for the
+    // operator to spot library gaps + over-broad seed sources.
+    let corpus_publishers: std::collections::HashSet<String> = by_publisher
+        .values()
+        .map(|v| publisher_display(v[0].1.publisher.as_deref()).to_owned())
+        .collect();
+    let mut orphan_seeds: Vec<(&String, &usize)> = seed_counts
+        .iter()
+        .filter(|(k, _)| !corpus_publishers.contains(*k))
+        .collect();
+    orphan_seeds.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    let orphan_seeds_html = if orphan_seeds.is_empty() {
+        String::new()
+    } else {
+        let mut s =
+            r#"<section class="pub-group orphans">
+  <h2>Seeds without books in corpus <span class="count">(seed publishers absent from this corpus)</span></h2>
+  <ul class="book-list">
+"#
+            .to_owned();
+        for (publisher, count) in orphan_seeds {
+            let _ = writeln!(
+                s,
+                r#"    <li>{publisher} <span class="muted">{count} seed{plural}</span></li>"#,
+                publisher = html_escape(publisher),
+                plural = if *count == 1 { "" } else { "s" },
+            );
+        }
+        s.push_str("  </ul>\n</section>\n");
+        s
+    };
+
     let total_pages = pages.len();
+    let total_seeds: usize = seed_counts.values().sum();
     let head = include_toc_head();
     format!(
         r#"<!DOCTYPE html>
@@ -200,15 +282,17 @@ fn render_toc(corpus_path: &Path, pages: &[Vec<&AuditEntry>], total_books: usize
   <div class="meta">
     <span>Corpus: <code>{corpus}</code></span>
     <span>{total_books} books · {total_pages} pages · {page_size}/page</span>
+    <span>{seed_pubs} seed publishers · {total_seeds} fingerprints</span>
   </div>
 </header>
 <main class="toc">
-{groups_html}
+{groups_html}{orphan_seeds_html}
 </main>
 </body>
 </html>"#,
         corpus = html_escape(&corpus_path.display().to_string()),
         page_size = PAGE_SIZE,
+        seed_pubs = seed_counts.len(),
     )
 }
 
@@ -217,10 +301,11 @@ fn render_page(
     entries: &[&AuditEntry],
     page_num: usize,
     total_pages: usize,
+    seed_counts: &HashMap<String, usize>,
 ) -> String {
     let mut sections = String::new();
     for e in entries {
-        sections.push_str(&render_book_section(e));
+        sections.push_str(&render_book_section(e, seed_counts));
     }
 
     let head = include_head();
@@ -282,7 +367,16 @@ fn render_page(
     )
 }
 
-fn render_book_section(e: &AuditEntry) -> String {
+fn render_book_section(e: &AuditEntry, seed_counts: &HashMap<String, usize>) -> String {
+    let pub_seeds = seed_count_for(seed_counts, e.publisher.as_deref());
+    let publisher_seed_chip = if pub_seeds > 0 {
+        format!(
+            r#" <span class="seed-badge">{pub_seeds} known seed{plural}</span>"#,
+            plural = if pub_seeds == 1 { "" } else { "s" },
+        )
+    } else {
+        String::new()
+    };
     let (method_html, trigger_html, front_cut_disp, end_cut_disp) = match &e.detection {
         DetectionInfo::Stub => (
             r#"<span class="badge stub">Phase 1 — detection wiring pending</span>"#.to_string(),
@@ -334,7 +428,7 @@ fn render_book_section(e: &AuditEntry) -> String {
   <div class="row">
     <div class="cell">
       <div class="label">Publisher</div>
-      <div>{publisher}</div>
+      <div>{publisher}{publisher_seed_chip}</div>
     </div>
     <div class="cell">
       <div class="label">Copyright</div>
@@ -519,6 +613,16 @@ main {
 .badge.stub { background: #fef3c7; color: #92400e; }
 .badge.none { background: #e0e7ff; color: #3730a3; }
 .badge.detected { background: #dcfce7; color: #166534; }
+.seed-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 0.75rem;
+  font-family: monospace;
+  background: #ddd6fe;
+  color: #5b21b6;
+}
 .cuts { display: flex; gap: 18px; margin: 18px 0 14px; flex-wrap: wrap; }
 .cut-half { flex: 1; min-width: 360px; }
 .cut-half h3 { font-size: 0.9rem; font-weight: 600; margin: 0 0 8px; }
@@ -639,6 +743,21 @@ main.toc {
 }
 .book-list a:hover { color: var(--accent); }
 .muted { color: var(--muted); font-size: 0.8rem; font-variant-numeric: tabular-nums; }
+.seed-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 0.75rem;
+  font-family: monospace;
+  background: #ddd6fe;
+  color: #5b21b6;
+  font-weight: normal;
+}
+.pub-group.orphans {
+  background: transparent;
+  border: 1px dashed var(--muted);
+}
 </style>"##
 }
 
@@ -835,7 +954,8 @@ mod tests {
             })
             .collect();
 
-        write_report(tmp.path(), Path::new("/corpus"), &entries).expect("write report");
+        write_report(tmp.path(), Path::new("/corpus"), &entries, &SeedDb::empty())
+            .expect("write report");
 
         assert!(tmp.path().join("index.html").exists(), "index.html written");
         assert!(tmp.path().join("page-01.html").exists());
@@ -868,7 +988,7 @@ mod tests {
     #[test]
     fn write_report_empty_corpus_still_writes_one_page() {
         let tmp = tempfile::TempDir::new().expect("tmp");
-        write_report(tmp.path(), Path::new("/corpus"), &[]).expect("write");
+        write_report(tmp.path(), Path::new("/corpus"), &[], &SeedDb::empty()).expect("write");
         assert!(tmp.path().join("index.html").exists());
         assert!(tmp.path().join("page-01.html").exists());
     }
@@ -879,8 +999,80 @@ mod tests {
         let entries: Vec<AuditEntry> = (0..10)
             .map(|i| stub_entry(&format!("b{i}"), &format!("B {i}"), Some("Pub")))
             .collect();
-        write_report(tmp.path(), Path::new("/c"), &entries).expect("write");
+        write_report(tmp.path(), Path::new("/c"), &entries, &SeedDb::empty()).expect("write");
         assert!(tmp.path().join("page-01.html").exists());
         assert!(!tmp.path().join("page-02.html").exists());
+    }
+
+    fn write_seed_fixture(dir: &Path, name: &str, body: &str) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn seed_badge_renders_when_publisher_has_seeds() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let seed_path = write_seed_fixture(
+            tmp.path(),
+            "seed.json",
+            r#"[
+              {"publisher":"Audible Studios","intro_fingerprint_b64":"FP-A"},
+              {"publisher":"Audible Studios","outro_fingerprint_b64":"FP-A-OUT"},
+              {"publisher":"Brilliance Audio","intro_fingerprint_b64":"FP-B"}
+            ]"#,
+        );
+        let seeds = SeedDb::load(&[seed_path]).expect("seeds");
+        let entries = vec![
+            stub_entry("a", "Audible Book", Some("Audible Studios")),
+            stub_entry("b", "Brilliance Book", Some("Brilliance Audio")),
+            stub_entry("c", "Unknown", Some("Tiny Press")),
+        ];
+
+        let out = tmp.path().join("report");
+        write_report(&out, Path::new("/corpus"), &entries, &seeds).expect("write");
+
+        let toc = fs::read_to_string(out.join("index.html")).unwrap();
+        // Two seeds for Audible Studios -> "2 seeds"
+        assert!(toc.contains("2 seeds"), "audible seed badge: {toc:#?}");
+        // One seed for Brilliance Audio -> "1 seed" (singular)
+        assert!(toc.contains("1 seed"), "brilliance singular: {toc:#?}");
+        // Tiny Press has no seeds → no badge
+        assert!(
+            !toc.contains("Tiny Press</h2>")
+                || !toc.contains("Tiny Press <span class=\"seed-badge\"")
+        );
+
+        let page1 = fs::read_to_string(out.join("page-01.html")).unwrap();
+        // Per-book chip on the publisher cell
+        assert!(page1.contains("2 known seeds"), "per-book chip: {page1:#?}");
+    }
+
+    #[test]
+    fn orphan_seeds_section_lists_publishers_without_books() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let seed_path = write_seed_fixture(
+            tmp.path(),
+            "seed.json",
+            r#"[
+              {"publisher":"OnlyInSeed","intro_fingerprint_b64":"FP-X"},
+              {"publisher":"Audible Studios","intro_fingerprint_b64":"FP-A"}
+            ]"#,
+        );
+        let seeds = SeedDb::load(&[seed_path]).expect("seeds");
+        let entries = vec![stub_entry("a", "Book", Some("Audible Studios"))];
+
+        let out = tmp.path().join("report");
+        write_report(&out, Path::new("/corpus"), &entries, &seeds).expect("write");
+        let toc = fs::read_to_string(out.join("index.html")).unwrap();
+        assert!(toc.contains("Seeds without books in corpus"));
+        assert!(toc.contains("OnlyInSeed"));
+        // Audible Studios is in the corpus -> NOT in orphan list
+        // (single occurrence: the main group section).
+        let count = toc.matches("Audible Studios").count();
+        assert_eq!(
+            count, 1,
+            "audible should appear once (corpus group): {toc:#?}"
+        );
     }
 }
