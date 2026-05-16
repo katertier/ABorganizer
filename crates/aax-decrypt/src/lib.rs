@@ -35,6 +35,10 @@
 //! Activation-bytes storage — the daemon's own memory, environment,
 //! and config files already carry the same observability surface.
 
+pub mod stage;
+
+pub use stage::{AaxDecryptStage, STAGE_ID, STAGE_NAME};
+
 use std::path::Path;
 use std::process::{Command, Stdio};
 
