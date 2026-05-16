@@ -154,7 +154,7 @@ fn main() -> Result<()> {
         }
     }
 
-    report::write_report(&args.out, &args.corpus, &entries)?;
+    report::write_report(&args.out, &args.corpus, &entries, &seeds)?;
     tracing::info!(
         out = %args.out.display(),
         count = entries.len(),
