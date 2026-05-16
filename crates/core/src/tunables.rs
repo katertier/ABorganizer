@@ -89,6 +89,12 @@ pub struct Tunables {
     /// Loudness measurement + optional ReplayGain-style gain
     /// on transcode (ADR-0041).
     pub loudness: LoudnessTunables,
+
+    /// Audio-pipeline knobs the operator may want to tune from
+    /// `~/.config/aborg/config.toml`. Currently houses the
+    /// AAX activation-bytes resolver's config-file leg (ADR-0053
+    /// § Activation-bytes storage path 2).
+    pub audio: AudioTunables,
 }
 
 impl Default for Tunables {
@@ -114,8 +120,26 @@ impl Default for Tunables {
             security: SecurityTunables::default(),
             background: BackgroundTunables::default(),
             loudness: LoudnessTunables::default(),
+            audio: AudioTunables::default(),
         }
     }
+}
+
+/// Audio-pipeline knobs (ADR-0053). Currently a one-field
+/// section for the AAX activation-bytes resolver's config-file
+/// leg; more knobs may land here as future audio stages need
+/// operator-tunable values.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AudioTunables {
+    /// 32-bit AAX activation key as an 8-char lowercase hex
+    /// string. When set, the AAX-decrypt stage uses these bytes
+    /// rather than reading the macOS Keychain. Never logged.
+    /// Redacted in `aborg doctor` output. NOT in
+    /// `.config-defaults.toml` — operator-private credential
+    /// material, stays in the operator-local
+    /// `~/.config/aborg/config.toml`.
+    pub aax_activation_bytes: Option<String>,
 }
 
 /// Loudness measurement + optional transcode gain (ADR-0041).
