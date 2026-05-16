@@ -7,8 +7,13 @@ name = "ab-aax-decrypt"
 version = "0.1.0"
 dependencies = [
  "ab-core",
+ "ab-db",
+ "ab-pipeline",
+ "async-trait",
+ "sqlx",
  "tempfile",
  "thiserror",
+ "tokio",
  "tracing",
 ]
 

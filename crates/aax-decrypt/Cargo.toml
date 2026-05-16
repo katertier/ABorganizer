@@ -12,12 +12,14 @@ description  = "Audible AAX → m4b lossless container swap via ffmpeg shell-out
 workspace = true
 
 [dependencies]
-ab-core    = { workspace = true }
-# Resolve activation bytes from env / config / Keychain.
-# (`ab-core` re-exports the type; declared explicitly here to
-# make the dep edge obvious at code-review time.)
-thiserror  = { workspace = true }
-tracing    = { workspace = true }
+ab-core     = { workspace = true }
+ab-db       = { workspace = true }
+ab-pipeline = { workspace = true }
+async-trait = { workspace = true }
+sqlx        = { workspace = true }
+thiserror   = { workspace = true }
+tokio       = { workspace = true, features = ["fs", "macros", "rt-multi-thread"] }
+tracing     = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
