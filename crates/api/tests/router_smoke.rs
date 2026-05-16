@@ -295,6 +295,11 @@ async fn books_playlist_m3u8_protected() {
 }
 
 #[tokio::test]
+async fn books_transcript_get_protected() {
+    assert_protected("GET", "/books/1/transcript.txt").await;
+}
+
+#[tokio::test]
 async fn books_status_protected() {
     assert_protected("PATCH", "/books/1/status").await;
 }
