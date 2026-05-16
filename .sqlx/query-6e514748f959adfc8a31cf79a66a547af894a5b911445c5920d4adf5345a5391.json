@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT s.series_id AS \"series_id!: i64\",\n                      s.name AS \"name!: String\",\n                      (SELECT COUNT(*) FROM book_series WHERE series_id = s.series_id)\n                          AS \"book_count!: i64\",\n                      snippet(series_trigram, -1, '[match]', '[/match]', '…', 16)\n                          AS \"snippet?: String\"\n                 FROM series_trigram\n                 JOIN series s ON s.series_id = series_trigram.rowid\n                WHERE series_trigram MATCH ?1\n                ORDER BY bm25(series_trigram), s.name COLLATE NOCASE\n                LIMIT ?2 OFFSET ?3",
+  "describe": {
+    "columns": [
+      {
+        "name": "series_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "name!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "book_count!: i64",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "snippet?: String",
+        "ordinal": 3,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "6e514748f959adfc8a31cf79a66a547af894a5b911445c5920d4adf5345a5391"
+}

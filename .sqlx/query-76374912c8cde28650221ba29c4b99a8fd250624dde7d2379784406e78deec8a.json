@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT a.author_id AS \"author_id!: i64\",\n                      a.name AS \"name!: String\",\n                      (SELECT COUNT(*) FROM books WHERE author_id = a.author_id)\n                          AS \"book_count!: i64\",\n                      snippet(authors_trigram, -1, '[match]', '[/match]', '…', 16)\n                          AS \"snippet?: String\"\n                 FROM authors_trigram\n                 JOIN authors a ON a.author_id = authors_trigram.rowid\n                WHERE authors_trigram MATCH ?1\n                ORDER BY bm25(authors_trigram), a.name COLLATE NOCASE\n                LIMIT ?2 OFFSET ?3",
+  "describe": {
+    "columns": [
+      {
+        "name": "author_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "name!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "book_count!: i64",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "snippet?: String",
+        "ordinal": 3,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "76374912c8cde28650221ba29c4b99a8fd250624dde7d2379784406e78deec8a"
+}
