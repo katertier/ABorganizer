@@ -147,6 +147,20 @@ enum AaxAction {
         /// Path to the `.aax` or `.aaxc` file.
         path: PathBuf,
     },
+    /// Store the operator's AAX activation bytes in the macOS
+    /// Keychain (ADR-0053 path 3). Interactive prompt with
+    /// hidden input — the value is never echoed, never logged,
+    /// never written to a config file. The stored form is the
+    /// lowercase 8-char hex string. To check whether bytes are
+    /// configured (without revealing them), run `aborg doctor
+    /// aax`.
+    SetBytes,
+    /// Remove the activation-bytes Keychain entry. Idempotent:
+    /// no-op when nothing is stored. The env-var
+    /// `ABORG_AAX_ACTIVATION_BYTES` and
+    /// `Tunables.audio.aax_activation_bytes` paths are
+    /// untouched — the operator manages those directly.
+    ForgetBytes,
 }
 
 #[derive(Debug, Subcommand)]
@@ -475,6 +489,10 @@ enum DoctorAction {
         #[arg(long, conflicts_with = "language")]
         all: bool,
     },
+    /// Report whether AAX activation bytes are configured
+    /// (env, config.toml, or Keychain). Never reveals the
+    /// stored value — only the source tag.
+    Aax,
 }
 
 #[derive(Debug, Subcommand)]
@@ -568,6 +586,7 @@ async fn main() -> Result<()> {
             Some(DoctorAction::Install { language, all }) => {
                 doctor_speech_install(&cli.daemon, language, all, cli.output).await?;
             }
+            Some(DoctorAction::Aax) => doctor_aax(cli.output)?,
         },
         Command::Audiologos { action } => match action {
             AudiologoAction::Cut {
@@ -658,6 +677,8 @@ async fn main() -> Result<()> {
         Command::Health => health(&cli.daemon, cli.output).await?,
         Command::Aax { action } => match action {
             AaxAction::Info { path } => aax_info(&path, cli.output)?,
+            AaxAction::SetBytes => aax_set_bytes(cli.output)?,
+            AaxAction::ForgetBytes => aax_forget_bytes(cli.output)?,
         },
     }
     Ok(())
@@ -725,6 +746,85 @@ fn print_field(label: &str, value: Option<&str>) {
     if let Some(v) = value {
         println!("{label:<14} {v}");
     }
+}
+
+// ── AAX activation-bytes CLI ─────────────────────────────────────────
+
+fn aax_set_bytes(output: OutputFormat) -> Result<()> {
+    let raw = rpassword::prompt_password("AAX activation bytes (8 hex chars, input hidden): ")
+        .context("read activation-bytes prompt")?;
+    let bytes = ab_core::aax_activation_bytes::ActivationBytes::parse(&raw)
+        .map_err(|e| anyhow::anyhow!("invalid activation bytes: {e}"))?;
+    ab_core::aax_activation_bytes::keychain::set(&bytes)
+        .context("store activation bytes in keychain")?;
+    match output {
+        OutputFormat::Json => {
+            let payload = serde_json::json!({"stored": true, "source": "keychain"});
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&payload).unwrap_or_default()
+            );
+        }
+        OutputFormat::Human => {
+            println!("✓ stored in keychain");
+            println!("   run `aborg doctor aax` to verify.");
+        }
+    }
+    Ok(())
+}
+
+fn aax_forget_bytes(output: OutputFormat) -> Result<()> {
+    ab_core::aax_activation_bytes::keychain::forget()
+        .context("remove activation bytes from keychain")?;
+    match output {
+        OutputFormat::Json => {
+            let payload = serde_json::json!({"removed": true});
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&payload).unwrap_or_default()
+            );
+        }
+        OutputFormat::Human => {
+            println!("✓ keychain entry removed (idempotent — no error if absent).");
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn doctor_aax(output: OutputFormat) -> Result<()> {
+    let tunables = ab_core::tunables::Tunables::default();
+    let resolved = ab_core::aax_activation_bytes::resolve(&tunables.audio);
+    match output {
+        OutputFormat::Json => {
+            let payload = match &resolved {
+                Some((_, source)) => serde_json::json!({
+                    "configured": true,
+                    "source": source,
+                }),
+                None => serde_json::json!({
+                    "configured": false,
+                    "source": serde_json::Value::Null,
+                }),
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&payload).unwrap_or_default()
+            );
+        }
+        OutputFormat::Human => {
+            println!("audiobook AAX decrypt:");
+            match resolved {
+                Some((_, source)) => {
+                    println!("  activation bytes  ✓ configured (via {})", source.tag());
+                }
+                None => {
+                    println!("  activation bytes  ✗ not configured  (see `aborg aax set-bytes`)");
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 // ── HTTP helpers ─────────────────────────────────────────────────────
