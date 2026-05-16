@@ -10,6 +10,7 @@
 
 pub mod clips;
 pub mod report;
+pub mod seed;
 pub mod walk;
 pub mod waveform;
 
