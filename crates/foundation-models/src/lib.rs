@@ -451,7 +451,7 @@ pub async fn complete_structured_typed<T: serde::de::DeserializeOwned>(
 pub fn complete_stream(
     prompt: &str,
     options: &GenerationOptions,
-) -> impl futures::Stream<Item = Result<String, BridgeError>> + Send + 'static + use<> {
+) -> impl futures_util::Stream<Item = Result<String, BridgeError>> + Send + 'static + use<> {
     #[cfg(aborg_fm_bridge)]
     {
         ffi::complete_stream_impl(prompt, options)
@@ -464,7 +464,7 @@ pub fn complete_stream(
         // no swiftc, framework missing); we still need to
         // produce a stream of the same shape as the bridge
         // impl returns.
-        use futures::stream::{self, StreamExt as _};
+        use futures_util::stream::{self, StreamExt as _};
         let _ = (prompt, options);
         // One-shot error stream: yield Err(BridgeUnavailable), end.
         stream::once(async move { Err(BridgeError::BridgeUnavailable) }).boxed()
@@ -831,9 +831,10 @@ mod ffi {
     pub(super) fn complete_stream_impl(
         prompt: &str,
         options: &super::GenerationOptions,
-    ) -> std::pin::Pin<Box<dyn futures::Stream<Item = Result<String, BridgeError>> + Send + 'static>>
-    {
-        use futures::stream::{self, StreamExt as _};
+    ) -> std::pin::Pin<
+        Box<dyn futures_util::Stream<Item = Result<String, BridgeError>> + Send + 'static>,
+    > {
+        use futures_util::stream::{self, StreamExt as _};
         use tokio_stream::wrappers::UnboundedReceiverStream;
 
         // Convert prompt to CString up-front so the early-return
@@ -993,7 +994,7 @@ mod tests {
     /// error — same contract shape as `complete()`'s smoke test.
     #[tokio::test]
     async fn complete_stream_returns_typed_error_when_unavailable() {
-        use futures::StreamExt as _;
+        use futures_util::StreamExt as _;
         let stream = complete_stream("Say hi.", &GenerationOptions::new(32));
         tokio::pin!(stream);
         let mut had_chunk = false;

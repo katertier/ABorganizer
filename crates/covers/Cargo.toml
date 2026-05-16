@@ -12,9 +12,9 @@ description  = "Cover-art handling: HTTP fetch, decode-checked guard, multi-size
 workspace = true
 
 [dependencies]
-ab-core   = { workspace = true }
-futures   = { workspace = true }
-image     = { workspace = true }
+ab-core      = { workspace = true }
+futures-util = { workspace = true }
+image        = { workspace = true }
 reqwest   = { workspace = true }
 thiserror = { workspace = true }
 tracing   = { workspace = true }
