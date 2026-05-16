@@ -188,6 +188,11 @@ safe_unzip     = "0.1"
 # key. Pulls in Security.framework at link time; macOS-only,
 # matches the workspace target. MIT OR Apache-2.0.
 security-framework = "3.7"
+# Hidden-input prompt for interactive secret entry. Used by
+# `aborg aax set-bytes` (ADR-0053 S10.3) — never echoes the
+# typed bytes, never writes them to a logfile. Tiny dep, no
+# transitive surprises. MIT.
+rpassword      = "7.5"
 # Filesystem sandbox for trust-zone-validated path handling
 # (ADR-0049). Restricts paths to a root directory; blocks
 # traversal, symlink escapes, absolute injection, null bytes.
