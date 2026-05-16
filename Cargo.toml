@@ -107,11 +107,6 @@ tokio-stream   = "0.1"
 # Other formats (gif / tiff / bmp / heif) fall through; the
 # probe step rejects them with a typed error before decode.
 image          = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
-# Pure-Rust HTML parsing + CSS-selector query. Used by C.4
-# (`ab-companion-extract`) to strip HTML from EPUB spine
-# documents before tokenisation. Default features only —
-# we don't need the optional `deterministic` knob.
-scraper        = "0.27"
 # Unicode-aware word segmentation. Used by C.4 to tokenize
 # EPUB body text the way humans do (handles non-ASCII
 # punctuation, joining hyphens, etc. better than `split_whitespace`).

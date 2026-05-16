@@ -6,7 +6,7 @@ rust-version = { workspace = true }
 license      = { workspace = true }
 authors      = { workspace = true }
 repository   = { workspace = true }
-description  = "Pure-function name-dictionary extraction from EPUB body HTML (ADR-0043 § C.4). Strips HTML via scraper, tokenises via unicode-segmentation, keeps capitalised non-sentence-initial tokens + multi-token capitalised sequences with frequency >= 3."
+description  = "Pure-function name-dictionary extraction from EPUB body HTML (ADR-0043 § C.4). Strips HTML via a hand-rolled state machine, tokenises via unicode-segmentation, keeps capitalised non-sentence-initial tokens + multi-token capitalised sequences with frequency >= 3."
 
 [lints]
 workspace = true
@@ -15,7 +15,6 @@ workspace = true
 # Read-only XML DOM for EPUB OPF (container.xml + content.opf).
 # See ADR-0043 § C.4b.
 roxmltree            = { workspace = true }
-scraper              = { workspace = true }
 # C.4 stage serialises Vec<NameEntry> as ai_cache content.
 serde                = { workspace = true }
 thiserror            = { workspace = true }
