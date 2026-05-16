@@ -138,9 +138,8 @@ fn seed_match_to_json(m: &SeedMatchSummary) -> serde_json::Value {
     serde_json::json!({
         "publisher": m.publisher,
         "confidence": m.confidence,
-        "hamming": m.hamming,
-        "needle_hashes": m.needle_hashes,
-        "hash_offset": m.hash_offset,
+        "seed_windows": m.seed_windows,
+        "window_offset": m.window_offset,
         "approx_offset_ms": m.approx_offset_ms,
     })
 }
@@ -539,21 +538,19 @@ fn format_seed_match_trigger(
     if let Some(f) = front {
         let _ = write!(
             out,
-            r#"<div>Front: <strong>{pub}</strong> · confidence {conf:.2} <span class="muted">({hamming}/{needle} hamming)</span></div>"#,
+            r#"<div>Front: <strong>{pub}</strong> · cosine {conf:.3} <span class="muted">({windows} × 100ms windows)</span></div>"#,
             pub = html_escape(f.publisher.as_deref().unwrap_or("?")),
             conf = f.confidence,
-            hamming = f.hamming,
-            needle = f.needle_hashes,
+            windows = f.seed_windows,
         );
     }
     if let Some(e) = end {
         let _ = write!(
             out,
-            r#"<div>End: <strong>{pub}</strong> · confidence {conf:.2} <span class="muted">({hamming}/{needle} hamming)</span></div>"#,
+            r#"<div>End: <strong>{pub}</strong> · cosine {conf:.3} <span class="muted">({windows} × 100ms windows)</span></div>"#,
             pub = html_escape(e.publisher.as_deref().unwrap_or("?")),
             conf = e.confidence,
-            hamming = e.hamming,
-            needle = e.needle_hashes,
+            windows = e.seed_windows,
         );
     }
     if out.is_empty() {
