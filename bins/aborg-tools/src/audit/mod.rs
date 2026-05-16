@@ -124,23 +124,21 @@ pub enum DetectionInfo {
 
 /// Display-friendly summary of a seed match. Lifted from
 /// [`match_seed::SeedMatch`] so the report renderer doesn't
-/// depend on that crate's exact field layout.
+/// depend on the matcher's exact field layout.
 #[derive(Debug, Clone)]
 pub struct SeedMatchSummary {
     /// Publisher tag from the matched seed.
     pub publisher: Option<String>,
-    /// Confidence ∈ [0.0, 1.0].
+    /// Cosine similarity ∈ \[-1, 1\] at the best alignment.
+    /// Audiologo matches sit above 0.9 in practice.
     pub confidence: f32,
-    /// Hamming distance at the best alignment offset.
-    pub hamming: u32,
-    /// Seed's needle length (chromaprint hashes).
-    pub needle_hashes: usize,
-    /// Hash-position offset inside the clip where the alignment
-    /// begins (chromaprint hash unit ≈ 0.124 s).
-    pub hash_offset: usize,
+    /// Seed length in RMS windows (each = [`match_seed::WINDOW_MS`] ms).
+    pub seed_windows: usize,
+    /// RMS-window index where the alignment begins.
+    pub window_offset: usize,
     /// Approximate offset within the clip in milliseconds
-    /// (`hash_offset * 124`). Useful for human display + the
-    /// future cut-mark insertion UI.
+    /// (`window_offset * WINDOW_MS`). Useful for human display +
+    /// the detail-clip extraction (Phase 2D).
     pub approx_offset_ms: u64,
 }
 
@@ -154,12 +152,10 @@ impl SeedMatchSummary {
         Self {
             publisher: m.publisher.clone(),
             confidence: m.confidence,
-            hamming: m.hamming,
-            needle_hashes: m.needle_hashes,
-            hash_offset: m.hash_offset,
-            // chromaprint hash unit ≈ 0.1238 s; 124 ms is close
-            // enough for human display.
-            approx_offset_ms: (m.hash_offset as u64).saturating_mul(124),
+            seed_windows: m.seed_windows,
+            window_offset: m.window_offset,
+            approx_offset_ms: (m.window_offset as u64)
+                .saturating_mul(u64::from(match_seed::WINDOW_MS)),
         }
     }
 }
