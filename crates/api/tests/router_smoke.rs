@@ -330,6 +330,11 @@ async fn series_list_protected() {
 }
 
 #[tokio::test]
+async fn series_books_protected() {
+    assert_protected("GET", "/series/1/books").await;
+}
+
+#[tokio::test]
 async fn books_status_protected() {
     assert_protected("PATCH", "/books/1/status").await;
 }

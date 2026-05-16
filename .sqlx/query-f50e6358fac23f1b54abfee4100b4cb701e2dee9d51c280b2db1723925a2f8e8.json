@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT b.book_id AS \"book_id!: i64\",\n                  b.title AS \"title!: String\",\n                  bs.position AS \"position?: f64\",\n                  bs.is_primary AS \"is_primary!: i64\"\n             FROM book_series bs\n             JOIN books b ON b.book_id = bs.book_id\n            WHERE bs.series_id = ?\n            ORDER BY bs.position IS NULL,\n                     bs.position,\n                     b.title COLLATE NOCASE",
+  "describe": {
+    "columns": [
+      {
+        "name": "book_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "title!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "position?: f64",
+        "ordinal": 2,
+        "type_info": "Float"
+      },
+      {
+        "name": "is_primary!: i64",
+        "ordinal": 3,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "f50e6358fac23f1b54abfee4100b4cb701e2dee9d51c280b2db1723925a2f8e8"
+}

@@ -1,4 +1,6 @@
-//! `GET /api/v1/series/{series_id}` — single-series read endpoint.
+//! `GET /api/v1/series/{series_id}` — single-series read endpoint,
+//! plus `GET /api/v1/series/{series_id}/books` for the books in
+//! the series.
 //!
 //! Mirrors `authors_get` / `narrators_get` against the `series`
 //! table + `series_aliases` junction (migration 013). Surfaces
@@ -390,6 +392,125 @@ pub async fn series_list(
         .into_response())
 }
 
+/// Compact entry in [`SeriesBooksResponse`].
+///
+/// Surfaces the minimum the operator needs to render a series's
+/// reading order — title + position + the primary-vs-secondary
+/// flag. Heavier per-book detail (description, narrators,
+/// covers, …) is one `GET /books/{book_id}` away.
+///
+/// `position` is `Option<f64>` because `book_series.position` is
+/// nullable in the schema — `identity-resolve` writes whatever
+/// position the source surfaced (Audible / tag-read / cue), and
+/// the column stays NULL when nothing was known. Rows with NULL
+/// position sort last in the response.
+#[derive(Debug, Serialize)]
+pub struct SeriesBookEntry {
+    pub book_id: i64,
+    pub title: String,
+    pub position: Option<f64>,
+    pub is_primary: bool,
+}
+
+/// Response body for `GET /api/v1/series/{series_id}/books`.
+///
+/// No pagination — series have bounded size in practice (typical
+/// &lt; 50 books, even Discworld-style mega-franchises stay
+/// under 50). If a future ingestion source produces a series of
+/// thousands of books, pagination can be retrofitted with the
+/// shared [`crate::pagination`] helpers; for now, returning all
+/// rows in one response keeps the client logic trivial.
+#[derive(Debug, Serialize)]
+pub struct SeriesBooksResponse {
+    pub books: Vec<SeriesBookEntry>,
+    pub total: i64,
+}
+
+/// `GET /api/v1/series/{series_id}/books`
+///
+/// Returns `200 OK` with [`SeriesBooksResponse`] JSON listing the
+/// books joined via `book_series` in reading order. `404 Not
+/// Found` when the series doesn't exist. Empty `books` array
+/// when the series exists but has no joined books (legal — a
+/// series row may pre-exist its first book if it was created by
+/// a candidate-promotion path).
+///
+/// Books are ordered by `book_series.position` ascending, with
+/// NULL positions sorted last, then by `books.title` as the tie
+/// breaker. Soft-deleted books (`books.deleted_at IS NOT NULL`)
+/// stay in the result — same convention as the `book_count`
+/// subquery in [`series_get`] which counts all junction rows.
+/// If clients need only-active books they can filter on
+/// `deleted_at` client-side; this endpoint preserves the full
+/// series membership so the operator can see "this book is in
+/// the series but was deleted."
+///
+/// # Errors
+///
+/// Database access failures surface as [`ApiError::Internal`].
+#[allow(clippy::missing_panics_doc)] // panic-free
+pub async fn series_books(
+    State(state): State<ApiState>,
+    Path(series_id): Path<i64>,
+) -> Result<Response, ApiError> {
+    let pool = state.inner.library.pool();
+
+    // 404 the series first so callers see "no series" vs. "empty
+    // books array" as distinct outcomes.
+    let series_exists = sqlx::query_scalar!(
+        r#"SELECT 1 AS "n!: i64" FROM series WHERE series_id = ?"#,
+        series_id,
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        ApiError::Internal(ab_core::Error::Database(format!(
+            "series existence check: {e}"
+        )))
+    })?
+    .is_some();
+
+    if !series_exists {
+        return Err(ApiError::NotFound(format!("series {series_id}")));
+    }
+
+    // ORDER BY uses `bs.position IS NULL` as the primary key to
+    // bucket rows (FALSE=0 sorts before TRUE=1 in SQLite, so
+    // NULL positions land last). The numeric position is the
+    // secondary sort within each bucket; title is the final
+    // tiebreaker.
+    let rows = sqlx::query!(
+        r#"SELECT b.book_id AS "book_id!: i64",
+                  b.title AS "title!: String",
+                  bs.position AS "position?: f64",
+                  bs.is_primary AS "is_primary!: i64"
+             FROM book_series bs
+             JOIN books b ON b.book_id = bs.book_id
+            WHERE bs.series_id = ?
+            ORDER BY bs.position IS NULL,
+                     bs.position,
+                     b.title COLLATE NOCASE"#,
+        series_id,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| ApiError::Internal(ab_core::Error::Database(format!("series books: {e}"))))?;
+
+    let books: Vec<SeriesBookEntry> = rows
+        .into_iter()
+        .map(|r| SeriesBookEntry {
+            book_id: r.book_id,
+            title: r.title,
+            position: r.position,
+            is_primary: r.is_primary != 0,
+        })
+        .collect();
+    #[allow(clippy::cast_possible_wrap)] // book counts never exceed i64::MAX
+    let total = books.len() as i64;
+
+    Ok((StatusCode::OK, Json(SeriesBooksResponse { books, total })).into_response())
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
@@ -513,5 +634,67 @@ mod tests {
         assert_eq!(items[0]["book_count"], 7);
         // Compact shape — aliases are NOT in the list row.
         assert!(items[0].get("aliases").is_none(), "list row omits aliases");
+    }
+
+    #[test]
+    fn series_book_entry_serializes_with_position_and_primary_flag() {
+        let entry = SeriesBookEntry {
+            book_id: 42,
+            title: "The Final Empire".into(),
+            position: Some(1.0),
+            is_primary: true,
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["book_id"], 42);
+        assert_eq!(json["title"], "The Final Empire");
+        assert_eq!(json["position"], 1.0);
+        assert_eq!(json["is_primary"], true);
+    }
+
+    #[test]
+    fn series_book_entry_serializes_null_position() {
+        // Position is nullable in the schema (book_series.position
+        // is REAL NULL). NULL must serialize as JSON `null`, not
+        // be elided — clients should be able to rely on the shape.
+        let entry = SeriesBookEntry {
+            book_id: 1,
+            title: "Unranked Novella".into(),
+            position: None,
+            is_primary: false,
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert!(
+            json.get("position").is_some(),
+            "position key present even when null"
+        );
+        assert!(json["position"].is_null());
+        assert_eq!(json["is_primary"], false);
+    }
+
+    #[test]
+    fn series_books_response_shape() {
+        let resp = SeriesBooksResponse {
+            books: vec![
+                SeriesBookEntry {
+                    book_id: 1,
+                    title: "Book One".into(),
+                    position: Some(1.0),
+                    is_primary: true,
+                },
+                SeriesBookEntry {
+                    book_id: 2,
+                    title: "Book Two".into(),
+                    position: Some(2.0),
+                    is_primary: true,
+                },
+            ],
+            total: 2,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["total"], 2);
+        let items = json["books"].as_array().expect("books is array");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["book_id"], 1);
+        assert_eq!(items[1]["book_id"], 2);
     }
 }
