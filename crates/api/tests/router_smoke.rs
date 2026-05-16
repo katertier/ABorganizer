@@ -290,6 +290,11 @@ async fn books_audiologo_protected() {
 }
 
 #[tokio::test]
+async fn books_playlist_m3u8_protected() {
+    assert_protected("GET", "/books/1/playlist.m3u8").await;
+}
+
+#[tokio::test]
 async fn books_status_protected() {
     assert_protected("PATCH", "/books/1/status").await;
 }
