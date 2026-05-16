@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT file_path AS \"file_path!: String\",\n                  duration_ms AS \"duration_ms: i64\"\n             FROM book_files\n            WHERE book_id = ?\n              AND is_active = 1\n            ORDER BY file_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "file_path!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "duration_ms: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "813a919244391d1374949f3b2384a1312e94fe03ca87fc4f6a97f8402db9e997"
+}

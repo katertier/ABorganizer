@@ -71,6 +71,10 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/books/{book_id}/retry", post(books_retry_stage))
         .route("/books/{book_id}/audiologo", post(books_audiologo_cut))
         .route(
+            "/books/{book_id}/playlist.m3u8",
+            get(crate::books_playlist::books_playlist_m3u8),
+        )
+        .route(
             "/books/{book_id}/status",
             axum::routing::patch(crate::progress::books_status_patch),
         )
