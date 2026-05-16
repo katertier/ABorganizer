@@ -636,6 +636,7 @@ dependencies = [
  "ab-webui-player",
  "anyhow",
  "axum",
+ "base64",
  "clap",
  "lofty",
  "serde",

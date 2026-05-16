@@ -34,10 +34,10 @@ use anyhow::{Context, Result};
 use clap::Parser;
 
 use aborg_tools::audit::{
-    AuditEntry, DetectionInfo,
+    AuditEntry, DetectionInfo, SeedMatchSummary,
     clips::{self, CLIP_DURATION_SECS},
-    report,
-    seed::SeedDb,
+    match_seed, report,
+    seed::{Position, SeedDb},
     walk::{self, SourceFile},
     waveform,
 };
@@ -133,7 +133,7 @@ fn main() -> Result<()> {
         if idx > 0 && idx % 25 == 0 {
             tracing::info!(processed = idx, total = total, "audiologo_audit.progress");
         }
-        match build_entry(idx, src, &clips_dir, &mut used_slugs) {
+        match build_entry(idx, src, &clips_dir, &mut used_slugs, &seeds) {
             Ok(Some(entry)) => entries.push(entry),
             Ok(None) => {
                 // AAX skip — currently silent; the future Phase 2
@@ -170,6 +170,7 @@ fn build_entry(
     src: &SourceFile,
     clips_dir: &Path,
     used_slugs: &mut std::collections::HashSet<String>,
+    seeds: &SeedDb,
 ) -> Result<Option<AuditEntry>> {
     if src.extension == "aax" {
         return Ok(None);
@@ -227,6 +228,13 @@ fn build_entry(
     let end_waveform_svg =
         waveform::render(&end_clip_path, None).unwrap_or_else(|_| empty_waveform_inline());
 
+    let detection = build_detection(
+        &front_clip_path,
+        &end_clip_path,
+        src.publisher.as_deref(),
+        seeds,
+    );
+
     Ok(Some(AuditEntry {
         slug,
         title: src.title.clone(),
@@ -234,12 +242,68 @@ fn build_entry(
         duration_ms: src.duration_ms,
         publisher: src.publisher.clone(),
         copyright: src.copyright.clone(),
-        detection: DetectionInfo::Stub,
+        detection,
         front_clip_rel: format!("clips/{front_clip_name}"),
         end_clip_rel: format!("clips/{end_clip_name}"),
         front_waveform_svg,
         end_waveform_svg,
     }))
+}
+
+/// Run the seed-fingerprint matcher against the front + end
+/// clips. Returns:
+///
+/// * [`DetectionInfo::Stub`] when `seeds` is empty (no seeds
+///   loaded — operator runs without `--seed-fingerprints`).
+/// * [`DetectionInfo::SeedMatch`] when the seed DB is loaded
+///   *and* at least one of front / end matched a publisher-
+///   compatible seed. `front` / `end` are independent
+///   `Option`s.
+/// * [`DetectionInfo::Stub`] when the seed DB is loaded but
+///   neither clip matched anything (operator still rates the
+///   clips; future cascade slices will fall through to
+///   transcript / silence detection).
+///
+/// Matcher errors (clip won't fingerprint, publisher tag
+/// missing) demote to `Stub` rather than failing the audit —
+/// the operator still wants the clips to listen to.
+fn build_detection(
+    front_clip: &Path,
+    end_clip: &Path,
+    publisher: Option<&str>,
+    seeds: &SeedDb,
+) -> DetectionInfo {
+    if seeds.is_empty() {
+        return DetectionInfo::Stub;
+    }
+    let front = match_seed::best_match(front_clip, seeds, publisher, Position::Intro)
+        .unwrap_or_else(|e| {
+            tracing::debug!(
+                clip = %front_clip.display(),
+                error = %e,
+                "audiologo_audit.match.front_failed"
+            );
+            None
+        })
+        .as_ref()
+        .map(SeedMatchSummary::from_match);
+    let end = match_seed::best_match(end_clip, seeds, publisher, Position::Outro)
+        .unwrap_or_else(|e| {
+            tracing::debug!(
+                clip = %end_clip.display(),
+                error = %e,
+                "audiologo_audit.match.end_failed"
+            );
+            None
+        })
+        .as_ref()
+        .map(SeedMatchSummary::from_match);
+
+    if front.is_none() && end.is_none() {
+        DetectionInfo::Stub
+    } else {
+        DetectionInfo::SeedMatch { front, end }
+    }
 }
 
 fn empty_waveform_inline() -> String {

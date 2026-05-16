@@ -39,6 +39,9 @@ path = "src/bin/audiologo_audit.rs"
 ab-core        = { workspace = true }
 ab-db          = { workspace = true }
 ab-fingerprint = { workspace = true }
+# base64 decode of ABtagger findings JSON fingerprint blobs in the
+# audit binary's seed-match path.
+base64         = { workspace = true }
 ab-audiologo   = { workspace = true }
 ab-transcript  = { workspace = true }
 ab-speech      = { workspace = true }
