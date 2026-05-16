@@ -31,6 +31,7 @@ ab-aax-decrypt  = { workspace = true }
 ab-background   = { workspace = true }
 ab-catalog      = { workspace = true }
 ab-fingerprint  = { workspace = true }
+ab-journal      = { workspace = true }
 ab-shelf        = { workspace = true }
 ab-tag-read     = { workspace = true }
 ab-tag-write    = { workspace = true }

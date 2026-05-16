@@ -263,6 +263,80 @@ pub fn new_batch_id() -> String {
     uuid::Uuid::now_v7().to_string()
 }
 
+/// Report from a single [`recover_pending`] pass.
+///
+/// `failed_count` is the number of `pending` rows the recovery
+/// pass flipped to `failed`. `batches` lists per-batch detail so
+/// the daemon's startup log can show "found N pending operations
+/// across M batches; marked all failed."
+#[derive(Debug, Clone, Serialize)]
+pub struct RecoveryReport {
+    pub failed_count: usize,
+    pub batches: Vec<RecoveredBatch>,
+}
+
+/// One batch row in a [`RecoveryReport`].
+#[derive(Debug, Clone, Serialize)]
+pub struct RecoveredBatch {
+    /// Batch id, or `None` for single ops that ran without a batch.
+    pub batch_id: Option<String>,
+    pub op_ids: Vec<i64>,
+}
+
+/// Constant reason logged on every recovery-pass failure. Operators
+/// see this in `operation_journal.failed_reason` when they audit
+/// what crashed; the consistent prefix makes the column easy to
+/// filter on.
+pub const RECOVERY_FAILED_REASON: &str =
+    "daemon crash detected — operation was in flight at restart";
+
+/// Crash-recovery pass: scan `operation_journal` for `progress =
+/// 'pending'` rows and mark them all `failed` with a constant
+/// reason.
+///
+/// **Safe by default.** This pass does NOT re-execute the
+/// operation — different op kinds need different idempotency
+/// reasoning (file-system writes, ASIN promotions, etc.), and
+/// silently retrying could double-apply a mutation that mostly
+/// succeeded before the crash. Marking pending → failed keeps
+/// the operator in the loop: they see exactly what didn't
+/// complete and can re-run intentionally.
+///
+/// Per-op-kind replay handlers can attach later via separate
+/// slices. Each handler reads the `pre_state_json` for "is the
+/// target still in the expected state?", then either retries
+/// (idempotent) or leaves the row at `failed` (non-idempotent
+/// or pre-state drift).
+///
+/// Idempotent: running this twice in succession only flips
+/// rows the first call missed; the second call's
+/// `pending_batches()` returns an empty list.
+///
+/// # Errors
+///
+/// Returns [`JournalError::Sql`] if any SQL step fails. The
+/// recovery pass is best-effort — daemon startup should log the
+/// error and continue (failing the whole startup on a journal
+/// crash sweep would be worse than running un-recovered).
+pub async fn recover_pending(pool: &SqlitePool) -> Result<RecoveryReport, JournalError> {
+    let batches = pending_batches(pool).await?;
+    let mut failed_count = 0usize;
+    let mut recovered: Vec<RecoveredBatch> = Vec::with_capacity(batches.len());
+
+    for (batch_id, op_ids) in batches {
+        for op_id in &op_ids {
+            mark_failed(pool, *op_id, RECOVERY_FAILED_REASON).await?;
+            failed_count += 1;
+        }
+        recovered.push(RecoveredBatch { batch_id, op_ids });
+    }
+
+    Ok(RecoveryReport {
+        failed_count,
+        batches: recovered,
+    })
+}
+
 // ── Diff renderer ─────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -500,5 +574,170 @@ mod tests {
         let a = new_batch_id();
         let b = new_batch_id();
         assert_ne!(a, b);
+    }
+
+    #[tokio::test]
+    async fn recover_pending_marks_pending_rows_failed() {
+        let (_d, db) = db().await;
+        let bid = add_book(&db, "Crashed").await;
+        // Two pending rows from a hypothetical mid-batch crash.
+        let batch = new_batch_id();
+        let op1 = record(
+            db.pool(),
+            &NewEntry {
+                op_kind: "tag-write-final",
+                target: Target {
+                    kind: "book".into(),
+                    id: bid,
+                },
+                pre_state: json!({ "title": "Crashed" }),
+                reversible: true,
+                batch_id: Some(batch.clone()),
+            },
+        )
+        .await
+        .expect("record op1");
+        let op2 = record(
+            db.pool(),
+            &NewEntry {
+                op_kind: "tag-write-final",
+                target: Target {
+                    kind: "book".into(),
+                    id: bid,
+                },
+                pre_state: json!({ "subtitle": null }),
+                reversible: true,
+                batch_id: Some(batch.clone()),
+            },
+        )
+        .await
+        .expect("record op2");
+
+        let report = recover_pending(db.pool()).await.expect("recover");
+        assert_eq!(report.failed_count, 2);
+        assert_eq!(report.batches.len(), 1);
+        assert_eq!(report.batches[0].batch_id.as_deref(), Some(batch.as_str()));
+        assert_eq!(report.batches[0].op_ids, vec![op1, op2]);
+
+        // Both rows now `failed` with the canonical reason.
+        let row1 = get(db.pool(), op1).await.expect("get op1");
+        let row2 = get(db.pool(), op2).await.expect("get op2");
+        assert_eq!(row1.progress, Progress::Failed);
+        assert_eq!(row1.failed_reason.as_deref(), Some(RECOVERY_FAILED_REASON));
+        assert_eq!(row2.progress, Progress::Failed);
+    }
+
+    #[tokio::test]
+    async fn recover_pending_skips_already_done_and_failed_rows() {
+        let (_d, db) = db().await;
+        let bid = add_book(&db, "Mixed").await;
+        // A pending row.
+        let pending_op = record(
+            db.pool(),
+            &NewEntry {
+                op_kind: "tag-write-final",
+                target: Target {
+                    kind: "book".into(),
+                    id: bid,
+                },
+                pre_state: json!({ "title": "Mixed" }),
+                reversible: true,
+                batch_id: None,
+            },
+        )
+        .await
+        .expect("record pending");
+        // A done row.
+        let done_op = record(
+            db.pool(),
+            &NewEntry {
+                op_kind: "tag-write-final",
+                target: Target {
+                    kind: "book".into(),
+                    id: bid,
+                },
+                pre_state: json!({ "title": "Mixed" }),
+                reversible: true,
+                batch_id: None,
+            },
+        )
+        .await
+        .expect("record done");
+        mark_done(db.pool(), done_op, &json!({ "title": "MIXED" }))
+            .await
+            .expect("mark done");
+        // A failed row (from a prior recovery, say).
+        let prior_failed = record(
+            db.pool(),
+            &NewEntry {
+                op_kind: "tag-write-final",
+                target: Target {
+                    kind: "book".into(),
+                    id: bid,
+                },
+                pre_state: json!({ "title": "Mixed" }),
+                reversible: true,
+                batch_id: None,
+            },
+        )
+        .await
+        .expect("record prior-failed");
+        mark_failed(db.pool(), prior_failed, "earlier crash")
+            .await
+            .expect("mark failed");
+
+        let report = recover_pending(db.pool()).await.expect("recover");
+        assert_eq!(
+            report.failed_count, 1,
+            "only the one pending row should be touched"
+        );
+        let post_done = get(db.pool(), done_op).await.expect("get done");
+        let post_prior = get(db.pool(), prior_failed).await.expect("get prior");
+        assert_eq!(post_done.progress, Progress::Done, "done row stays done");
+        assert_eq!(
+            post_prior.failed_reason.as_deref(),
+            Some("earlier crash"),
+            "prior-failed reason preserved"
+        );
+        let post_pending = get(db.pool(), pending_op).await.expect("get pending");
+        assert_eq!(post_pending.progress, Progress::Failed);
+    }
+
+    #[tokio::test]
+    async fn recover_pending_is_idempotent() {
+        let (_d, db) = db().await;
+        let bid = add_book(&db, "Idem").await;
+        record(
+            db.pool(),
+            &NewEntry {
+                op_kind: "tag-write-final",
+                target: Target {
+                    kind: "book".into(),
+                    id: bid,
+                },
+                pre_state: json!({}),
+                reversible: true,
+                batch_id: None,
+            },
+        )
+        .await
+        .expect("record");
+
+        let r1 = recover_pending(db.pool()).await.expect("recover 1");
+        let r2 = recover_pending(db.pool()).await.expect("recover 2");
+        assert_eq!(r1.failed_count, 1);
+        assert_eq!(
+            r2.failed_count, 0,
+            "second pass finds no pending rows to flip"
+        );
+        assert!(r2.batches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn recover_pending_handles_empty_journal() {
+        let (_d, db) = db().await;
+        let report = recover_pending(db.pool()).await.expect("recover empty");
+        assert_eq!(report.failed_count, 0);
+        assert!(report.batches.is_empty());
     }
 }

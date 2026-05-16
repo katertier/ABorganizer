@@ -361,6 +361,33 @@ async fn main() -> Result<()> {
     let cancel = CancellationToken::new();
     spawn_signal_handlers(&cancel);
 
+    // Crash-recovery pass (ADR-0039): any operation_journal row
+    // left at progress='pending' from a prior daemon crash gets
+    // flipped to 'failed' with a canonical reason so the operator
+    // can audit what didn't complete. Safe-by-default — no
+    // re-execution; that's per-op-kind work owned by future
+    // slices. Errors here log + continue; failing startup over a
+    // journal sweep would be worse than running un-recovered.
+    match ab_journal::recover_pending(library.pool()).await {
+        Ok(report) if report.failed_count == 0 => {
+            tracing::info!("startup.recovery.clean — no pending operations");
+        }
+        Ok(report) => {
+            tracing::warn!(
+                failed_count = report.failed_count,
+                batches = report.batches.len(),
+                "startup.recovery.flushed — pending operations from prior \
+                 crash marked failed"
+            );
+        }
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "startup.recovery.error — proceeding without crash recovery",
+            );
+        }
+    }
+
     // Build the pipeline DAG + scheduler.
     let stages = build_pipeline_stages(&tunables);
     let dag = Arc::new(Dag::build(stages).context("build pipeline DAG")?);
