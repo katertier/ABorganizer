@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT bio AS \"bio?: String\", image_url AS \"image_url?: String\" FROM authors WHERE author_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "bio?: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "image_url?: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "f579feb684bcc767ce7b94e6facc0174cad53f08beb2b0533ae7d4cae45d13f5"
+}
