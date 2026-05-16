@@ -32,7 +32,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use super::seed::SeedDb;
-use super::{AuditEntry, DetectionInfo, SeedMatchSummary};
+use super::{AuditEntry, DetailClip, DetectionInfo, SeedMatchSummary};
 
 /// Books per HTML page. Picked to keep per-page DOM count under
 /// what Safari handles smoothly even with inline SVG waveforms
@@ -471,11 +471,13 @@ fn render_book_section(e: &AuditEntry, seed_counts: &HashMap<String, usize>) -> 
       <h3>Front · cut @ {front_cut_disp}</h3>
       <div class="wave">{front_waveform}</div>
       <audio controls preload="none" src="{front_clip}"></audio>
+      {front_detail_html}
     </div>
     <div class="cut-half">
       <h3>End · cut @ {end_cut_disp}</h3>
       <div class="wave">{end_waveform}</div>
       <audio controls preload="none" src="{end_clip}"></audio>
+      {end_detail_html}
     </div>
   </div>
   <div class="rating">
@@ -499,6 +501,29 @@ fn render_book_section(e: &AuditEntry, seed_counts: &HashMap<String, usize>) -> 
         end_waveform = e.end_waveform_svg,
         front_clip = html_escape(&e.front_clip_rel),
         end_clip = html_escape(&e.end_clip_rel),
+        front_detail_html = render_detail_clip(e.front_detail.as_ref()),
+        end_detail_html = render_detail_clip(e.end_detail.as_ref()),
+    )
+}
+
+/// Render the optional 15s detail clip alongside the 60s overview.
+/// `None` collapses to the empty string so the operator sees a
+/// clean two-clip layout only when there's a match worth focusing
+/// on.
+fn render_detail_clip(detail: Option<&DetailClip>) -> String {
+    let Some(d) = detail else {
+        return String::new();
+    };
+    format!(
+        r##"<div class="detail-clip">
+        <h4>Detail · {duration}s from {start} <span class="muted">in the overview</span></h4>
+        <div class="wave">{waveform}</div>
+        <audio controls preload="none" src="{clip}"></audio>
+      </div>"##,
+        duration = d.duration_secs,
+        start = format_ms(Some(d.start_offset_in_overview_ms)),
+        waveform = d.waveform_svg,
+        clip = html_escape(&d.clip_rel),
     )
 }
 
@@ -681,6 +706,26 @@ main {
 .badge.none { background: #e0e7ff; color: #3730a3; }
 .badge.detected { background: #dcfce7; color: #166534; }
 .badge.seed-match { background: #ede9fe; color: #5b21b6; }
+.detail-clip {
+  margin-top: 14px;
+  padding: 12px;
+  border-radius: 6px;
+  background: rgba(91, 33, 182, 0.07);
+  border-left: 3px solid #5b21b6;
+}
+.detail-clip h4 {
+  margin: 0 0 8px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #5b21b6;
+}
+@media (prefers-color-scheme: dark) {
+  .detail-clip {
+    background: rgba(167, 139, 250, 0.1);
+    border-left-color: #a78bfa;
+  }
+  .detail-clip h4 { color: #c4b5fd; }
+}
 .seed-badge {
   display: inline-block;
   margin-left: 8px;
@@ -982,14 +1027,27 @@ mod tests {
             title: title.into(),
             source_path: PathBuf::from(format!("/library/{title}.m4b")),
             duration_ms: 60_000,
-            publisher: publisher.map(str::to_string),
+            publisher: publisher.map(str::to_owned),
             copyright: None,
             detection: DetectionInfo::Stub,
             front_clip_rel: format!("clips/{slug}-front.m4a"),
             end_clip_rel: format!("clips/{slug}-end.m4a"),
             front_waveform_svg: "<svg/>".into(),
             end_waveform_svg: "<svg/>".into(),
+            front_detail: None,
+            end_detail: None,
         }
+    }
+
+    fn entry_with_front_detail(slug: &str, publisher: &str) -> AuditEntry {
+        let mut e = stub_entry(slug, slug, Some(publisher));
+        e.front_detail = Some(DetailClip {
+            clip_rel: format!("clips/{slug}-front-detail.m4a"),
+            waveform_svg: "<svg id=\"detail-wave\"/>".into(),
+            start_offset_in_overview_ms: 8_000,
+            duration_secs: 15,
+        });
+        e
     }
 
     #[test]
@@ -1114,6 +1172,33 @@ mod tests {
         let page1 = fs::read_to_string(out.join("page-01.html")).unwrap();
         // Per-book chip on the publisher cell
         assert!(page1.contains("2 known seeds"), "per-book chip: {page1:#?}");
+    }
+
+    #[test]
+    fn detail_clip_renders_alongside_overview() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let entries = vec![entry_with_front_detail("a", "Audible")];
+        let out = tmp.path().join("report");
+        write_report(&out, Path::new("/c"), &entries, &SeedDb::empty()).expect("write");
+        let page1 = fs::read_to_string(out.join("page-01.html")).unwrap();
+        assert!(
+            page1.contains("class=\"detail-clip\""),
+            "detail block: {page1:#?}"
+        );
+        assert!(page1.contains("a-front-detail.m4a"));
+        assert!(page1.contains("Detail · 15s"));
+        assert!(page1.contains("<svg id=\"detail-wave\"/>"));
+    }
+
+    #[test]
+    fn detail_clip_omitted_when_absent() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let entries = vec![stub_entry("a", "Plain", Some("Pub"))];
+        let out = tmp.path().join("report");
+        write_report(&out, Path::new("/c"), &entries, &SeedDb::empty()).expect("write");
+        let page1 = fs::read_to_string(out.join("page-01.html")).unwrap();
+        assert!(!page1.contains("class=\"detail-clip\""));
+        assert!(!page1.contains("-front-detail.m4a"));
     }
 
     #[test]

@@ -49,6 +49,31 @@ pub struct AuditEntry {
     pub front_waveform_svg: String,
     /// End waveform SVG inline content.
     pub end_waveform_svg: String,
+    /// Optional "detail" clip extracted around the front-side
+    /// seed-match offset (Phase 2D). 15s window centred on the
+    /// match start; lets the operator confirm the match is real
+    /// without scrubbing through the full 60s overview. `None`
+    /// when no front-side match exists (no seed, no match, or
+    /// pre-Phase-2C cached data).
+    pub front_detail: Option<DetailClip>,
+    /// Optional "detail" clip for the end side.
+    pub end_detail: Option<DetailClip>,
+}
+
+/// Per-side detail clip + waveform for the two-clip layout
+/// (Phase 2D). Sits next to the 60s overview so the operator
+/// can listen to the focused window without scrubbing.
+#[derive(Debug, Clone)]
+pub struct DetailClip {
+    /// Relative path to the .m4a clip from the report `--out` dir.
+    pub clip_rel: String,
+    /// Inline SVG waveform for the detail clip.
+    pub waveform_svg: String,
+    /// Start offset (ms) within the overview clip. Display label
+    /// only — operator sees "starts at MM:SS in the 60s window".
+    pub start_offset_in_overview_ms: u64,
+    /// Duration of the detail clip in seconds.
+    pub duration_secs: u32,
 }
 
 /// Per-book detection metadata for the report.

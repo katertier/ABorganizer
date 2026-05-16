@@ -34,13 +34,23 @@ use anyhow::{Context, Result};
 use clap::Parser;
 
 use aborg_tools::audit::{
-    AuditEntry, DetectionInfo, SeedMatchSummary,
+    AuditEntry, DetailClip, DetectionInfo, SeedMatchSummary,
     clips::{self, CLIP_DURATION_SECS},
     match_seed, report,
     seed::{Position, SeedDb},
     walk::{self, SourceFile},
     waveform,
 };
+
+/// Detail clip duration (seconds) — covers the seed-match span
+/// plus enough context on either side that the operator can
+/// hear what comes immediately before and after.
+const DETAIL_CLIP_SECS: u32 = 15;
+
+/// How many ms before the matched offset the detail clip
+/// starts. Captures the speech/jingle transition before the
+/// match for context.
+const DETAIL_CLIP_PREFIX_MS: u64 = 2_000;
 
 #[derive(Parser)]
 #[command(about = "Audiologo audit — read-only corpus review (ADR-0054)")]
@@ -235,6 +245,29 @@ fn build_entry(
         seeds,
     );
 
+    // Phase 2D: when a side matched a seed, extract a 15s
+    // detail clip centered around the match start so the
+    // operator can confirm the match in the report without
+    // scrubbing through the full 60s overview.
+    let (front_detail, end_detail) = match &detection {
+        DetectionInfo::SeedMatch { front, end } => {
+            let f = front.as_ref().and_then(|m| {
+                build_detail_clip(
+                    &slug,
+                    "front",
+                    &front_clip_path,
+                    clips_dir,
+                    m.approx_offset_ms,
+                )
+            });
+            let e = end.as_ref().and_then(|m| {
+                build_detail_clip(&slug, "end", &end_clip_path, clips_dir, m.approx_offset_ms)
+            });
+            (f, e)
+        }
+        _ => (None, None),
+    };
+
     Ok(Some(AuditEntry {
         slug,
         title: src.title.clone(),
@@ -247,7 +280,43 @@ fn build_entry(
         end_clip_rel: format!("clips/{end_clip_name}"),
         front_waveform_svg,
         end_waveform_svg,
+        front_detail,
+        end_detail,
     }))
+}
+
+/// Extract a 15s detail clip from `overview_clip` starting 2s
+/// before `match_offset_ms`. Returns `None` if extraction or
+/// waveform rendering fails — the report falls back to showing
+/// the overview alone, no audit failure.
+fn build_detail_clip(
+    slug: &str,
+    side: &str,
+    overview_clip: &Path,
+    clips_dir: &Path,
+    match_offset_ms: u64,
+) -> Option<DetailClip> {
+    let start_ms = match_offset_ms.saturating_sub(DETAIL_CLIP_PREFIX_MS);
+    let clip_name = format!("{slug}-{side}-detail.m4a");
+    let clip_path = clips_dir.join(&clip_name);
+    if !clip_path.exists() {
+        if let Err(e) = clips::extract_clip(overview_clip, &clip_path, start_ms, DETAIL_CLIP_SECS) {
+            tracing::debug!(
+                slug = %slug,
+                side = %side,
+                error = %e,
+                "audiologo_audit.detail_clip_failed"
+            );
+            return None;
+        }
+    }
+    let waveform_svg = waveform::render(&clip_path, None).ok()?;
+    Some(DetailClip {
+        clip_rel: format!("clips/{clip_name}"),
+        waveform_svg,
+        start_offset_in_overview_ms: start_ms,
+        duration_secs: DETAIL_CLIP_SECS,
+    })
 }
 
 /// Run the seed-fingerprint matcher against the front + end
