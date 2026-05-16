@@ -6,23 +6,17 @@
 //!
 //! ## Backend per entity
 //!
-//! * **Books** — FTS5 via `books_fts` (migration 030; ADR-0036).
-//!   Tokenizer `unicode61 remove_diacritics 2`; ranking via
-//!   `bm25(books_fts)`; snippet via the `snippet()` function with
-//!   `[match]`/`[/match]` delimiters on the matched column.
-//!   Backfilled at migration time so existing rows are
-//!   immediately searchable.
-//! * **Authors / narrators / series** — plain `LIKE %q% COLLATE
-//!   NOCASE` against the `name` column. FTS5 mirrors for these
-//!   tables haven't shipped yet (follow-up to ADR-0036); the LIKE
-//!   path is good enough for the typical "I know roughly how it's
-//!   spelled" search and avoids a dummy stub that would lock the
-//!   API shape to a non-FTS surface.
+//! All four entities now use FTS5 (migration 030 for `books_fts`,
+//! migration 040 for `authors_fts` / `narrators_fts` /
+//! `series_fts`). Tokenizer `unicode61 remove_diacritics 2`;
+//! ranking via `bm25(<fts>)`; snippet via the `snippet()` function
+//! with `[match]…[/match]` delimiters.
 //!
-//! When the future authors/narrators/series FTS lands, the SQL
-//! behind each entity bucket swaps to FTS5 with snippet — the
-//! public JSON shape stays compatible (snippet is already an
-//! `Option<String>`).
+//! * **Books** index `title` + `subtitle` + `description`.
+//! * **Authors / narrators / series** index `name` only. Bio (where
+//!   present) is enrichment-late + often empty; `franchise_prefix`
+//!   on series is a sort affix, not a search target. Both can be
+//!   added later by rebuilding the FTS table — non-breaking.
 //!
 //! ## Query syntax
 //!
@@ -65,6 +59,14 @@ pub struct EntitySearchHit {
     pub id: i64,
     pub name: String,
     pub book_count: i64,
+    /// Snippet from the matched column with `[match]…[/match]`
+    /// markers. For entity names that are 1-3 words this is
+    /// mostly cosmetic ("Brandon [match]Sand[/match]erson"), but
+    /// surfaces consistency with [`BookSearchHit::snippet`] so
+    /// clients can render all four entity buckets with the same
+    /// snippet-aware widget. `None` when FTS5 returned an empty
+    /// snippet.
+    pub snippet: Option<String>,
 }
 
 /// Per-entity result bucket.
@@ -109,7 +111,7 @@ pub struct SearchQuery {
     pub offset: Option<i64>,
 }
 
-/// Sanitize operator input for both FTS5 and LIKE backends.
+/// Sanitize operator input before it reaches FTS5.
 ///
 /// Keeps alphanumerics + whitespace + hyphen + apostrophe. Trims
 /// whitespace, collapses runs of whitespace to one space. Returns
@@ -146,12 +148,6 @@ fn build_fts_match(sanitized: &str) -> String {
         .map(|word| format!("\"{word}\"*"))
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-/// Build the LIKE pattern from a sanitized query — wraps the
-/// whole query in `%…%` for substring match.
-fn build_like_pattern(sanitized: &str) -> String {
-    format!("%{sanitized}%")
 }
 
 /// `GET /api/v1/search?q=<text>[&limit=&offset=]`
@@ -199,7 +195,6 @@ pub async fn search(
 
     let pool = state.inner.library.pool();
     let fts_match = build_fts_match(&query);
-    let like_pattern = build_like_pattern(&query);
 
     // ── Books via FTS5 ────────────────────────────────────────
     let book_rows = sqlx::query!(
@@ -243,17 +238,20 @@ pub async fn search(
         })
         .collect();
 
-    // ── Authors via LIKE (FTS5 mirror is a follow-up slice) ───
+    // ── Authors via FTS5 ──────────────────────────────────────
     let author_rows = sqlx::query!(
         r#"SELECT a.author_id AS "author_id!: i64",
                   a.name AS "name!: String",
                   (SELECT COUNT(*) FROM books WHERE author_id = a.author_id)
-                      AS "book_count!: i64"
-             FROM authors a
-            WHERE a.name LIKE ?1 COLLATE NOCASE
-            ORDER BY a.name COLLATE NOCASE
+                      AS "book_count!: i64",
+                  snippet(authors_fts, -1, '[match]', '[/match]', '…', 16)
+                      AS "snippet?: String"
+             FROM authors_fts
+             JOIN authors a ON a.author_id = authors_fts.rowid
+            WHERE authors_fts MATCH ?1
+            ORDER BY bm25(authors_fts), a.name COLLATE NOCASE
             LIMIT ?2 OFFSET ?3"#,
-        like_pattern,
+        fts_match,
         limit,
         offset,
     )
@@ -263,8 +261,8 @@ pub async fn search(
 
     let authors_total: i64 = sqlx::query_scalar!(
         r#"SELECT COUNT(*) AS "n!: i64"
-             FROM authors WHERE name LIKE ?1 COLLATE NOCASE"#,
-        like_pattern,
+             FROM authors_fts WHERE authors_fts MATCH ?1"#,
+        fts_match,
     )
     .fetch_one(pool)
     .await
@@ -280,20 +278,24 @@ pub async fn search(
             id: r.author_id,
             name: r.name,
             book_count: r.book_count,
+            snippet: r.snippet,
         })
         .collect();
 
-    // ── Narrators via LIKE ────────────────────────────────────
+    // ── Narrators via FTS5 ────────────────────────────────────
     let narrator_rows = sqlx::query!(
         r#"SELECT n.narrator_id AS "narrator_id!: i64",
                   n.name AS "name!: String",
                   (SELECT COUNT(*) FROM book_narrator WHERE narrator_id = n.narrator_id)
-                      AS "book_count!: i64"
-             FROM narrators n
-            WHERE n.name LIKE ?1 COLLATE NOCASE
-            ORDER BY n.name COLLATE NOCASE
+                      AS "book_count!: i64",
+                  snippet(narrators_fts, -1, '[match]', '[/match]', '…', 16)
+                      AS "snippet?: String"
+             FROM narrators_fts
+             JOIN narrators n ON n.narrator_id = narrators_fts.rowid
+            WHERE narrators_fts MATCH ?1
+            ORDER BY bm25(narrators_fts), n.name COLLATE NOCASE
             LIMIT ?2 OFFSET ?3"#,
-        like_pattern,
+        fts_match,
         limit,
         offset,
     )
@@ -303,8 +305,8 @@ pub async fn search(
 
     let narrators_total: i64 = sqlx::query_scalar!(
         r#"SELECT COUNT(*) AS "n!: i64"
-             FROM narrators WHERE name LIKE ?1 COLLATE NOCASE"#,
-        like_pattern,
+             FROM narrators_fts WHERE narrators_fts MATCH ?1"#,
+        fts_match,
     )
     .fetch_one(pool)
     .await
@@ -320,20 +322,24 @@ pub async fn search(
             id: r.narrator_id,
             name: r.name,
             book_count: r.book_count,
+            snippet: r.snippet,
         })
         .collect();
 
-    // ── Series via LIKE ───────────────────────────────────────
+    // ── Series via FTS5 ───────────────────────────────────────
     let series_rows = sqlx::query!(
         r#"SELECT s.series_id AS "series_id!: i64",
                   s.name AS "name!: String",
                   (SELECT COUNT(*) FROM book_series WHERE series_id = s.series_id)
-                      AS "book_count!: i64"
-             FROM series s
-            WHERE s.name LIKE ?1 COLLATE NOCASE
-            ORDER BY s.name COLLATE NOCASE
+                      AS "book_count!: i64",
+                  snippet(series_fts, -1, '[match]', '[/match]', '…', 16)
+                      AS "snippet?: String"
+             FROM series_fts
+             JOIN series s ON s.series_id = series_fts.rowid
+            WHERE series_fts MATCH ?1
+            ORDER BY bm25(series_fts), s.name COLLATE NOCASE
             LIMIT ?2 OFFSET ?3"#,
-        like_pattern,
+        fts_match,
         limit,
         offset,
     )
@@ -343,8 +349,8 @@ pub async fn search(
 
     let series_total: i64 = sqlx::query_scalar!(
         r#"SELECT COUNT(*) AS "n!: i64"
-             FROM series WHERE name LIKE ?1 COLLATE NOCASE"#,
-        like_pattern,
+             FROM series_fts WHERE series_fts MATCH ?1"#,
+        fts_match,
     )
     .fetch_one(pool)
     .await
@@ -360,6 +366,7 @@ pub async fn search(
             id: r.series_id,
             name: r.name,
             book_count: r.book_count,
+            snippet: r.snippet,
         })
         .collect();
 
@@ -449,12 +456,6 @@ mod tests {
     }
 
     #[test]
-    fn like_pattern_wraps_in_percent() {
-        assert_eq!(build_like_pattern("hello"), "%hello%");
-        assert_eq!(build_like_pattern("foo bar"), "%foo bar%");
-    }
-
-    #[test]
     fn search_response_serializes_with_per_entity_buckets() {
         let resp = SearchResponse {
             query: "mistbo".into(),
@@ -480,6 +481,7 @@ mod tests {
                     id: 3,
                     name: "Mistborn".into(),
                     book_count: 7,
+                    snippet: Some("[match]Mistbo[/match]rn".into()),
                 }],
                 total: 1,
             },
@@ -511,10 +513,14 @@ mod tests {
             id: 42,
             name: "Brandon Sanderson".into(),
             book_count: 30,
+            snippet: None,
         };
         let json = serde_json::to_value(&hit).unwrap();
         assert_eq!(json["id"], 42);
         assert!(json.get("author_id").is_none());
         assert!(json.get("narrator_id").is_none());
+        // Snippet present even when null — JSON shape stable.
+        assert!(json.get("snippet").is_some());
+        assert!(json["snippet"].is_null());
     }
 }

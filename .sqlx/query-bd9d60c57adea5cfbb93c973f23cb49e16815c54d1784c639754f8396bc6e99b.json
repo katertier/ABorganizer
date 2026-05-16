@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT COUNT(*) AS \"n!: i64\"\n             FROM series WHERE name LIKE ?1 COLLATE NOCASE",
+  "query": "SELECT COUNT(*) AS \"n!: i64\"\n             FROM series_fts WHERE series_fts MATCH ?1",
   "describe": {
     "columns": [
       {
@@ -16,5 +16,5 @@
       false
     ]
   },
-  "hash": "e351dc69af93ad7e22c28963f688b0aa56689e7f0c1ce6467eb8b890cc89f3a5"
+  "hash": "bd9d60c57adea5cfbb93c973f23cb49e16815c54d1784c639754f8396bc6e99b"
 }
