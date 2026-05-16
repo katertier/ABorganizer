@@ -15,7 +15,7 @@ workspace = true
 [dependencies]
 ab-core      = { workspace = true }
 # `Stream` trait + helpers — only consumed by `complete_stream`.
-futures      = { workspace = true }
+futures-util = { workspace = true }
 serde        = { workspace = true }
 serde_json   = { workspace = true }
 thiserror    = { workspace = true }

@@ -15,7 +15,6 @@ workspace = true
 ab-core     = { workspace = true }
 ab-db       = { workspace = true }
 async-trait = { workspace = true }
-futures     = { workspace = true }
 serde       = { workspace = true }
 sqlx        = { workspace = true }
 thiserror   = { workspace = true }

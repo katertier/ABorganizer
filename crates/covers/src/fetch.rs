@@ -84,7 +84,7 @@ impl CoverClient {
     ///
     /// See [`CoverFetchError`].
     pub async fn fetch(&self, url: &str) -> Result<Vec<u8>, CoverFetchError> {
-        use futures::StreamExt as _;
+        use futures_util::StreamExt as _;
         let response = self
             .http
             .get(url)
