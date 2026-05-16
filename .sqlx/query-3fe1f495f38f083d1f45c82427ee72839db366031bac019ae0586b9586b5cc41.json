@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"n!: i64\"\n             FROM narrators\n            WHERE ?1 IS NULL OR name LIKE ?1 COLLATE NOCASE",
+  "describe": {
+    "columns": [
+      {
+        "name": "n!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3fe1f495f38f083d1f45c82427ee72839db366031bac019ae0586b9586b5cc41"
+}
