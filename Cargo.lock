@@ -619,10 +619,14 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
+ "lofty",
+ "serde",
  "serde_json",
+ "symphonia",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "walkdir",
 ]
 
 [[package]]
