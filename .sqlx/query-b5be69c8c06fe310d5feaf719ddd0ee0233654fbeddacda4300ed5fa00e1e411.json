@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT s.series_id AS \"series_id!: i64\",\n                      s.name AS \"name!: String\",\n                      s.name_sort AS \"name_sort?: String\",\n                      s.franchise_prefix AS \"franchise_prefix?: String\",\n                      s.audible_id AS \"audible_id?: String\",\n                      s.ended_state AS \"ended_state?: i64\",\n                      (SELECT COUNT(*) FROM book_series WHERE series_id = s.series_id)\n                          AS \"book_count!: i64\"\n                 FROM series s\n                WHERE ?1 IS NULL OR s.name LIKE ?1 COLLATE NOCASE\n                ORDER BY (SELECT COUNT(*) FROM book_series WHERE series_id = s.series_id) DESC,\n                         s.name COLLATE NOCASE\n                LIMIT ?2 OFFSET ?3",
+  "describe": {
+    "columns": [
+      {
+        "name": "series_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "name!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "name_sort?: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "franchise_prefix?: String",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "audible_id?: String",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "ended_state?: i64",
+        "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "book_count!: i64",
+        "ordinal": 6,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "b5be69c8c06fe310d5feaf719ddd0ee0233654fbeddacda4300ed5fa00e1e411"
+}
