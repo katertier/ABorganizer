@@ -3,6 +3,16 @@
 version = 4
 
 [[package]]
+name = "ab-aax-decrypt"
+version = "0.1.0"
+dependencies = [
+ "ab-core",
+ "tempfile",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "ab-api"
 version = "0.1.0"
 dependencies = [

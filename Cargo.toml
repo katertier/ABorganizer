@@ -28,6 +28,7 @@ members = [
     "crates/stats",
     "crates/journal",
     "crates/archive",
+    "crates/aax-decrypt",
     "crates/companion",
     "crates/companion-extract",
     "crates/covers",
@@ -244,6 +245,7 @@ ab-saved-queries = { path = "crates/saved-queries" }
 ab-stats       = { path = "crates/stats" }
 ab-journal     = { path = "crates/journal" }
 ab-archive     = { path = "crates/archive" }
+ab-aax-decrypt = { path = "crates/aax-decrypt" }
 ab-companion   = { path = "crates/companion" }
 ab-companion-extract = { path = "crates/companion-extract" }
 ab-covers      = { path = "crates/covers" }
