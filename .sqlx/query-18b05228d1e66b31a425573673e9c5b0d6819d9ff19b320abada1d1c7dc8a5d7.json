@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE authors SET bio = ?, image_url = ?, updated_at = strftime('%s','now') WHERE author_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "18b05228d1e66b31a425573673e9c5b0d6819d9ff19b320abada1d1c7dc8a5d7"
+}

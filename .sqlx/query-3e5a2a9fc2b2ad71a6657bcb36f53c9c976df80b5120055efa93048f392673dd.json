@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT a.author_id AS \"author_id!: i64\", a.audible_id AS \"audible_id?: String\", a.bio AS \"bio?: String\" FROM books b JOIN authors a ON a.author_id = b.author_id WHERE b.book_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "author_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "audible_id?: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "bio?: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "3e5a2a9fc2b2ad71a6657bcb36f53c9c976df80b5120055efa93048f392673dd"
+}

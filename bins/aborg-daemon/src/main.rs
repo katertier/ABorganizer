@@ -94,6 +94,13 @@ fn build_pipeline_stages(tunables: &Tunables) -> Vec<Arc<dyn Stage>> {
         // candidates into the identity tables + junctions, after
         // consensus has settled the scalar columns.
         Arc::new(ab_catalog::IdentityResolveStage::new()),
+        // `enrich-canonical-author` fills `authors.bio` +
+        // `authors.image_url` from Audnexus `/authors/{ASIN}` once
+        // identity-resolve has populated `authors.audible_id`.
+        Arc::new(ab_catalog::CanonicalAuthorEnrichStage::new(
+            ab_catalog::AudnexusClient::new(&tunables.http_client),
+            &tunables.network,
+        )),
         // `fetch-audnexus-chapters` fetches the per-ASIN chapter ToC +
         // brand intro/outro markers.
         Arc::new(ab_catalog::AudnexusChaptersStage::new(

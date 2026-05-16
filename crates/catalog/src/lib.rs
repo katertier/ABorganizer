@@ -16,6 +16,7 @@
 pub mod audible;
 pub mod audible_search;
 pub mod audnexus;
+pub mod canonical_author;
 pub mod chapter_info;
 pub mod chapter_winner;
 pub mod chapters;
@@ -33,6 +34,7 @@ pub mod tiers;
 pub use audible::AudibleClient;
 pub use audible_search::AudibleSearchStage;
 pub use audnexus::AudnexusClient;
+pub use canonical_author::CanonicalAuthorEnrichStage;
 pub use chapter_winner::ChapterWinnerStage;
 pub use chapters::AudnexusChaptersStage;
 pub use consensus::ConsensusStage;
