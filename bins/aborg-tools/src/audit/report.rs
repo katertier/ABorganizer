@@ -1,9 +1,21 @@
 //! HTML report emitter for the audiologo-audit binary
 //! (ADR-0054).
 //!
-//! Single-file, vanilla HTML + minimal CSS + inline JS. No SPA
-//! framework, no bundler — opens directly in Safari / Chrome
-//! from the `--out` directory.
+//! Vanilla HTML + minimal CSS + inline JS. No SPA framework, no
+//! bundler — opens directly in Safari / Chrome from the `--out`
+//! directory.
+//!
+//! ## Pagination (Phase 2A)
+//!
+//! Single-file output didn't scale: a 20k-book library produced
+//! a 68 MB `index.html` that loaded slowly and scrolled with
+//! visible lag. Reports now split into `page-NN.html` files of
+//! 50 books each, sorted by publisher (with `(no publisher)`
+//! bucketed last). `index.html` becomes a TOC linking
+//! `page-NN.html#{slug}` per book grouped under its publisher.
+//!
+//! Ratings persist in `localStorage` keyed by slug, so the
+//! operator's annotations stay consistent across pages.
 
 #![allow(
     clippy::needless_raw_string_hashes,
@@ -12,6 +24,8 @@
     clippy::missing_const_for_fn
 )]
 
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
@@ -19,12 +33,19 @@ use anyhow::{Context, Result};
 
 use super::{AuditEntry, DetectionInfo};
 
-/// Write `index.html` + `data.json` to `out_dir`.
-///
-/// `index.html` contains every book's audio + waveform + rating
-/// UI inline. `data.json` is a backup of the per-book detection
-/// metadata in machine-readable form (the HTML's JS doesn't
-/// need to fetch it; the operator can use it for diffs).
+/// Books per HTML page. Picked to keep per-page DOM count under
+/// what Safari handles smoothly even with inline SVG waveforms
+/// (50 books × 2 waveforms = 100 inline SVGs ≈ 4 MB per page).
+const PAGE_SIZE: usize = 50;
+
+/// Sentinel for "(no publisher)" bucket — sorts after any real
+/// publisher string. `\u{10FFFF}` is the highest code point;
+/// no real publisher tag uses it.
+const NO_PUBLISHER_SORT_KEY: &str = "\u{10FFFF}\u{10FFFF}\u{10FFFF}";
+const NO_PUBLISHER_DISPLAY: &str = "(no publisher)";
+
+/// Write paginated report (`index.html` TOC + `page-NN.html` pages
+/// + `data.json` backup) to `out_dir`.
 ///
 /// # Errors
 ///
@@ -32,20 +53,70 @@ use super::{AuditEntry, DetectionInfo};
 pub fn write_report(out_dir: &Path, corpus_path: &Path, entries: &[AuditEntry]) -> Result<()> {
     fs::create_dir_all(out_dir).with_context(|| format!("create {}", out_dir.display()))?;
 
-    let html = render_index(corpus_path, entries);
-    let html_path = out_dir.join("index.html");
-    fs::write(&html_path, html).with_context(|| format!("write {}", html_path.display()))?;
+    // Sort: publisher ASC (no-publisher bucket last), then title ASC.
+    let mut sorted: Vec<&AuditEntry> = entries.iter().collect();
+    sorted.sort_by(|a, b| {
+        let pa = publisher_sort_key(a.publisher.as_deref());
+        let pb = publisher_sort_key(b.publisher.as_deref());
+        pa.cmp(&pb).then_with(|| a.title.cmp(&b.title))
+    });
+
+    let total_books = sorted.len();
+    let total_pages = total_books.div_ceil(PAGE_SIZE).max(1);
+
+    // toc_rows[page_idx] = Vec<(publisher_display, &AuditEntry)>
+    // We also build a global TOC view grouped by publisher → pages.
+    let mut pages: Vec<Vec<&AuditEntry>> = Vec::with_capacity(total_pages);
+    for chunk in sorted.chunks(PAGE_SIZE) {
+        pages.push(chunk.to_vec());
+    }
+    if pages.is_empty() {
+        pages.push(Vec::new());
+    }
+
+    for (idx, page_entries) in pages.iter().enumerate() {
+        let page_num = idx + 1;
+        let page_name = page_filename(page_num);
+        let html = render_page(corpus_path, page_entries, page_num, total_pages);
+        let page_path = out_dir.join(&page_name);
+        fs::write(&page_path, html).with_context(|| format!("write {}", page_path.display()))?;
+    }
+
+    let toc_html = render_toc(corpus_path, &pages, total_books);
+    let toc_path = out_dir.join("index.html");
+    fs::write(&toc_path, toc_html).with_context(|| format!("write {}", toc_path.display()))?;
 
     let data = serde_json::json!({
-        "schema": "audiologo-audit-v1",
+        "schema": "audiologo-audit-v2",
         "corpus_path": corpus_path.display().to_string(),
-        "books": entries.iter().map(book_to_json).collect::<Vec<_>>(),
+        "total_books": total_books,
+        "total_pages": total_pages,
+        "page_size": PAGE_SIZE,
+        "books": sorted.iter().map(|e| book_to_json(e)).collect::<Vec<_>>(),
     });
     let data_path = out_dir.join("data.json");
     fs::write(&data_path, serde_json::to_string_pretty(&data)?)
         .with_context(|| format!("write {}", data_path.display()))?;
 
     Ok(())
+}
+
+fn publisher_sort_key(p: Option<&str>) -> String {
+    match p {
+        Some(s) if !s.trim().is_empty() => s.to_lowercase(),
+        _ => NO_PUBLISHER_SORT_KEY.to_string(),
+    }
+}
+
+fn publisher_display(p: Option<&str>) -> &str {
+    match p {
+        Some(s) if !s.trim().is_empty() => s,
+        _ => NO_PUBLISHER_DISPLAY,
+    }
+}
+
+fn page_filename(page_num: usize) -> String {
+    format!("page-{page_num:02}.html")
 }
 
 fn book_to_json(e: &AuditEntry) -> serde_json::Value {
@@ -78,14 +149,44 @@ fn book_to_json(e: &AuditEntry) -> serde_json::Value {
     })
 }
 
-fn render_index(corpus_path: &Path, entries: &[AuditEntry]) -> String {
-    let mut sections = String::new();
-    for e in entries {
-        sections.push_str(&render_book_section(e));
+fn render_toc(corpus_path: &Path, pages: &[Vec<&AuditEntry>], total_books: usize) -> String {
+    // Group every book by publisher → list of (page_num, &AuditEntry).
+    let mut by_publisher: BTreeMap<String, Vec<(usize, &AuditEntry)>> = BTreeMap::new();
+    for (page_idx, page_entries) in pages.iter().enumerate() {
+        let page_num = page_idx + 1;
+        for entry in page_entries {
+            let key = publisher_sort_key(entry.publisher.as_deref());
+            by_publisher.entry(key).or_default().push((page_num, entry));
+        }
     }
 
-    let head = include_head();
-    let scripts = include_scripts();
+    let mut groups_html = String::new();
+    for items in by_publisher.values() {
+        let pub_display = publisher_display(items[0].1.publisher.as_deref());
+        let label = if items.len() == 1 { "book" } else { "books" };
+        let _ = write!(
+            groups_html,
+            r#"<section class="pub-group">
+  <h2>{pub} <span class="count">({count} {label})</span></h2>
+  <ul class="book-list">
+"#,
+            pub = html_escape(pub_display),
+            count = items.len(),
+        );
+        for (page_num, entry) in items {
+            let page_name = page_filename(*page_num);
+            let slug_escaped = html_escape(&entry.slug);
+            let _ = writeln!(
+                groups_html,
+                r#"    <li><a href="{page_name}#{slug_escaped}">{title}</a> <span class="muted">p.{page_num}</span></li>"#,
+                title = html_escape(&entry.title),
+            );
+        }
+        groups_html.push_str("  </ul>\n</section>\n");
+    }
+
+    let total_pages = pages.len();
+    let head = include_toc_head();
     format!(
         r#"<!DOCTYPE html>
 <html lang="en">
@@ -95,12 +196,70 @@ fn render_index(corpus_path: &Path, entries: &[AuditEntry]) -> String {
 </head>
 <body>
 <header>
-  <h1>Audiologo audit</h1>
+  <h1>Audiologo audit · TOC</h1>
+  <div class="meta">
+    <span>Corpus: <code>{corpus}</code></span>
+    <span>{total_books} books · {total_pages} pages · {page_size}/page</span>
+  </div>
+</header>
+<main class="toc">
+{groups_html}
+</main>
+</body>
+</html>"#,
+        corpus = html_escape(&corpus_path.display().to_string()),
+        page_size = PAGE_SIZE,
+    )
+}
+
+fn render_page(
+    corpus_path: &Path,
+    entries: &[&AuditEntry],
+    page_num: usize,
+    total_pages: usize,
+) -> String {
+    let mut sections = String::new();
+    for e in entries {
+        sections.push_str(&render_book_section(e));
+    }
+
+    let head = include_head();
+    let scripts = include_scripts();
+    let prev_link = if page_num > 1 {
+        format!(
+            r#"<a class="pager" href="{href}">← prev</a>"#,
+            href = page_filename(page_num - 1)
+        )
+    } else {
+        r#"<span class="pager disabled">← prev</span>"#.to_string()
+    };
+    let next_link = if page_num < total_pages {
+        format!(
+            r#"<a class="pager" href="{href}">next →</a>"#,
+            href = page_filename(page_num + 1)
+        )
+    } else {
+        r#"<span class="pager disabled">next →</span>"#.to_string()
+    };
+
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+{head}
+<title>Audiologo audit — page {page_num}/{total_pages}</title>
+</head>
+<body>
+<header>
+  <h1>Audiologo audit · page {page_num}/{total_pages}</h1>
   <div class="meta">
     <span>Corpus: <code>{corpus}</code></span>
     <span id="progress" class="progress"></span>
   </div>
   <div class="toolbar">
+    <a class="pager" href="index.html">↑ TOC</a>
+    {prev_link}
+    {next_link}
     <label>Filter:
       <select id="filter">
         <option value="all">All</option>
@@ -155,7 +314,7 @@ fn render_book_section(e: &AuditEntry) -> String {
     };
 
     format!(
-        r##"<section class="book" data-slug="{slug}" data-rating="">
+        r##"<section class="book" id="{slug}" data-slug="{slug}" data-rating="">
   <h2>{title}</h2>
   <div class="src"><code>{path}</code></div>
   <div class="row">
@@ -245,6 +404,7 @@ fn html_escape(s: &str) -> String {
 }
 
 fn include_head() -> &'static str {
+    // Page (per-book) CSS — shared base + book-section styling.
     r##"<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
@@ -291,12 +451,14 @@ header h1 {
   gap: 18px;
   font-size: 0.9rem;
   color: var(--muted);
+  flex-wrap: wrap;
 }
 .toolbar {
   margin-top: 12px;
   display: flex;
   gap: 16px;
   align-items: center;
+  flex-wrap: wrap;
 }
 .toolbar button {
   background: var(--accent);
@@ -307,6 +469,16 @@ header h1 {
   font-size: 0.9rem;
   cursor: pointer;
 }
+.pager {
+  font-size: 0.9rem;
+  color: var(--accent);
+  text-decoration: none;
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--muted);
+}
+.pager:hover { background: var(--card-bg); }
+.pager.disabled { color: var(--muted); border-color: var(--muted); opacity: 0.5; }
 main {
   padding: 24px;
   display: flex;
@@ -318,6 +490,7 @@ main {
   border-radius: 8px;
   padding: 20px;
   border: 1px solid transparent;
+  scroll-margin-top: 120px;
 }
 .book[data-rating="good"] { border-color: var(--good); }
 .book[data-rating="improve"] { border-color: var(--improve); }
@@ -377,6 +550,98 @@ audio { width: 100%; margin-top: 6px; }
 </style>"##
 }
 
+fn include_toc_head() -> &'static str {
+    // TOC CSS — shared base + grouping styles. No book-section
+    // markup on the TOC page so its DOM stays tiny.
+    r##"<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --fg: #1f2937;
+  --muted: #6b7280;
+  --accent: #2563eb;
+  --card-bg: #f9fafb;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f172a;
+    --fg: #e5e7eb;
+    --muted: #94a3b8;
+    --card-bg: #1e293b;
+  }
+}
+body {
+  font-family: -apple-system, system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  margin: 0;
+  padding: 0;
+}
+header {
+  background: var(--bg);
+  border-bottom: 1px solid var(--muted);
+  padding: 16px 24px;
+}
+header h1 { margin: 0 0 6px; font-size: 1.4rem; }
+.meta {
+  display: flex;
+  gap: 18px;
+  font-size: 0.9rem;
+  color: var(--muted);
+  flex-wrap: wrap;
+}
+main.toc {
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+.pub-group {
+  background: var(--card-bg);
+  border-radius: 8px;
+  padding: 16px 20px;
+}
+.pub-group h2 {
+  margin: 0 0 8px;
+  font-size: 1.05rem;
+}
+.pub-group .count {
+  color: var(--muted);
+  font-weight: normal;
+  font-size: 0.85rem;
+}
+.book-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 4px 18px;
+}
+.book-list li {
+  font-size: 0.92rem;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 0;
+  border-bottom: 1px dotted transparent;
+}
+.book-list li:hover { border-bottom-color: var(--muted); }
+.book-list a {
+  color: var(--fg);
+  text-decoration: none;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.book-list a:hover { color: var(--accent); }
+.muted { color: var(--muted); font-size: 0.8rem; font-variant-numeric: tabular-nums; }
+</style>"##
+}
+
 fn include_scripts() -> &'static str {
     r##"<script>
 (() => {
@@ -429,7 +694,7 @@ fn include_scripts() -> &'static str {
 
   function updateProgress() {
     const reviewed = sections.filter(s => s.dataset.rating).length;
-    progress.textContent = `${reviewed} / ${sections.length} reviewed`;
+    progress.textContent = `${reviewed} / ${sections.length} on this page reviewed`;
   }
 
   function applyFilter() {
@@ -446,23 +711,30 @@ fn include_scripts() -> &'static str {
     });
   }
 
+  // Walk localStorage for every audit annotation, not just this
+  // page's slugs — exporting from any page produces a complete
+  // report. Older "data not on this page" rows still come along.
   function exportReport() {
-    const books = sections.map(s => {
-      const slug = s.dataset.slug;
-      const d = load(slug);
-      return {
+    const books = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k || !k.startsWith(STORAGE_PREFIX)) continue;
+      const slug = k.slice(STORAGE_PREFIX.length);
+      let d = {};
+      try { d = JSON.parse(localStorage.getItem(k)) || {}; } catch { d = {}; }
+      if (!d.rating && !d.comment) continue;
+      books.push({
         slug,
-        title: s.querySelector("h2").textContent,
         rating: d.rating || null,
         comment: d.comment || null,
         updated_at: d.updated_at || null,
-      };
-    });
+      });
+    }
+    books.sort((a, b) => a.slug.localeCompare(b.slug));
     const out = {
-      schema: "audiologo-audit-annotations-v1",
+      schema: "audiologo-audit-annotations-v2",
       exported_at: new Date().toISOString(),
-      total: sections.length,
-      reviewed: books.filter(b => b.rating).length,
+      total: books.length,
       books,
     };
     const blob = new Blob([JSON.stringify(out, null, 2)], { type: "application/json" });
@@ -475,6 +747,18 @@ fn include_scripts() -> &'static str {
     a.remove();
     URL.revokeObjectURL(url);
   }
+
+  // Pause-other-clips on play. Operator complaint: a click can
+  // overlap two clips if the previous one was still running.
+  // Capture-phase listener catches every audio element on the
+  // page (including future ones, though we have none).
+  document.addEventListener("play", (e) => {
+    if (e.target.tagName === "AUDIO") {
+      document.querySelectorAll("audio").forEach((a) => {
+        if (a !== e.target && !a.paused) { a.pause(); }
+      });
+    }
+  }, true);
 
   sections.forEach(s => {
     hydrate(s);
@@ -497,4 +781,106 @@ fn include_scripts() -> &'static str {
   applyFilter();
 })();
 </script>"##
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn stub_entry(slug: &str, title: &str, publisher: Option<&str>) -> AuditEntry {
+        AuditEntry {
+            slug: slug.into(),
+            title: title.into(),
+            source_path: PathBuf::from(format!("/library/{title}.m4b")),
+            duration_ms: 60_000,
+            publisher: publisher.map(str::to_string),
+            copyright: None,
+            detection: DetectionInfo::Stub,
+            front_clip_rel: format!("clips/{slug}-front.m4a"),
+            end_clip_rel: format!("clips/{slug}-end.m4a"),
+            front_waveform_svg: "<svg/>".into(),
+            end_waveform_svg: "<svg/>".into(),
+        }
+    }
+
+    #[test]
+    fn publisher_sort_key_buckets_none_last() {
+        let a = publisher_sort_key(Some("Audible Studios"));
+        let z = publisher_sort_key(None);
+        let z2 = publisher_sort_key(Some("   "));
+        assert!(a < z);
+        assert_eq!(z, z2, "blank string treated as no-publisher");
+    }
+
+    #[test]
+    fn page_filename_zero_padded() {
+        assert_eq!(page_filename(1), "page-01.html");
+        assert_eq!(page_filename(50), "page-50.html");
+        assert_eq!(page_filename(100), "page-100.html");
+    }
+
+    #[test]
+    fn write_report_paginates_at_50() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let entries: Vec<AuditEntry> = (0..120)
+            .map(|i| {
+                let pub_name = match i % 3 {
+                    0 => Some("Audible Studios"),
+                    1 => Some("Brilliance Audio"),
+                    _ => None,
+                };
+                stub_entry(&format!("book-{i:03}"), &format!("Book {i:03}"), pub_name)
+            })
+            .collect();
+
+        write_report(tmp.path(), Path::new("/corpus"), &entries).expect("write report");
+
+        assert!(tmp.path().join("index.html").exists(), "index.html written");
+        assert!(tmp.path().join("page-01.html").exists());
+        assert!(tmp.path().join("page-02.html").exists());
+        assert!(tmp.path().join("page-03.html").exists());
+        assert!(
+            !tmp.path().join("page-04.html").exists(),
+            "120 / 50 = 3 pages"
+        );
+        assert!(tmp.path().join("data.json").exists());
+
+        let toc = fs::read_to_string(tmp.path().join("index.html")).unwrap();
+        assert!(toc.contains("Audible Studios"));
+        assert!(toc.contains("Brilliance Audio"));
+        assert!(toc.contains("(no publisher)"));
+        assert!(toc.contains("page-01.html#"));
+
+        let page1 = fs::read_to_string(tmp.path().join("page-01.html")).unwrap();
+        assert!(page1.contains("page 1/3"));
+        assert!(page1.contains("section class=\"book\""));
+        assert!(
+            page1.contains("addEventListener(\"play\""),
+            "pause-others JS present"
+        );
+
+        let page3 = fs::read_to_string(tmp.path().join("page-03.html")).unwrap();
+        assert!(page3.contains("page 3/3"));
+    }
+
+    #[test]
+    fn write_report_empty_corpus_still_writes_one_page() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        write_report(tmp.path(), Path::new("/corpus"), &[]).expect("write");
+        assert!(tmp.path().join("index.html").exists());
+        assert!(tmp.path().join("page-01.html").exists());
+    }
+
+    #[test]
+    fn write_report_under_50_books_single_page() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let entries: Vec<AuditEntry> = (0..10)
+            .map(|i| stub_entry(&format!("b{i}"), &format!("B {i}"), Some("Pub")))
+            .collect();
+        write_report(tmp.path(), Path::new("/c"), &entries).expect("write");
+        assert!(tmp.path().join("page-01.html").exists());
+        assert!(!tmp.path().join("page-02.html").exists());
+    }
 }
