@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT n.narrator_id AS \"narrator_id!: i64\",\n                      n.name AS \"name!: String\",\n                      n.name_sort AS \"name_sort?: String\",\n                      n.audible_id AS \"audible_id?: String\",\n                      n.image_url AS \"image_url?: String\",\n                      (SELECT COUNT(*) FROM book_narrator WHERE narrator_id = n.narrator_id)\n                          AS \"book_count!: i64\"\n                 FROM narrators n\n                WHERE ?1 IS NULL OR n.name LIKE ?1 COLLATE NOCASE\n                ORDER BY COALESCE(n.name_sort, n.name) COLLATE NOCASE\n                LIMIT ?2 OFFSET ?3",
+  "describe": {
+    "columns": [
+      {
+        "name": "narrator_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "name!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "name_sort?: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "audible_id?: String",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "image_url?: String",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "book_count!: i64",
+        "ordinal": 5,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "c2d54a73b9c1c25849bafff580650e56f846f946a2e6479342c6521525a64071"
+}

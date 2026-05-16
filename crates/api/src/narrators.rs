@@ -7,14 +7,21 @@
 //! junction (migration 013); the legacy `narrators.aliases`
 //! newline-string column was dropped in migration 015.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::{Json, response::Response};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::ApiError;
 use crate::state::ApiState;
+
+/// Default `limit` when callers omit it. Mirrors the authors-list
+/// endpoint default.
+const DEFAULT_LIMIT: i64 = 50;
+/// Hard ceiling on `limit`. Larger requests get clamped silently
+/// (no 400) — same posture as `books_list` + `authors_list`.
+const MAX_LIMIT: i64 = 200;
 
 /// Narrator detail JSON returned by the GET endpoint.
 #[derive(Debug, Serialize)]
@@ -108,6 +115,243 @@ pub async fn narrators_get(
     Ok((StatusCode::OK, Json(detail)).into_response())
 }
 
+/// Compact row in the paginated narrators list.
+///
+/// Trimmed shape vs. [`NarratorDetail`] — drops `bio` (too long
+/// for a list), `aliases` (junction query per row would be O(n)
+/// round-trips), and timestamps (operators browsing the list
+/// don't typically care).
+#[derive(Debug, Serialize)]
+pub struct NarratorListItem {
+    pub narrator_id: i64,
+    pub name: String,
+    pub name_sort: Option<String>,
+    pub audible_id: Option<String>,
+    pub image_url: Option<String>,
+    pub book_count: i64,
+}
+
+/// Response body for `GET /api/v1/narrators`. `total` is the count
+/// matching the filter (NOT clamped by `limit` / `offset`), so
+/// clients can build "page 1 of N" UIs without a second call.
+#[derive(Debug, Serialize)]
+pub struct NarratorsListResponse {
+    pub narrators: Vec<NarratorListItem>,
+    pub total: i64,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+/// Query-string params for the narrators list endpoint.
+#[derive(Debug, Deserialize, Default)]
+pub struct NarratorsListQuery {
+    /// Page size. Defaults to [`DEFAULT_LIMIT`] (50); clamped to
+    /// [`MAX_LIMIT`] (200) silently. Negative / zero values
+    /// clamp to 1.
+    #[serde(default)]
+    pub limit: Option<i64>,
+    /// Offset into the result set. Defaults to 0; negatives
+    /// clamp to 0.
+    #[serde(default)]
+    pub offset: Option<i64>,
+    /// Sort key. One of:
+    ///
+    /// * `name` — by display name, case-insensitive (default).
+    /// * `name_sort` — by `COALESCE(name_sort, name)`.
+    /// * `book_count` — descending by `book_count` (count of
+    ///   `book_narrator` rows), then by name ascending for
+    ///   stable tie-break. Surfaces the most prolific narrators.
+    ///
+    /// Unknown values produce `400 Bad Request` so typos surface
+    /// at the API boundary instead of silently picking the default.
+    #[serde(default)]
+    pub sort: Option<String>,
+    /// Optional case-insensitive substring filter on `name`.
+    /// Empty string is treated as "no filter".
+    #[serde(default)]
+    pub q: Option<String>,
+}
+
+/// Resolved sort key. Internal — surface uses the string form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NarratorsSort {
+    Name,
+    NameSort,
+    BookCountDesc,
+}
+
+impl NarratorsSort {
+    fn parse(s: Option<&str>) -> Result<Self, ApiError> {
+        match s {
+            None | Some("" | "name") => Ok(Self::Name),
+            Some("name_sort") => Ok(Self::NameSort),
+            Some("book_count") => Ok(Self::BookCountDesc),
+            Some(other) => Err(ApiError::BadRequest(format!(
+                "unknown sort {other:?}; expected one of name / name_sort / book_count"
+            ))),
+        }
+    }
+}
+
+const fn clamp_limit(raw: Option<i64>) -> i64 {
+    match raw {
+        None => DEFAULT_LIMIT,
+        Some(n) if n <= 0 => 1,
+        Some(n) if n > MAX_LIMIT => MAX_LIMIT,
+        Some(n) => n,
+    }
+}
+
+const fn clamp_offset(raw: Option<i64>) -> i64 {
+    match raw {
+        None => 0,
+        Some(n) if n < 0 => 0,
+        Some(n) => n,
+    }
+}
+
+/// `GET /api/v1/narrators[?limit=&offset=&sort=&q=]`
+///
+/// Returns `200 OK` with [`NarratorsListResponse`] JSON. `400 Bad
+/// Request` for an unknown `sort` value.
+///
+/// # Errors
+///
+/// Database access failures surface as [`ApiError::Internal`].
+#[allow(clippy::missing_panics_doc, clippy::too_many_lines)] // panic-free; macro arms inflate line count
+pub async fn narrators_list(
+    State(state): State<ApiState>,
+    Query(params): Query<NarratorsListQuery>,
+) -> Result<Response, ApiError> {
+    let sort = NarratorsSort::parse(params.sort.as_deref())?;
+    let limit = clamp_limit(params.limit);
+    let offset = clamp_offset(params.offset);
+
+    let q_filter = params
+        .q
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("%{s}%"));
+
+    let total: i64 = sqlx::query_scalar!(
+        r#"SELECT COUNT(*) AS "n!: i64"
+             FROM narrators
+            WHERE ?1 IS NULL OR name LIKE ?1 COLLATE NOCASE"#,
+        q_filter,
+    )
+    .fetch_one(state.inner.library.pool())
+    .await
+    .map_err(|e| ApiError::Internal(ab_core::Error::Database(format!("narrators count: {e}"))))?;
+
+    let pool = state.inner.library.pool();
+    let narrators: Vec<NarratorListItem> = match sort {
+        NarratorsSort::Name => sqlx::query!(
+            r#"SELECT n.narrator_id AS "narrator_id!: i64",
+                      n.name AS "name!: String",
+                      n.name_sort AS "name_sort?: String",
+                      n.audible_id AS "audible_id?: String",
+                      n.image_url AS "image_url?: String",
+                      (SELECT COUNT(*) FROM book_narrator WHERE narrator_id = n.narrator_id)
+                          AS "book_count!: i64"
+                 FROM narrators n
+                WHERE ?1 IS NULL OR n.name LIKE ?1 COLLATE NOCASE
+                ORDER BY n.name COLLATE NOCASE
+                LIMIT ?2 OFFSET ?3"#,
+            q_filter,
+            limit,
+            offset,
+        )
+        .fetch_all(pool)
+        .await
+        .map(|rows| {
+            rows.into_iter()
+                .map(|r| NarratorListItem {
+                    narrator_id: r.narrator_id,
+                    name: r.name,
+                    name_sort: r.name_sort,
+                    audible_id: r.audible_id,
+                    image_url: r.image_url,
+                    book_count: r.book_count,
+                })
+                .collect()
+        }),
+        NarratorsSort::NameSort => sqlx::query!(
+            r#"SELECT n.narrator_id AS "narrator_id!: i64",
+                      n.name AS "name!: String",
+                      n.name_sort AS "name_sort?: String",
+                      n.audible_id AS "audible_id?: String",
+                      n.image_url AS "image_url?: String",
+                      (SELECT COUNT(*) FROM book_narrator WHERE narrator_id = n.narrator_id)
+                          AS "book_count!: i64"
+                 FROM narrators n
+                WHERE ?1 IS NULL OR n.name LIKE ?1 COLLATE NOCASE
+                ORDER BY COALESCE(n.name_sort, n.name) COLLATE NOCASE
+                LIMIT ?2 OFFSET ?3"#,
+            q_filter,
+            limit,
+            offset,
+        )
+        .fetch_all(pool)
+        .await
+        .map(|rows| {
+            rows.into_iter()
+                .map(|r| NarratorListItem {
+                    narrator_id: r.narrator_id,
+                    name: r.name,
+                    name_sort: r.name_sort,
+                    audible_id: r.audible_id,
+                    image_url: r.image_url,
+                    book_count: r.book_count,
+                })
+                .collect()
+        }),
+        NarratorsSort::BookCountDesc => sqlx::query!(
+            r#"SELECT n.narrator_id AS "narrator_id!: i64",
+                      n.name AS "name!: String",
+                      n.name_sort AS "name_sort?: String",
+                      n.audible_id AS "audible_id?: String",
+                      n.image_url AS "image_url?: String",
+                      (SELECT COUNT(*) FROM book_narrator WHERE narrator_id = n.narrator_id)
+                          AS "book_count!: i64"
+                 FROM narrators n
+                WHERE ?1 IS NULL OR n.name LIKE ?1 COLLATE NOCASE
+                ORDER BY (SELECT COUNT(*) FROM book_narrator WHERE narrator_id = n.narrator_id) DESC,
+                         n.name COLLATE NOCASE
+                LIMIT ?2 OFFSET ?3"#,
+            q_filter,
+            limit,
+            offset,
+        )
+        .fetch_all(pool)
+        .await
+        .map(|rows| {
+            rows.into_iter()
+                .map(|r| NarratorListItem {
+                    narrator_id: r.narrator_id,
+                    name: r.name,
+                    name_sort: r.name_sort,
+                    audible_id: r.audible_id,
+                    image_url: r.image_url,
+                    book_count: r.book_count,
+                })
+                .collect()
+        }),
+    }
+    .map_err(|e| ApiError::Internal(ab_core::Error::Database(format!("narrators list: {e}"))))?;
+
+    Ok((
+        StatusCode::OK,
+        Json(NarratorsListResponse {
+            narrators,
+            total,
+            limit,
+            offset,
+        }),
+    )
+        .into_response())
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
@@ -161,5 +405,85 @@ mod tests {
         assert!(json["audible_id"].is_null());
         let aliases = json["aliases"].as_array().expect("aliases is array");
         assert!(aliases.is_empty());
+    }
+
+    #[test]
+    fn clamp_limit_respects_bounds() {
+        assert_eq!(clamp_limit(None), DEFAULT_LIMIT);
+        assert_eq!(clamp_limit(Some(0)), 1);
+        assert_eq!(clamp_limit(Some(-5)), 1);
+        assert_eq!(clamp_limit(Some(MAX_LIMIT)), MAX_LIMIT);
+        assert_eq!(clamp_limit(Some(MAX_LIMIT + 100)), MAX_LIMIT);
+        assert_eq!(clamp_limit(Some(75)), 75);
+    }
+
+    #[test]
+    fn clamp_offset_respects_bounds() {
+        assert_eq!(clamp_offset(None), 0);
+        assert_eq!(clamp_offset(Some(-1)), 0);
+        assert_eq!(clamp_offset(Some(0)), 0);
+        assert_eq!(clamp_offset(Some(250)), 250);
+    }
+
+    #[test]
+    fn sort_parses_documented_keys() {
+        assert_eq!(NarratorsSort::parse(None).unwrap(), NarratorsSort::Name);
+        assert_eq!(
+            NarratorsSort::parse(Some("")).unwrap(),
+            NarratorsSort::Name,
+            "empty string treated as default"
+        );
+        assert_eq!(
+            NarratorsSort::parse(Some("name")).unwrap(),
+            NarratorsSort::Name
+        );
+        assert_eq!(
+            NarratorsSort::parse(Some("name_sort")).unwrap(),
+            NarratorsSort::NameSort
+        );
+        assert_eq!(
+            NarratorsSort::parse(Some("book_count")).unwrap(),
+            NarratorsSort::BookCountDesc
+        );
+    }
+
+    #[test]
+    fn sort_rejects_unknown_with_400() {
+        match NarratorsSort::parse(Some("created_at")) {
+            Err(ApiError::BadRequest(msg)) => {
+                assert!(msg.contains("created_at"));
+                assert!(msg.contains("book_count"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn narrators_list_response_serializes_with_pagination_keys() {
+        let resp = NarratorsListResponse {
+            narrators: vec![NarratorListItem {
+                narrator_id: 11,
+                name: "Michael Kramer".into(),
+                name_sort: Some("Kramer, Michael".into()),
+                audible_id: Some("B002XYZ123".into()),
+                image_url: Some("https://example.invalid/k.jpg".into()),
+                book_count: 87,
+            }],
+            total: 213,
+            limit: 50,
+            offset: 0,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["total"], 213);
+        assert_eq!(json["limit"], 50);
+        assert_eq!(json["offset"], 0);
+        let items = json["narrators"].as_array().expect("narrators is array");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["narrator_id"], 11);
+        assert_eq!(items[0]["name"], "Michael Kramer");
+        assert_eq!(items[0]["book_count"], 87);
+        // Compact shape — these heavier fields are NOT in the list row.
+        assert!(items[0].get("bio").is_none(), "list row omits bio");
+        assert!(items[0].get("aliases").is_none(), "list row omits aliases");
     }
 }

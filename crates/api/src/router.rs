@@ -79,6 +79,7 @@ pub fn build_router(state: ApiState) -> Router {
             get(crate::books_transcript::books_transcript_get),
         )
         .route("/authors/{author_id}", get(crate::authors::authors_get))
+        .route("/narrators", get(crate::narrators::narrators_list))
         .route(
             "/narrators/{narrator_id}",
             get(crate::narrators::narrators_get),
