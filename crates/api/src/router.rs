@@ -75,6 +75,10 @@ pub fn build_router(state: ApiState) -> Router {
             get(crate::books_playlist::books_playlist_m3u8),
         )
         .route(
+            "/books/{book_id}/transcript.txt",
+            get(crate::books_transcript::books_transcript_get),
+        )
+        .route(
             "/books/{book_id}/status",
             axum::routing::patch(crate::progress::books_status_patch),
         )
