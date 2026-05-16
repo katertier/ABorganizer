@@ -51,9 +51,13 @@ deny = [
     # Deprecated by upstream.
     { crate = "failure", reason = "deprecated; use thiserror + anyhow" },
     { crate = "error-chain", reason = "deprecated; use thiserror + anyhow" },
-    # OpenSSL is system-dependent on macOS; we mandate rustls.
-    { crate = "openssl-sys", reason = "rustls is mandated workspace-wide" },
-    { crate = "native-tls", reason = "rustls is mandated workspace-wide" },
+    # macOS-only deployment uses native-tls (Security Framework +
+    # system keychain). We don't want a second TLS stack creeping
+    # back in via a transitive dep. openssl-sys stays banned because
+    # macOS's bundled OpenSSL is version-locked / abandonware and
+    # building a private openssl is a binary-size loss.
+    { crate = "openssl-sys", reason = "macOS deployment uses native-tls (Security Framework); avoid bundled OpenSSL" },
+    { crate = "rustls", reason = "macOS deployment uses native-tls; avoid second TLS stack in the tree" },
 ]
 
 [advisories]
