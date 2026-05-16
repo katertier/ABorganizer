@@ -79,7 +79,15 @@ fn main() -> Result<()> {
 
     let mut entries = Vec::with_capacity(sources.len());
     let mut used_slugs = std::collections::HashSet::new();
+    let total = sources.len();
     for (idx, src) in sources.iter().enumerate() {
+        // Per-25-books progress log so the operator (or another
+        // shell window) can confirm the run isn't hung. The
+        // walk + report-write phases log on their own; this
+        // covers the long extract-clip / render-waveform loop.
+        if idx > 0 && idx % 25 == 0 {
+            tracing::info!(processed = idx, total = total, "audiologo_audit.progress");
+        }
         match build_entry(idx, src, &clips_dir, &mut used_slugs) {
             Ok(Some(entry)) => entries.push(entry),
             Ok(None) => {
@@ -145,14 +153,29 @@ fn build_entry(
     let front_clip_path = clips_dir.join(&front_clip_name);
     let end_clip_path = clips_dir.join(&end_clip_name);
 
-    clips::extract_clip(&src.path, &front_clip_path, 0, CLIP_DURATION_SECS)
-        .with_context(|| format!("front-clip extract for {}", src.path.display()))?;
+    // Resume capability: skip ffmpeg extraction when the clip
+    // already exists from a previous run. The operator can
+    // re-run the binary with a larger --limit and only the new
+    // books re-extract; the first N from a prior run are
+    // instant. Each clip is checked independently so a
+    // killed-mid-book run (front written, end missing) recovers
+    // cleanly on next pass.
+    if front_clip_path.exists() {
+        tracing::debug!(slug = %slug, "audiologo_audit.front_clip_cached");
+    } else {
+        clips::extract_clip(&src.path, &front_clip_path, 0, CLIP_DURATION_SECS)
+            .with_context(|| format!("front-clip extract for {}", src.path.display()))?;
+    }
 
     let end_start_ms = src
         .duration_ms
         .saturating_sub(u64::from(CLIP_DURATION_SECS) * 1000);
-    clips::extract_clip(&src.path, &end_clip_path, end_start_ms, CLIP_DURATION_SECS)
-        .with_context(|| format!("end-clip extract for {}", src.path.display()))?;
+    if end_clip_path.exists() {
+        tracing::debug!(slug = %slug, "audiologo_audit.end_clip_cached");
+    } else {
+        clips::extract_clip(&src.path, &end_clip_path, end_start_ms, CLIP_DURATION_SECS)
+            .with_context(|| format!("end-clip extract for {}", src.path.display()))?;
+    }
 
     let front_waveform_svg =
         waveform::render(&front_clip_path, None).unwrap_or_else(|_| empty_waveform_inline());
