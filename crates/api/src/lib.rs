@@ -38,6 +38,7 @@ pub mod rate_limit;
 pub mod reports;
 pub mod router;
 pub mod saved_queries;
+pub mod search;
 pub mod series;
 pub mod state;
 pub mod stats;

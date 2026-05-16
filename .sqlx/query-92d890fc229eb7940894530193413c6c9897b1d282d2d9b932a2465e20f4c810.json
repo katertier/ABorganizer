@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT b.book_id AS \"book_id!: i64\",\n                  b.title AS \"title!: String\",\n                  b.subtitle AS \"subtitle?: String\",\n                  snippet(books_fts, -1, '[match]', '[/match]', '…', 16)\n                      AS \"snippet?: String\"\n             FROM books_fts\n             JOIN books b ON b.book_id = books_fts.rowid\n            WHERE books_fts MATCH ?1\n            ORDER BY bm25(books_fts), b.title COLLATE NOCASE\n            LIMIT ?2 OFFSET ?3",
+  "describe": {
+    "columns": [
+      {
+        "name": "book_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "title!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "subtitle?: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "snippet?: String",
+        "ordinal": 3,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "92d890fc229eb7940894530193413c6c9897b1d282d2d9b932a2465e20f4c810"
+}
