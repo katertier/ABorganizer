@@ -493,6 +493,12 @@ enum DoctorAction {
     /// (env, config.toml, or Keychain). Never reveals the
     /// stored value — only the source tag.
     Aax,
+    /// Print the resolved tunables tree (built-in defaults +
+    /// `<storage_root>/config.toml` + `AB_*` env vars), with
+    /// secret-material fields replaced by `<redacted>`. Useful
+    /// for verifying that an operator-edited config.toml or
+    /// `AB_FOO__BAR` env var is actually being picked up.
+    Tunables,
 }
 
 #[derive(Debug, Subcommand)]
@@ -587,6 +593,7 @@ async fn main() -> Result<()> {
                 doctor_speech_install(&cli.daemon, language, all, cli.output).await?;
             }
             Some(DoctorAction::Aax) => doctor_aax(cli.output)?,
+            Some(DoctorAction::Tunables) => doctor_tunables(cli.output)?,
         },
         Command::Audiologos { action } => match action {
             AudiologoAction::Cut {
@@ -789,6 +796,50 @@ fn aax_forget_bytes(output: OutputFormat) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn doctor_tunables(output: OutputFormat) -> Result<()> {
+    let storage_root = ab_core::paths::app_support_dir();
+    let tunables = ab_core::Tunables::load(&storage_root).context("load tunables")?;
+    let mut value = serde_json::to_value(&tunables).context("serialise tunables")?;
+    redact_tunables_secrets(&mut value);
+
+    let pretty = serde_json::to_string_pretty(&value).unwrap_or_default();
+    match output {
+        OutputFormat::Json => {
+            println!("{pretty}");
+        }
+        OutputFormat::Human => {
+            println!("# Tunables (resolved: defaults → config.toml → AB_* env)");
+            println!("# Secrets redacted. JSON shape.");
+            println!("{pretty}");
+        }
+    }
+    Ok(())
+}
+
+/// Mutate `value` in place, replacing known-secret fields with
+/// `"<redacted>"`. Keeps the JSON shape so the operator can still
+/// tell whether a value is set (the redaction is visible) without
+/// revealing the underlying bytes.
+///
+/// Today's secret-field list (kept tiny on purpose — when this
+/// grows past 4-5 entries, hoist to a method on Tunables that
+/// owns the list at the type level):
+///
+/// * `audio.aax_activation_bytes` (ADR-0053)
+fn redact_tunables_secrets(value: &mut serde_json::Value) {
+    use serde_json::Value;
+    if let Value::Object(map) = value {
+        if let Some(Value::Object(audio)) = map.get_mut("audio") {
+            if let Some(slot) = audio.get_mut("aax_activation_bytes") {
+                if !slot.is_null() {
+                    *slot = Value::String("<redacted>".to_owned());
+                }
+            }
+        }
+    }
 }
 
 #[allow(clippy::unnecessary_wraps)]
