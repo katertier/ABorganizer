@@ -202,6 +202,21 @@ fn build_pipeline_stages(tunables: &Tunables) -> Vec<Arc<dyn Stage>> {
         )),
     ];
 
+    // `aax-decrypt` (ADR-0053) — Lossless AAX → m4b container
+    // swap via ffmpeg shell-out (ADR-0053 Revision 2 after the
+    // AVFoundation feasibility finding ruled out a Swift FFI
+    // path; ADR-0055 proposes a future Rust port that drops the
+    // ffmpeg runtime dep). Runs in parallel with every other
+    // stage. The matching `PostTranscodeSourcesTarget` cleanup
+    // target reaps the AAX source after refs settle — same
+    // lifecycle as `transcode-m4b`. Skips with a warn when
+    // activation bytes are missing or ffmpeg is not on PATH;
+    // `aborg doctor aax` is the operator-facing remediation
+    // surface.
+    stages.push(Arc::new(ab_aax_decrypt::AaxDecryptStage::new(
+        tunables.audio.clone(),
+    )));
+
     // `transcode-m4b` (ADR-0027) — Background-priority re-encode
     // of every active non-m4b source for a book into the
     // canonical m4b container. Runs in parallel with every other
@@ -209,6 +224,11 @@ fn build_pipeline_stages(tunables: &Tunables) -> Vec<Arc<dyn Stage>> {
     // consumers read them. The matching `PostTranscodeSourcesTarget`
     // cleanup target (registered in `build_cleanup_registry`)
     // reaps the source rows once refs settle.
+    //
+    // When an AAX source's `aax-decrypt` stage produces the m4b
+    // first, `transcode-m4b`'s "skip if format=m4b" gate
+    // short-circuits naturally; the two stages compose without
+    // explicit ordering.
     stages.push(Arc::new(ab_transcode::TranscodeM4bStage::new()));
 
     // `write-tags-early` (ADR-0028, Phase A2) — opt-in via
