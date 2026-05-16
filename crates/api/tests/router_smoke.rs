@@ -310,6 +310,11 @@ async fn narrators_get_protected() {
 }
 
 #[tokio::test]
+async fn series_get_protected() {
+    assert_protected("GET", "/series/1").await;
+}
+
+#[tokio::test]
 async fn books_status_protected() {
     assert_protected("PATCH", "/books/1/status").await;
 }
