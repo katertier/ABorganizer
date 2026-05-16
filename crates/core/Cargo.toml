@@ -32,6 +32,11 @@ figment    = { workspace = true }
 # Marker types live in `path_jail::types`; we wire them onto
 # our trust zones in `path_jail` module.
 path_jail  = { workspace = true }
+# macOS Keychain backend for the AAX activation-bytes resolver
+# (ADR-0053). Default features only — we use the
+# `passwords::set_generic_password` / `get_generic_password`
+# / `delete_generic_password` surface.
+security-framework = { workspace = true }
 serde      = { workspace = true }
 # B.2a: ai_cache.content size-capped deserialiser
 # (`deserialize_cache_content` in `cache` module).

@@ -182,6 +182,12 @@ walkdir        = "2.5"
 # already pulls `zip` 2.x with minimal features internally; we
 # do not depend on `zip` directly anymore.
 safe_unzip     = "0.1"
+# macOS Keychain access (ADR-0053). Used by the AAX
+# activation-bytes resolver's "path 3" — the default
+# persistent store for the operator's per-account decrypt
+# key. Pulls in Security.framework at link time; macOS-only,
+# matches the workspace target. MIT OR Apache-2.0.
+security-framework = "3.7"
 # Filesystem sandbox for trust-zone-validated path handling
 # (ADR-0049). Restricts paths to a root directory; blocks
 # traversal, symlink escapes, absolute injection, null bytes.
