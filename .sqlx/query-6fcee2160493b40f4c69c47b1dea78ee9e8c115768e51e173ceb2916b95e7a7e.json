@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT COUNT(*) AS \"n!: i64\"\n             FROM narrators WHERE name LIKE ?1 COLLATE NOCASE",
+  "query": "SELECT COUNT(*) AS \"n!: i64\"\n             FROM authors_fts WHERE authors_fts MATCH ?1",
   "describe": {
     "columns": [
       {
@@ -16,5 +16,5 @@
       false
     ]
   },
-  "hash": "62b27afec37f8236c22982b16d86a996ace70d91a0450b418a8b5d9231eda366"
+  "hash": "6fcee2160493b40f4c69c47b1dea78ee9e8c115768e51e173ceb2916b95e7a7e"
 }
