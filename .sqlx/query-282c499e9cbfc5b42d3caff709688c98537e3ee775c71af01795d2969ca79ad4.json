@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"count!: i64\" FROM operation_journal\n            WHERE (?1 IS NULL OR op_kind   = ?1)\n              AND (?2 IS NULL OR progress  = ?2)\n              AND (?3 IS NULL OR batch_id  = ?3)",
+  "describe": {
+    "columns": [
+      {
+        "name": "count!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "282c499e9cbfc5b42d3caff709688c98537e3ee775c71af01795d2969ca79ad4"
+}
