@@ -353,6 +353,148 @@ pub async fn authors_list(
         .into_response())
 }
 
+/// One row in [`AuthorBooksResponse`].
+///
+/// Slim by design — same trade-off as [`AuthorListItem`]: enough
+/// for an author-detail page to render the book strip without
+/// re-fetching `/books/{id}` for each row.
+#[derive(Debug, Serialize)]
+pub struct AuthorBookEntry {
+    pub book_id: i64,
+    pub title: String,
+    pub release_date: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub reading_status: String,
+}
+
+/// Response body for `GET /api/v1/authors/{author_id}/books`.
+///
+/// Mirrors [`AuthorsListResponse`] shape: pagination keys so the
+/// client can build "page X of Y" UIs.
+#[derive(Debug, Serialize)]
+pub struct AuthorBooksResponse {
+    pub books: Vec<AuthorBookEntry>,
+    pub total: i64,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+/// `GET /api/v1/authors/{author_id}/books[?limit=&offset=]`
+///
+/// Returns `200 OK` with [`AuthorBooksResponse`] JSON listing the
+/// books whose `author_id` FK points at this author. `404 Not
+/// Found` when the author doesn't exist. Empty `books` array
+/// when the author exists but has no books (legal — an `authors`
+/// row may exist before its first book is imported, e.g. via the
+/// canonical-author-enrich pipeline).
+///
+/// Books are ordered by `release_date` descending (newest first;
+/// NULL release dates sort last via `release_date IS NULL`), then
+/// by `books.title` as the tiebreaker. Soft-deleted books
+/// (`books.deleted_at IS NOT NULL`) stay in the result — same
+/// posture as `series_books`. The author-detail page can dim them
+/// client-side if needed.
+///
+/// Single-FK author model: every book lands in exactly one
+/// author's bucket. Multi-author books are not modelled today
+/// (cross-ref `Dimension::Author` doc-comment in `ab-stats`),
+/// which is why this endpoint can use the simple FK predicate
+/// rather than a junction-table JOIN.
+///
+/// # Errors
+///
+/// Database access failures surface as [`ApiError::Internal`].
+#[allow(clippy::missing_panics_doc)] // panic-free
+pub async fn authors_books(
+    State(state): State<ApiState>,
+    Path(author_id): Path<i64>,
+    Query(params): Query<AuthorBooksQuery>,
+) -> Result<Response, ApiError> {
+    let pool = state.inner.library.pool();
+    let limit = clamp_limit(params.limit);
+    let offset = clamp_offset(params.offset);
+
+    let author_exists = sqlx::query_scalar!(
+        r#"SELECT 1 AS "n!: i64" FROM authors WHERE author_id = ?"#,
+        author_id,
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        ApiError::Internal(ab_core::Error::Database(format!(
+            "author existence check: {e}"
+        )))
+    })?
+    .is_some();
+
+    if !author_exists {
+        return Err(ApiError::NotFound(format!("author {author_id}")));
+    }
+
+    let total: i64 = sqlx::query_scalar!(
+        r#"SELECT COUNT(*) AS "n!: i64"
+             FROM books
+            WHERE author_id = ?"#,
+        author_id,
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| {
+        ApiError::Internal(ab_core::Error::Database(format!("author books count: {e}")))
+    })?;
+
+    let rows = sqlx::query!(
+        r#"SELECT book_id          AS "book_id!: i64",
+                  title            AS "title!: String",
+                  release_date     AS "release_date?: String",
+                  duration_ms      AS "duration_ms?: i64",
+                  reading_status   AS "reading_status!: String"
+             FROM books
+            WHERE author_id = ?
+            ORDER BY release_date IS NULL,
+                     release_date DESC,
+                     title COLLATE NOCASE
+            LIMIT ? OFFSET ?"#,
+        author_id,
+        limit,
+        offset,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| ApiError::Internal(ab_core::Error::Database(format!("author books: {e}"))))?;
+
+    let books: Vec<AuthorBookEntry> = rows
+        .into_iter()
+        .map(|r| AuthorBookEntry {
+            book_id: r.book_id,
+            title: r.title,
+            release_date: r.release_date,
+            duration_ms: r.duration_ms,
+            reading_status: r.reading_status,
+        })
+        .collect();
+
+    Ok((
+        StatusCode::OK,
+        Json(AuthorBooksResponse {
+            books,
+            total,
+            limit,
+            offset,
+        }),
+    )
+        .into_response())
+}
+
+/// Query-string params for [`authors_books`].
+#[derive(Debug, Deserialize, Default)]
+pub struct AuthorBooksQuery {
+    #[serde(default)]
+    pub limit: Option<i64>,
+    #[serde(default)]
+    pub offset: Option<i64>,
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
@@ -467,5 +609,55 @@ mod tests {
         // Compact shape — these heavier fields are NOT in the list row.
         assert!(items[0].get("bio").is_none(), "list row omits bio");
         assert!(items[0].get("aliases").is_none(), "list row omits aliases");
+    }
+
+    #[test]
+    fn author_book_entry_serializes_with_expected_keys() {
+        let e = AuthorBookEntry {
+            book_id: 42,
+            title: "The Way of Kings".into(),
+            release_date: Some("2010-08-31".into()),
+            duration_ms: Some(45_000_000),
+            reading_status: "finished".into(),
+        };
+        let json = serde_json::to_value(&e).unwrap();
+        assert_eq!(json["book_id"], 42);
+        assert_eq!(json["title"], "The Way of Kings");
+        assert_eq!(json["release_date"], "2010-08-31");
+        assert_eq!(json["duration_ms"], 45_000_000);
+        assert_eq!(json["reading_status"], "finished");
+    }
+
+    #[test]
+    fn author_book_entry_preserves_null_optional_fields() {
+        let e = AuthorBookEntry {
+            book_id: 1,
+            title: "Untitled".into(),
+            release_date: None,
+            duration_ms: None,
+            reading_status: "want_to_read".into(),
+        };
+        let json = serde_json::to_value(&e).unwrap();
+        assert!(
+            json.get("release_date").is_some(),
+            "release_date key present even when null"
+        );
+        assert!(json["release_date"].is_null());
+        assert!(json["duration_ms"].is_null());
+    }
+
+    #[test]
+    fn author_books_response_serializes_with_pagination_keys() {
+        let r = AuthorBooksResponse {
+            books: vec![],
+            total: 0,
+            limit: 50,
+            offset: 0,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("\"books\""));
+        assert!(json.contains("\"total\""));
+        assert!(json.contains("\"limit\""));
+        assert!(json.contains("\"offset\""));
     }
 }
