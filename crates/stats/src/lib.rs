@@ -76,6 +76,12 @@ pub enum Dimension {
     /// tag-read); books without a parseable `release_date` roll
     /// into `unknown`.
     Decade,
+    /// Books per publisher. Joins through `publishers.name` via
+    /// `books.publisher_id`; books with no publisher fall into
+    /// the `unknown` bucket. The `TOP_N` collapse-long-tail step
+    /// keeps the response bounded on libraries with many
+    /// small-publisher entries.
+    Publisher,
 }
 
 impl Dimension {
@@ -86,6 +92,7 @@ impl Dimension {
             "reading_status" => Self::ReadingStatus,
             "acquisition_year" => Self::AcquisitionYear,
             "decade" => Self::Decade,
+            "publisher" => Self::Publisher,
             other => return Err(StatsError::UnsupportedDimension(other.to_owned())),
         })
     }
@@ -98,6 +105,7 @@ impl Dimension {
             Self::ReadingStatus => "reading_status",
             Self::AcquisitionYear => "acquisition_year",
             Self::Decade => "decade",
+            Self::Publisher => "publisher",
         }
     }
 }
@@ -201,6 +209,7 @@ pub async fn breakdown(
         Dimension::ReadingStatus => reading_status_breakdown(pool).await?,
         Dimension::AcquisitionYear => acquisition_year_breakdown(pool).await?,
         Dimension::Decade => decade_breakdown(pool).await?,
+        Dimension::Publisher => publisher_breakdown(pool).await?,
     };
     let buckets = collapse_long_tail(raw);
     let buckets = with_percentages(buckets);
@@ -339,6 +348,30 @@ async fn decade_breakdown(pool: &SqlitePool) -> Result<Vec<RawBucket>, StatsErro
          WHERE deleted_at IS NULL
          GROUP BY 1
          ORDER BY 1 DESC"#,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| RawBucket {
+            label: r.bucket_label,
+            count: r.n,
+            hours_ms: r.hours_ms,
+        })
+        .collect())
+}
+
+async fn publisher_breakdown(pool: &SqlitePool) -> Result<Vec<RawBucket>, StatsError> {
+    let rows = sqlx::query!(
+        r#"SELECT
+            COALESCE(p.name, 'unknown') AS "bucket_label!: String",
+            COUNT(*) AS "n!: i64",
+            COALESCE(SUM(b.duration_ms), 0) AS "hours_ms!: i64"
+         FROM books b
+         LEFT JOIN publishers p ON p.publisher_id = b.publisher_id
+         WHERE b.deleted_at IS NULL
+         GROUP BY b.publisher_id
+         ORDER BY COUNT(*) DESC"#,
     )
     .fetch_all(pool)
     .await?;
@@ -548,6 +581,61 @@ mod tests {
         assert!(labels.contains(&"25h+"));
     }
 
+    #[tokio::test]
+    async fn publisher_buckets_join_publishers_table() {
+        let (_d, db) = open_db().await;
+        let p_audible = sqlx::query!("INSERT INTO publishers (name) VALUES ('Audible Studios')")
+            .execute(db.pool())
+            .await
+            .expect("insert publisher audible")
+            .last_insert_rowid();
+        let p_random = sqlx::query!("INSERT INTO publishers (name) VALUES ('Random House')")
+            .execute(db.pool())
+            .await
+            .expect("insert publisher random")
+            .last_insert_rowid();
+        let id1 = add_book(&db, "A", Some("en"), Some(1), "reading").await;
+        let id2 = add_book(&db, "B", Some("en"), Some(1), "reading").await;
+        let id3 = add_book(&db, "C", Some("en"), Some(1), "reading").await;
+        let _id4 = add_book(&db, "D", Some("en"), Some(1), "reading").await;
+        sqlx::query!(
+            "UPDATE books SET publisher_id = ? WHERE book_id = ?",
+            p_audible,
+            id1,
+        )
+        .execute(db.pool())
+        .await
+        .expect("set p1");
+        sqlx::query!(
+            "UPDATE books SET publisher_id = ? WHERE book_id = ?",
+            p_audible,
+            id2,
+        )
+        .execute(db.pool())
+        .await
+        .expect("set p2");
+        sqlx::query!(
+            "UPDATE books SET publisher_id = ? WHERE book_id = ?",
+            p_random,
+            id3,
+        )
+        .execute(db.pool())
+        .await
+        .expect("set p3");
+
+        let b = breakdown(db.pool(), Dimension::Publisher)
+            .await
+            .expect("breakdown");
+        let counts: std::collections::HashMap<String, u64> = b
+            .buckets
+            .iter()
+            .map(|x| (x.label.clone(), x.count))
+            .collect();
+        assert_eq!(counts.get("Audible Studios").copied(), Some(2));
+        assert_eq!(counts.get("Random House").copied(), Some(1));
+        assert_eq!(counts.get("unknown").copied(), Some(1));
+    }
+
     #[test]
     fn dimension_parse_round_trip() {
         for d in [
@@ -556,6 +644,7 @@ mod tests {
             Dimension::ReadingStatus,
             Dimension::AcquisitionYear,
             Dimension::Decade,
+            Dimension::Publisher,
         ] {
             assert_eq!(Dimension::parse(d.as_str()).expect("parse"), d);
         }

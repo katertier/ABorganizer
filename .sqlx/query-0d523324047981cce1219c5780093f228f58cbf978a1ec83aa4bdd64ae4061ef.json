@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO publishers (name) VALUES ('Random House')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "0d523324047981cce1219c5780093f228f58cbf978a1ec83aa4bdd64ae4061ef"
+}
