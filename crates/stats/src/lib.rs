@@ -71,6 +71,11 @@ pub enum Dimension {
     Length,
     ReadingStatus,
     AcquisitionYear,
+    /// Release-date decade (`2010s`, `1990s`, …). Bucketed from
+    /// `books.release_date` (ISO 8601 date string from Audnexus /
+    /// tag-read); books without a parseable `release_date` roll
+    /// into `unknown`.
+    Decade,
 }
 
 impl Dimension {
@@ -80,6 +85,7 @@ impl Dimension {
             "length" => Self::Length,
             "reading_status" => Self::ReadingStatus,
             "acquisition_year" => Self::AcquisitionYear,
+            "decade" => Self::Decade,
             other => return Err(StatsError::UnsupportedDimension(other.to_owned())),
         })
     }
@@ -91,6 +97,7 @@ impl Dimension {
             Self::Length => "length",
             Self::ReadingStatus => "reading_status",
             Self::AcquisitionYear => "acquisition_year",
+            Self::Decade => "decade",
         }
     }
 }
@@ -193,6 +200,7 @@ pub async fn breakdown(
         Dimension::Length => length_breakdown(pool).await?,
         Dimension::ReadingStatus => reading_status_breakdown(pool).await?,
         Dimension::AcquisitionYear => acquisition_year_breakdown(pool).await?,
+        Dimension::Decade => decade_breakdown(pool).await?,
     };
     let buckets = collapse_long_tail(raw);
     let buckets = with_percentages(buckets);
@@ -288,6 +296,43 @@ async fn acquisition_year_breakdown(pool: &SqlitePool) -> Result<Vec<RawBucket>,
     let rows = sqlx::query!(
         r#"SELECT
             strftime('%Y', created_at, 'unixepoch') AS "bucket_label!: String",
+            COUNT(*) AS "n!: i64",
+            COALESCE(SUM(duration_ms), 0) AS "hours_ms!: i64"
+         FROM books
+         WHERE deleted_at IS NULL
+         GROUP BY 1
+         ORDER BY 1 DESC"#,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| RawBucket {
+            label: r.bucket_label,
+            count: r.n,
+            hours_ms: r.hours_ms,
+        })
+        .collect())
+}
+
+/// Group books by release-date decade. `books.release_date` is an
+/// ISO 8601 date string (`YYYY-MM-DD`) when Audnexus / tag-read
+/// populated it; rows where it's NULL or the first 4 chars don't
+/// parse as a year fall into the `unknown` bucket.
+///
+/// Decade label format: `2010s`, `1990s`, etc. — the SQL
+/// `substr(release_date, 1, 3) || '0s'` trick avoids needing a
+/// CAST + arithmetic round, and works for any 4-digit YYYY
+/// prefix.
+async fn decade_breakdown(pool: &SqlitePool) -> Result<Vec<RawBucket>, StatsError> {
+    let rows = sqlx::query!(
+        r#"SELECT
+            CASE
+                WHEN release_date IS NULL THEN 'unknown'
+                WHEN length(release_date) < 4 THEN 'unknown'
+                WHEN CAST(substr(release_date, 1, 4) AS INTEGER) = 0 THEN 'unknown'
+                ELSE substr(release_date, 1, 3) || '0s'
+            END AS "bucket_label!: String",
             COUNT(*) AS "n!: i64",
             COALESCE(SUM(duration_ms), 0) AS "hours_ms!: i64"
          FROM books
@@ -446,6 +491,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn decade_buckets_group_by_release_year_prefix() {
+        let (_d, db) = open_db().await;
+        // Two 2010s + one 1990s + one unknown (NULL release_date).
+        let id1 = add_book(&db, "A", Some("en"), Some(1), "reading").await;
+        let id2 = add_book(&db, "B", Some("en"), Some(1), "reading").await;
+        let id3 = add_book(&db, "C", Some("en"), Some(1), "reading").await;
+        let _id4 = add_book(&db, "D", Some("en"), Some(1), "reading").await;
+        sqlx::query!(
+            "UPDATE books SET release_date = '2012-03-04' WHERE book_id = ?",
+            id1,
+        )
+        .execute(db.pool())
+        .await
+        .expect("set rd1");
+        sqlx::query!(
+            "UPDATE books SET release_date = '2019-11-30' WHERE book_id = ?",
+            id2,
+        )
+        .execute(db.pool())
+        .await
+        .expect("set rd2");
+        sqlx::query!(
+            "UPDATE books SET release_date = '1995' WHERE book_id = ?",
+            id3,
+        )
+        .execute(db.pool())
+        .await
+        .expect("set rd3");
+
+        let b = breakdown(db.pool(), Dimension::Decade)
+            .await
+            .expect("breakdown");
+        let counts: std::collections::HashMap<String, u64> = b
+            .buckets
+            .iter()
+            .map(|x| (x.label.clone(), x.count))
+            .collect();
+        assert_eq!(counts.get("2010s").copied(), Some(2));
+        assert_eq!(counts.get("1990s").copied(), Some(1));
+        assert_eq!(counts.get("unknown").copied(), Some(1));
+    }
+
+    #[tokio::test]
     async fn length_buckets_partition_durations() {
         let (_d, db) = open_db().await;
         let _ = add_book(&db, "Short", Some("en"), Some(2 * 3_600_000), "reading").await;
@@ -467,6 +555,7 @@ mod tests {
             Dimension::Length,
             Dimension::ReadingStatus,
             Dimension::AcquisitionYear,
+            Dimension::Decade,
         ] {
             assert_eq!(Dimension::parse(d.as_str()).expect("parse"), d);
         }

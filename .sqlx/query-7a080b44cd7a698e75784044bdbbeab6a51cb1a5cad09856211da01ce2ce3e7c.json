@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE books SET release_date = '1995' WHERE book_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "7a080b44cd7a698e75784044bdbbeab6a51cb1a5cad09856211da01ce2ce3e7c"
+}
