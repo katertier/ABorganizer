@@ -82,6 +82,11 @@ pub enum Dimension {
     /// keeps the response bounded on libraries with many
     /// small-publisher entries.
     Publisher,
+    /// Books per audio container format (`m4b`, `mp3`, `flac`, …).
+    /// Takes the lowercased `format` of each book's first active
+    /// file (`MIN(file_id) WHERE is_active = 1`); books with no
+    /// active file or no recorded format roll into `unknown`.
+    Format,
 }
 
 impl Dimension {
@@ -93,6 +98,7 @@ impl Dimension {
             "acquisition_year" => Self::AcquisitionYear,
             "decade" => Self::Decade,
             "publisher" => Self::Publisher,
+            "format" => Self::Format,
             other => return Err(StatsError::UnsupportedDimension(other.to_owned())),
         })
     }
@@ -106,6 +112,7 @@ impl Dimension {
             Self::AcquisitionYear => "acquisition_year",
             Self::Decade => "decade",
             Self::Publisher => "publisher",
+            Self::Format => "format",
         }
     }
 }
@@ -210,6 +217,7 @@ pub async fn breakdown(
         Dimension::AcquisitionYear => acquisition_year_breakdown(pool).await?,
         Dimension::Decade => decade_breakdown(pool).await?,
         Dimension::Publisher => publisher_breakdown(pool).await?,
+        Dimension::Format => format_breakdown(pool).await?,
     };
     let buckets = collapse_long_tail(raw);
     let buckets = with_percentages(buckets);
@@ -371,6 +379,36 @@ async fn publisher_breakdown(pool: &SqlitePool) -> Result<Vec<RawBucket>, StatsE
          LEFT JOIN publishers p ON p.publisher_id = b.publisher_id
          WHERE b.deleted_at IS NULL
          GROUP BY b.publisher_id
+         ORDER BY COUNT(*) DESC"#,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| RawBucket {
+            label: r.bucket_label,
+            count: r.n,
+            hours_ms: r.hours_ms,
+        })
+        .collect())
+}
+
+async fn format_breakdown(pool: &SqlitePool) -> Result<Vec<RawBucket>, StatsError> {
+    let rows = sqlx::query!(
+        r#"SELECT
+            COALESCE(LOWER(bf.format), 'unknown') AS "bucket_label!: String",
+            COUNT(*) AS "n!: i64",
+            COALESCE(SUM(b.duration_ms), 0) AS "hours_ms!: i64"
+         FROM books b
+         LEFT JOIN (
+             SELECT book_id, MIN(file_id) AS file_id
+             FROM book_files
+             WHERE is_active = 1
+             GROUP BY book_id
+         ) first ON first.book_id = b.book_id
+         LEFT JOIN book_files bf ON bf.file_id = first.file_id
+         WHERE b.deleted_at IS NULL
+         GROUP BY LOWER(bf.format)
          ORDER BY COUNT(*) DESC"#,
     )
     .fetch_all(pool)
@@ -636,6 +674,48 @@ mod tests {
         assert_eq!(counts.get("unknown").copied(), Some(1));
     }
 
+    async fn add_file(db: &LibraryDb, book_id: i64, path: &str, format: Option<&str>, active: i64) {
+        sqlx::query!(
+            "INSERT INTO book_files (book_id, file_path, format, is_active)
+             VALUES (?, ?, ?, ?)",
+            book_id,
+            path,
+            format,
+            active,
+        )
+        .execute(db.pool())
+        .await
+        .expect("insert file");
+    }
+
+    #[tokio::test]
+    async fn format_buckets_take_first_active_file_per_book() {
+        let (_d, db) = open_db().await;
+        let id1 = add_book(&db, "A", Some("en"), Some(1), "reading").await;
+        let id2 = add_book(&db, "B", Some("en"), Some(1), "reading").await;
+        let id3 = add_book(&db, "C", Some("en"), Some(1), "reading").await;
+        let _id4 = add_book(&db, "D", Some("en"), Some(1), "reading").await;
+
+        add_file(&db, id1, "/a/1.m4b", Some("M4B"), 1).await;
+        add_file(&db, id2, "/b/1.m4b", Some("m4b"), 1).await;
+        add_file(&db, id3, "/c/1.mp3", Some("mp3"), 1).await;
+        add_file(&db, id3, "/c/2.mp3", Some("mp3"), 1).await;
+        // _id4 has no files → 'unknown'.
+
+        let b = breakdown(db.pool(), Dimension::Format)
+            .await
+            .expect("breakdown");
+        let counts: std::collections::HashMap<String, u64> = b
+            .buckets
+            .iter()
+            .map(|x| (x.label.clone(), x.count))
+            .collect();
+        // 'M4B' and 'm4b' collapse via LOWER().
+        assert_eq!(counts.get("m4b").copied(), Some(2));
+        assert_eq!(counts.get("mp3").copied(), Some(1));
+        assert_eq!(counts.get("unknown").copied(), Some(1));
+    }
+
     #[test]
     fn dimension_parse_round_trip() {
         for d in [
@@ -645,6 +725,7 @@ mod tests {
             Dimension::AcquisitionYear,
             Dimension::Decade,
             Dimension::Publisher,
+            Dimension::Format,
         ] {
             assert_eq!(Dimension::parse(d.as_str()).expect("parse"), d);
         }

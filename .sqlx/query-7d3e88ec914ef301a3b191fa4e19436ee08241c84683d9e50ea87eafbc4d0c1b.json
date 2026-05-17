@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO book_files (book_id, file_path, format, is_active)\n             VALUES (?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "7d3e88ec914ef301a3b191fa4e19436ee08241c84683d9e50ea87eafbc4d0c1b"
+}

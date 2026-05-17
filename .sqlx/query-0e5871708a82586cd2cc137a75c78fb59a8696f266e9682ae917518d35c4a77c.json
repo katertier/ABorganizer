@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n            COALESCE(LOWER(bf.format), 'unknown') AS \"bucket_label!: String\",\n            COUNT(*) AS \"n!: i64\",\n            COALESCE(SUM(b.duration_ms), 0) AS \"hours_ms!: i64\"\n         FROM books b\n         LEFT JOIN (\n             SELECT book_id, MIN(file_id) AS file_id\n             FROM book_files\n             WHERE is_active = 1\n             GROUP BY book_id\n         ) first ON first.book_id = b.book_id\n         LEFT JOIN book_files bf ON bf.file_id = first.file_id\n         WHERE b.deleted_at IS NULL\n         GROUP BY LOWER(bf.format)\n         ORDER BY COUNT(*) DESC",
+  "describe": {
+    "columns": [
+      {
+        "name": "bucket_label!: String",
+        "ordinal": 0,
+        "type_info": "Null"
+      },
+      {
+        "name": "n!: i64",
+        "ordinal": 1,
+        "type_info": "Null"
+      },
+      {
+        "name": "hours_ms!: i64",
+        "ordinal": 2,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "0e5871708a82586cd2cc137a75c78fb59a8696f266e9682ae917518d35c4a77c"
+}
