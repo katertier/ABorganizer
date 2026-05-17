@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO publishers (name) VALUES ('Audible Studios')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "81636db903cd164607662f0bf81884c4d60fe1ed43edcf50e02b86840faa4055"
+}
