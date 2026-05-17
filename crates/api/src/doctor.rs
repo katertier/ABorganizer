@@ -279,6 +279,137 @@ impl DoctorCheck for JournalCheck {
     }
 }
 
+/// `failed-ops` — count of `progress='failed'` rows whose
+/// `failed_reason` is NOT the crash-recovery sentinel.
+///
+/// Splits "real pipeline failure" from "crash-recovery flushed
+/// the row at startup": the latter is informational (the daemon
+/// restarted mid-batch and #170's startup pass did its job), the
+/// former is a genuine triage signal. Filter via the public
+/// constant `ab_journal::RECOVERY_FAILED_REASON` so the prefix
+/// stays in sync if the message ever changes.
+pub struct FailedOpsCheck;
+
+#[async_trait]
+impl DoctorCheck for FailedOpsCheck {
+    fn name(&self) -> &'static str {
+        "failed-ops"
+    }
+    fn description(&self) -> &'static str {
+        "operation_journal rows with progress='failed' from a real pipeline failure (excludes crash-recovery flushes)"
+    }
+    async fn run(&self, ctx: &CheckCtx) -> CheckReport {
+        let recovery_reason = ab_journal::RECOVERY_FAILED_REASON;
+        let failed: i64 = match sqlx::query_scalar!(
+            "SELECT COUNT(*) FROM operation_journal \
+             WHERE progress = 'failed' \
+               AND (failed_reason IS NULL OR failed_reason != ?)",
+            recovery_reason,
+        )
+        .fetch_one(ctx.library.pool())
+        .await
+        {
+            Ok(n) => n,
+            Err(e) => {
+                let mut r = CheckReport::fail("operation_journal failed-ops count failed");
+                r.details.push(CheckFinding {
+                    severity: CheckStatus::Failure,
+                    message: e.to_string(),
+                    remediation: Some(
+                        "Inspect ab-db logs; verify the library DB is reachable.".into(),
+                    ),
+                    doc_url: None,
+                });
+                return r;
+            }
+        };
+        if failed == 0 {
+            return CheckReport::ok("no failed-op rows (excluding crash-recovery flushes)");
+        }
+        let mut r = CheckReport::warn(format!("{failed} failed-op row(s)"));
+        r.details.push(CheckFinding {
+            severity: CheckStatus::Warning,
+            message: format!(
+                "{failed} operation_journal row(s) with progress='failed' from real pipeline \
+                 failures. Use GET /api/v1/operation_journal?progress=failed to triage; group \
+                 by op_kind to find recurring failure points."
+            ),
+            remediation: Some(
+                "Inspect failed_reason per row. Re-queue via per-book retry if the underlying \
+                 cause is transient (network, file lock); otherwise file an issue with the \
+                 op_kind + failed_reason."
+                    .into(),
+            ),
+            doc_url: None,
+        });
+        r
+    }
+}
+
+/// `orphan-companions` — count of `book_companions` rows with no
+/// paired audiobook (`book_id IS NULL`).
+///
+/// Orphans are persistent by design (ADR-0043 § "CASCADE +
+/// retention" — true orphans never auto-delete). A high count
+/// here means the operator has companion files in their library
+/// that the auto-pair geometry couldn't claim — usually because
+/// they're in an ambiguous directory or alongside multiple
+/// audiobooks the system can't disambiguate without operator
+/// input.
+pub struct OrphanCompanionsCheck;
+
+#[async_trait]
+impl DoctorCheck for OrphanCompanionsCheck {
+    fn name(&self) -> &'static str {
+        "orphan-companions"
+    }
+    fn description(&self) -> &'static str {
+        "book_companions rows with no paired audiobook (book_id IS NULL)"
+    }
+    async fn run(&self, ctx: &CheckCtx) -> CheckReport {
+        let orphans: i64 = match sqlx::query_scalar!(
+            "SELECT COUNT(*) FROM book_companions WHERE book_id IS NULL",
+        )
+        .fetch_one(ctx.library.pool())
+        .await
+        {
+            Ok(n) => n,
+            Err(e) => {
+                let mut r = CheckReport::fail("book_companions orphan count failed");
+                r.details.push(CheckFinding {
+                    severity: CheckStatus::Failure,
+                    message: e.to_string(),
+                    remediation: Some(
+                        "Inspect ab-db logs; verify the library DB is reachable.".into(),
+                    ),
+                    doc_url: None,
+                });
+                return r;
+            }
+        };
+        if orphans == 0 {
+            return CheckReport::ok("no orphan companions");
+        }
+        let mut r = CheckReport::warn(format!("{orphans} orphan companion(s)"));
+        r.details.push(CheckFinding {
+            severity: CheckStatus::Warning,
+            message: format!(
+                "{orphans} book_companions row(s) with no paired audiobook. Either the \
+                 auto-pair geometry couldn't claim them (companion in an ambiguous dir or \
+                 alongside multiple audiobooks) or the companion is a true orphan."
+            ),
+            remediation: Some(
+                "Inspect the companion_nearby_books junction-hint table per orphan to find \
+                 candidate audiobooks; pair manually via the (future) operator UI, or leave \
+                 as orphan if it's a standalone download."
+                    .into(),
+            ),
+            doc_url: None,
+        });
+        r
+    }
+}
+
 // ── HTTP surface ──────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -414,5 +545,79 @@ mod tests {
         .expect("seed terminal rows");
         let report = JournalCheck.run(&ctx).await;
         assert_eq!(report.status, CheckStatus::Ok);
+    }
+
+    #[tokio::test]
+    async fn failed_ops_check_ok_when_no_failed_rows() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        let report = FailedOpsCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Ok);
+    }
+
+    #[tokio::test]
+    async fn failed_ops_check_warns_only_on_real_failures() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        // One real failure + one crash-recovery flush (with the
+        // canonical reason). Only the real failure should count.
+        sqlx::query(
+            "INSERT INTO operation_journal \
+                (op_kind, target_kind, target_id, pre_state_json, progress, failed_reason) \
+              VALUES (?, 'book', 1, '{}', 'failed', 'network timeout'), \
+                     (?, 'book', 2, '{}', 'failed', ?)",
+        )
+        .bind("tag-write-final")
+        .bind("tag-write-final")
+        .bind(ab_journal::RECOVERY_FAILED_REASON)
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed failed rows");
+        let report = FailedOpsCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Warning);
+        assert!(
+            report.summary.contains('1'),
+            "summary should mention 1 real failure: {}",
+            report.summary
+        );
+    }
+
+    #[tokio::test]
+    async fn orphan_companions_check_ok_when_all_paired() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        // Seed a book + a paired companion. No orphans.
+        sqlx::query("INSERT INTO books (book_id, title) VALUES (1, 't')")
+            .execute(ctx.library.pool())
+            .await
+            .expect("seed book");
+        sqlx::query(
+            "INSERT INTO book_companions \
+                (book_id, path, format, parse_tier, content_hash, bytes, discovered_at) \
+              VALUES (1, '/x.epub', 'epub', 'text_extractable', 'h', 1, 0)",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed paired companion");
+        let report = OrphanCompanionsCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Ok);
+    }
+
+    #[tokio::test]
+    async fn orphan_companions_check_warns_when_orphans_present() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        sqlx::query(
+            "INSERT INTO book_companions \
+                (book_id, path, format, parse_tier, content_hash, bytes, discovered_at) \
+              VALUES (NULL, '/orphan1.pdf', 'pdf', 'document', 'h1', 1, 0), \
+                     (NULL, '/orphan2.epub', 'epub', 'text_extractable', 'h2', 1, 0)",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed orphans");
+        let report = OrphanCompanionsCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Warning);
+        assert!(
+            report.summary.contains('2'),
+            "summary should mention 2 orphans: {}",
+            report.summary
+        );
     }
 }
