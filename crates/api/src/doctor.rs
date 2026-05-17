@@ -782,6 +782,109 @@ impl DoctorCheck for StaleAsinLearningsCheck {
     }
 }
 
+/// `pending-without-replayer` — surface pending `operation_journal`
+/// rows whose `op_kind` is not in the active [`ab_journal::ReplayRegistry`].
+///
+/// On the next daemon-startup `recover_pending_with` pass, those rows
+/// will be marked `failed` with the `RECOVERY_FAILED_REASON` prefix
+/// (per ADR-0039) because no [`ab_journal::Replayer`] is registered
+/// for their `op_kind`. The check warns the operator BEFORE that
+/// happens — the remediation is either to register a `Replayer` or
+/// to accept the failed-after-restart outcome.
+///
+/// Holds an `Arc`-shared registry so the same instance the daemon's
+/// recovery pass + `ApiState.replay_registry` use answers this
+/// check (no drift between "what /replayers reports" and "what the
+/// check counts as registered").
+pub struct PendingWithoutReplayerCheck {
+    registry: ab_journal::ReplayRegistry,
+}
+
+impl PendingWithoutReplayerCheck {
+    #[must_use]
+    pub const fn new(registry: ab_journal::ReplayRegistry) -> Self {
+        Self { registry }
+    }
+}
+
+#[async_trait]
+impl DoctorCheck for PendingWithoutReplayerCheck {
+    fn name(&self) -> &'static str {
+        "pending-without-replayer"
+    }
+    fn description(&self) -> &'static str {
+        "operation_journal pending rows whose op_kind has no registered Replayer"
+    }
+    async fn run(&self, ctx: &CheckCtx) -> CheckReport {
+        let rows = match sqlx::query!(
+            r#"SELECT op_kind   AS "op_kind!: String",
+                      COUNT(*)  AS "count!: i64"
+                 FROM operation_journal
+                WHERE progress = 'pending'
+             GROUP BY op_kind
+             ORDER BY op_kind"#,
+        )
+        .fetch_all(ctx.library.pool())
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let mut r = CheckReport::fail("operation_journal pending-by-op_kind query failed");
+                r.details.push(CheckFinding {
+                    severity: CheckStatus::Failure,
+                    message: e.to_string(),
+                    remediation: Some(
+                        "Inspect ab-db logs; verify the library DB is reachable.".into(),
+                    ),
+                    doc_url: None,
+                });
+                return r;
+            }
+        };
+        let mut unregistered: Vec<(String, i64)> = Vec::new();
+        let mut pending_total: i64 = 0;
+        for row in rows {
+            pending_total += row.count;
+            if self.registry.get(&row.op_kind).is_none() {
+                unregistered.push((row.op_kind, row.count));
+            }
+        }
+        if unregistered.is_empty() {
+            return CheckReport::ok(format!(
+                "{pending_total} pending row(s); all op_kinds have a registered Replayer"
+            ));
+        }
+        let summary: String = unregistered
+            .iter()
+            .map(|(k, n)| format!("{k}={n}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let unregistered_total: i64 = unregistered.iter().map(|(_, n)| *n).sum();
+        let mut r = CheckReport::warn(format!(
+            "{unregistered_total} pending row(s) across {n} unregistered op_kind(s): {summary}",
+            n = unregistered.len(),
+        ));
+        r.details.push(CheckFinding {
+            severity: CheckStatus::Warning,
+            message: format!(
+                "{unregistered_total} pending operation_journal rows belong to op_kinds with \
+                 no registered Replayer. On the next daemon restart, recover_pending_with \
+                 will mark these rows as 'failed' (per ADR-0039). Unregistered op_kinds + \
+                 counts: {summary}.",
+            ),
+            remediation: Some(
+                "Register a Replayer for each op_kind via ApiState::with_replay_registry \
+                 (and the matching ReplayRegistry passed to recover_pending_with on \
+                 startup). To accept the failed-after-restart outcome, ignore this warning \
+                 — recovery will surface the same rows under `/operation_journal?progress=failed`."
+                    .into(),
+            ),
+            doc_url: None,
+        });
+        r
+    }
+}
+
 /// `cover-cache-writable` — `<cache_dir>/covers/` exists or can be
 /// created, and is writable.
 ///
@@ -1246,6 +1349,95 @@ mod tests {
         assert_eq!(report.status, CheckStatus::Ok);
         assert!(
             report.summary.contains("writable"),
+            "summary: {}",
+            report.summary
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_without_replayer_ok_when_no_pending_rows() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        let check = PendingWithoutReplayerCheck::new(ab_journal::ReplayRegistry::default());
+        let report = check.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Ok);
+        assert!(
+            report.summary.contains("0 pending"),
+            "summary: {}",
+            report.summary
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_without_replayer_warns_when_pending_and_empty_registry() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        // Seed three pending rows across two op_kinds; with an empty
+        // registry both kinds count as "no Replayer".
+        for (kind, n) in [("tag-write-final", 2), ("audiologo-cut", 1)] {
+            for i in 0..n {
+                sqlx::query(
+                    "INSERT INTO operation_journal \
+                        (op_kind, target_kind, target_id, pre_state_json, progress) \
+                     VALUES (?, 'book', ?, '{}', 'pending')",
+                )
+                .bind(kind)
+                .bind(i64::from(i))
+                .execute(ctx.library.pool())
+                .await
+                .expect("seed pending");
+            }
+        }
+        let check = PendingWithoutReplayerCheck::new(ab_journal::ReplayRegistry::default());
+        let report = check.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Warning);
+        assert!(
+            report.summary.contains("tag-write-final=2"),
+            "summary: {}",
+            report.summary
+        );
+        assert!(
+            report.summary.contains("audiologo-cut=1"),
+            "summary: {}",
+            report.summary
+        );
+        assert_eq!(report.details.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn pending_without_replayer_ok_when_all_op_kinds_registered() {
+        use async_trait::async_trait;
+        use std::sync::Arc;
+
+        struct StubReplayer;
+        #[async_trait]
+        impl ab_journal::Replayer for StubReplayer {
+            fn op_kind(&self) -> &'static str {
+                "tag-write-final"
+            }
+            async fn try_replay(
+                &self,
+                _pool: &sqlx::SqlitePool,
+                _entry: &ab_journal::JournalEntry,
+            ) -> Result<ab_journal::ReplayDecision, ab_journal::JournalError> {
+                Ok(ab_journal::ReplayDecision::Skipped("test stub".into()))
+            }
+        }
+
+        let (ctx, _tmp) = fresh_ctx().await;
+        sqlx::query(
+            "INSERT INTO operation_journal \
+                (op_kind, target_kind, target_id, pre_state_json, progress) \
+             VALUES ('tag-write-final', 'book', 1, '{}', 'pending')",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed pending");
+
+        let registry = ab_journal::ReplayRegistry::new(vec![Arc::new(StubReplayer)]);
+        let check = PendingWithoutReplayerCheck::new(registry);
+        let report = check.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Ok);
+        assert!(
+            report.summary.contains("1 pending") && report.summary.contains("registered Replayer"),
             "summary: {}",
             report.summary
         );
