@@ -18,6 +18,7 @@
 
 #![allow(missing_docs)] // scaffold
 
+pub mod asin_learnings;
 pub mod audiologo_apply;
 pub mod audiologo_review;
 pub mod auth;

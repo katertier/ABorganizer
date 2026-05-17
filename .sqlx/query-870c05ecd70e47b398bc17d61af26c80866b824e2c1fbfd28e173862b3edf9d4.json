@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM asin_learnings WHERE learning_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "870c05ecd70e47b398bc17d61af26c80866b824e2c1fbfd28e173862b3edf9d4"
+}
