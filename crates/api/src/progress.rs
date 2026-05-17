@@ -33,9 +33,18 @@ pub const OP_KIND_BOOK_STATUS_SET: &str = "book-status-set";
 ///
 /// `pre_state = { current: <prev>, intent: <new> }` where each
 /// is either the integer rating (1..=5) or `null` for the
-/// "no rating" state. The future `RatingReplayer` will use the
-/// same shape.
+/// "no rating" state. [`crate::journal_replayers::RatingReplayer`]
+/// reads this shape on retry / crash recovery.
 pub const OP_KIND_BOOK_RATING_SET: &str = "book-rating-set";
+
+/// `op_kind` recorded in `operation_journal` for `PATCH /books/{id}/notes`.
+///
+/// `pre_state = { current: <prev>, intent: <new> }` where each
+/// is either the (whitespace-normalised) note string or `null`.
+/// Notes are normalised at handler entry — both `pre_state.intent`
+/// and `post_state.notes` reflect the persisted value, not the raw
+/// operator input. The future `NotesReplayer` will use this shape.
+pub const OP_KIND_BOOK_NOTES_SET: &str = "book-notes-set";
 
 impl From<ProgressError> for ApiError {
     fn from(err: ProgressError) -> Self {
@@ -220,18 +229,79 @@ pub struct NotesBody {
 }
 
 /// `PATCH /books/{id}/notes` — operator note; empty / whitespace clears.
+///
+/// Captures the mutation in `operation_journal` (ADR-0039) — same
+/// shape as the status/rating handlers. `set_notes` normalises
+/// whitespace-only input to NULL; the journal mirrors the
+/// normalised value so the future `NotesReplayer` can compare
+/// `current` against `intent` directly without re-running the
+/// normaliser.
 pub async fn books_notes_patch(
     State(state): State<ApiState>,
     Path(book_id): Path<i64>,
     Json(body): Json<NotesBody>,
 ) -> Result<Json<Ack>, ApiError> {
-    set_notes(
-        state.inner.library.pool(),
-        BookId(book_id),
-        body.notes.as_deref(),
+    let pool = state.inner.library.pool();
+
+    let current: Option<Option<String>> = sqlx::query_scalar!(
+        r#"SELECT notes AS "notes: String" FROM books WHERE book_id = ?"#,
+        book_id,
     )
-    .await?;
-    Ok(Json(ACK_OK))
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        ApiError::Internal(ab_core::Error::Database(format!(
+            "read pre-state for book {book_id} notes: {e}"
+        )))
+    })?;
+    let Some(current) = current else {
+        return Err(ApiError::NotFound(format!("book {book_id}")));
+    };
+
+    let intent_normalised: Option<String> = body
+        .notes
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let intent_json = intent_normalised
+        .as_deref()
+        .map_or(Value::Null, Value::from);
+    let current_json = current.as_deref().map_or(Value::Null, Value::from);
+    let entry = ab_journal::NewEntry {
+        op_kind: OP_KIND_BOOK_NOTES_SET,
+        target: ab_journal::Target {
+            kind: "book".to_owned(),
+            id: book_id,
+        },
+        pre_state: json!({ "current": current_json, "intent": intent_json }),
+        reversible: true,
+        batch_id: None,
+    };
+    let op_id = crate::journal_capture::record_pending(pool, &entry).await?;
+
+    match set_notes(pool, BookId(book_id), body.notes.as_deref()).await {
+        Ok(()) => {
+            crate::journal_capture::mark_done_or_log(
+                pool,
+                op_id,
+                &json!({ "notes": intent_json }),
+                "api.books_notes_patch",
+            )
+            .await;
+            Ok(Json(ACK_OK))
+        }
+        Err(err) => {
+            crate::journal_capture::mark_failed_or_log(
+                pool,
+                op_id,
+                &err.to_string(),
+                "api.books_notes_patch",
+            )
+            .await;
+            Err(ApiError::from(err))
+        }
+    }
 }
 
 #[derive(Serialize)]

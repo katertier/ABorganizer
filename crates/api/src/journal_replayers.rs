@@ -20,10 +20,10 @@
 use ab_core::{BookId, ReadingStatus};
 use ab_journal::{JournalEntry, JournalError, ReplayDecision, Replayer};
 use async_trait::async_trait;
-use serde_json::json;
+use serde_json::{Value, json};
 use sqlx::SqlitePool;
 
-use crate::progress::OP_KIND_BOOK_STATUS_SET;
+use crate::progress::{OP_KIND_BOOK_RATING_SET, OP_KIND_BOOK_STATUS_SET};
 
 /// Re-applies `PATCH /books/{id}/status` mutations after a crash
 /// or on operator-triggered retry.
@@ -130,6 +130,132 @@ fn parse_status(s: &str) -> Result<ReadingStatus, ()> {
         "finished" => Ok(ReadingStatus::Finished),
         "dnf" => Ok(ReadingStatus::Dnf),
         _ => Err(()),
+    }
+}
+
+/// Re-applies `PATCH /books/{id}/rating` mutations after a crash
+/// or on operator-triggered retry.
+///
+/// Twin of [`StatusReplayer`] — same drift-detection /
+/// already-applied / book-deleted / malformed-`pre_state` decision
+/// tree, applied to JSON-number or `null` rating values
+/// (`null` = "no rating").
+///
+/// `pre_state.intent` is `null` OR an integer 1..=5; anything
+/// else is rejected as malformed (the [`crate::progress::books_rating_patch`]
+/// capture rejects out-of-range values BEFORE recording, so the
+/// only way an out-of-range row enters the journal is via direct
+/// DB tampering — we still defend against it).
+pub struct RatingReplayer;
+
+#[async_trait]
+impl Replayer for RatingReplayer {
+    fn op_kind(&self) -> &'static str {
+        OP_KIND_BOOK_RATING_SET
+    }
+
+    async fn try_replay(
+        &self,
+        pool: &SqlitePool,
+        entry: &JournalEntry,
+    ) -> Result<ReplayDecision, JournalError> {
+        let book_id = entry.target.id;
+        let pre = &entry.pre_state;
+        let Some(intent_value) = pre.get("intent") else {
+            return Ok(ReplayDecision::Skipped(
+                "pre_state missing 'intent' field".to_owned(),
+            ));
+        };
+        let Some(current_value) = pre.get("current") else {
+            return Ok(ReplayDecision::Skipped(
+                "pre_state missing 'current' field".to_owned(),
+            ));
+        };
+        let intent = match parse_rating(intent_value) {
+            ParsedRating::Malformed => {
+                return Ok(ReplayDecision::Skipped(format!(
+                    "pre_state.intent={intent_value} is not a valid rating (null or 1..=5)"
+                )));
+            }
+            ParsedRating::Cleared => None,
+            ParsedRating::Rated(n) => Some(n),
+        };
+        let recorded_current = match parse_rating(current_value) {
+            ParsedRating::Malformed => {
+                return Ok(ReplayDecision::Skipped(format!(
+                    "pre_state.current={current_value} is not a valid rating"
+                )));
+            }
+            ParsedRating::Cleared => None,
+            ParsedRating::Rated(n) => Some(n),
+        };
+
+        let current: Option<Option<i64>> = sqlx::query_scalar!(
+            r#"SELECT rating AS "rating: i64" FROM books WHERE book_id = ?"#,
+            book_id,
+        )
+        .fetch_optional(pool)
+        .await?;
+        let Some(current) = current else {
+            return Ok(ReplayDecision::Skipped(format!(
+                "book {book_id} no longer exists"
+            )));
+        };
+
+        if current == intent {
+            return Ok(ReplayDecision::Skipped(format!(
+                "already applied — rating is already {intent_value}"
+            )));
+        }
+        if current != recorded_current {
+            return Ok(ReplayDecision::Skipped(format!(
+                "drift detected — current rating is {current:?}, \
+                 expected {recorded_current:?} (someone else changed it)"
+            )));
+        }
+
+        let intent_u8 = intent.map(|i| {
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "intent was validated as 1..=5 by parse_rating"
+            )]
+            {
+                i as u8
+            }
+        });
+        ab_progress::set_rating(pool, BookId(book_id), intent_u8)
+            .await
+            .map_err(|e| match e {
+                ab_progress::ProgressError::NotFound(_) => JournalError::NotFound(book_id),
+                ab_progress::ProgressError::Core(core) => {
+                    JournalError::Db(sqlx::Error::Protocol(format!("set_rating replay: {core}")))
+                }
+            })?;
+
+        Ok(ReplayDecision::Retried(json!({ "rating": intent_value })))
+    }
+}
+
+/// Tri-state outcome of parsing a JSON rating value.
+///
+/// `Cleared` matches `null` (no rating); `Rated(1..=5)` matches a
+/// valid integer rating; `Malformed` matches anything else (the
+/// Replayer turns this into a `Skipped` decision).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParsedRating {
+    Cleared,
+    Rated(i64),
+    Malformed,
+}
+
+fn parse_rating(v: &Value) -> ParsedRating {
+    if v.is_null() {
+        return ParsedRating::Cleared;
+    }
+    match v.as_i64() {
+        Some(n) if (1..=5).contains(&n) => ParsedRating::Rated(n),
+        _ => ParsedRating::Malformed,
     }
 }
 
@@ -319,5 +445,129 @@ mod tests {
             .await
             .expect("try_replay");
         assert!(matches!(decision, ReplayDecision::Skipped(ref s) if s.contains("bogus")));
+    }
+
+    // ── RatingReplayer tests ──────────────────────────────────────────
+
+    async fn seed_book_with_rating(db: &LibraryDb, rating: Option<i64>) -> i64 {
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO books (title, duration_ms, raw_duration_ms, rating) \
+             VALUES ('T', 60000, 60000, ?) RETURNING book_id",
+        )
+        .bind(rating)
+        .fetch_one(db.pool())
+        .await
+        .expect("insert book");
+        id
+    }
+
+    fn rating_entry(op_id: i64, book_id: i64, pre: Value) -> JournalEntry {
+        JournalEntry {
+            op_id,
+            op_kind: OP_KIND_BOOK_RATING_SET.to_owned(),
+            target: ab_journal::Target {
+                kind: "book".to_owned(),
+                id: book_id,
+            },
+            pre_state: pre,
+            post_state: None,
+            created_at: 0,
+            reversible: true,
+            batch_id: None,
+            progress: ab_journal::Progress::Pending,
+            failed_reason: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn rating_op_kind_matches_capture_constant() {
+        assert_eq!(RatingReplayer.op_kind(), "book-rating-set");
+        assert_eq!(RatingReplayer.op_kind(), OP_KIND_BOOK_RATING_SET);
+    }
+
+    #[tokio::test]
+    async fn rating_retries_when_no_drift_setting_value() {
+        let (_d, db) = open_db().await;
+        let book_id = seed_book_with_rating(&db, None).await;
+        let e = rating_entry(1, book_id, json!({ "current": null, "intent": 4 }));
+        let decision = RatingReplayer
+            .try_replay(db.pool(), &e)
+            .await
+            .expect("try_replay");
+        match decision {
+            ReplayDecision::Retried(post) => assert_eq!(post["rating"], 4),
+            ReplayDecision::Skipped(r) => panic!("expected Retried, got Skipped({r})"),
+        }
+        let st: Option<i64> = sqlx::query_scalar("SELECT rating FROM books WHERE book_id = ?")
+            .bind(book_id)
+            .fetch_one(db.pool())
+            .await
+            .expect("read");
+        assert_eq!(st, Some(4));
+    }
+
+    #[tokio::test]
+    async fn rating_retries_when_clearing_to_null() {
+        let (_d, db) = open_db().await;
+        let book_id = seed_book_with_rating(&db, Some(3)).await;
+        let e = rating_entry(1, book_id, json!({ "current": 3, "intent": null }));
+        let decision = RatingReplayer
+            .try_replay(db.pool(), &e)
+            .await
+            .expect("try_replay");
+        assert!(matches!(decision, ReplayDecision::Retried(_)));
+        let st: Option<i64> = sqlx::query_scalar("SELECT rating FROM books WHERE book_id = ?")
+            .bind(book_id)
+            .fetch_one(db.pool())
+            .await
+            .expect("read");
+        assert_eq!(st, None);
+    }
+
+    #[tokio::test]
+    async fn rating_skips_when_already_applied() {
+        let (_d, db) = open_db().await;
+        let book_id = seed_book_with_rating(&db, Some(4)).await;
+        let e = rating_entry(1, book_id, json!({ "current": null, "intent": 4 }));
+        let decision = RatingReplayer
+            .try_replay(db.pool(), &e)
+            .await
+            .expect("try_replay");
+        match decision {
+            ReplayDecision::Skipped(r) => assert!(r.contains("already applied"), "reason: {r}"),
+            ReplayDecision::Retried(_) => panic!("expected Skipped"),
+        }
+    }
+
+    #[tokio::test]
+    async fn rating_skips_on_drift() {
+        let (_d, db) = open_db().await;
+        let book_id = seed_book_with_rating(&db, Some(2)).await;
+        let e = rating_entry(1, book_id, json!({ "current": null, "intent": 4 }));
+        let decision = RatingReplayer
+            .try_replay(db.pool(), &e)
+            .await
+            .expect("try_replay");
+        match decision {
+            ReplayDecision::Skipped(r) => assert!(r.contains("drift"), "reason: {r}"),
+            ReplayDecision::Retried(_) => panic!("expected Skipped"),
+        }
+    }
+
+    #[tokio::test]
+    async fn rating_skips_on_out_of_range_intent() {
+        let (_d, db) = open_db().await;
+        let book_id = seed_book_with_rating(&db, None).await;
+        let e = rating_entry(1, book_id, json!({ "current": null, "intent": 9 }));
+        let decision = RatingReplayer
+            .try_replay(db.pool(), &e)
+            .await
+            .expect("try_replay");
+        match decision {
+            ReplayDecision::Skipped(r) => {
+                assert!(r.contains("not a valid rating"), "reason: {r}");
+            }
+            ReplayDecision::Retried(_) => panic!("expected Skipped for malformed intent"),
+        }
     }
 }
