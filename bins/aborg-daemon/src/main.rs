@@ -384,6 +384,7 @@ async fn main() -> Result<()> {
     let replay_registry = ab_journal::ReplayRegistry::new(vec![
         Arc::new(ab_api::journal_replayers::StatusReplayer),
         Arc::new(ab_api::journal_replayers::RatingReplayer),
+        Arc::new(ab_api::journal_replayers::NotesReplayer),
     ]);
     match ab_journal::recover_pending_with(library.pool(), &replay_registry).await {
         Ok(report) if report.failed_count == 0 && report.retried_count == 0 => {
