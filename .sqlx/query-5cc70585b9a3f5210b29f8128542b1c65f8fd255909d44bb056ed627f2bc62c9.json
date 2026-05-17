@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO pairing_codes (code_hash, device_label, scopes_json, expires_at, consumed_token_id) VALUES (?, ?, '[]', strftime('%s','now') + ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "5cc70585b9a3f5210b29f8128542b1c65f8fd255909d44bb056ed627f2bc62c9"
+}

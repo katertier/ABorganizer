@@ -1024,6 +1024,105 @@ impl DoctorCheck for TokensUnusedCheck {
     }
 }
 
+/// `pairing-codes-stale` — count of expired-unconsumed pairing
+/// codes vs a soft budget.
+///
+/// `ExpiredPairingCodesTarget` (queue category) drops these on
+/// every cleanup pass, so a healthy daemon never accumulates
+/// more than a handful (codes default to 10-min expiry, cleanup
+/// runs on the periodic loop). A backlog past the soft budget
+/// usually means cleanup hasn't been firing — either because
+/// the loop is wedged or because the operator disabled it. Both
+/// states warrant a warning; the doctor surface is the right
+/// place to flag it before the table grows enough that
+/// `pairing_codes_list` slows the consume flow.
+///
+/// Aggregate-only: doesn't surface individual code hashes or
+/// labels. `Failure` only when the COUNT query itself errors.
+pub struct PairingCodesStaleCheck;
+
+/// Soft budget for expired-unconsumed pairing codes. Above this,
+/// warn.
+///
+/// 50 leaves ample headroom for a burst of dev-cycle issuance
+/// (operator generating one code per device on first setup,
+/// then more during testing) without false-positiving on a
+/// healthy daemon. Cleanup pass typically clears the table in
+/// one tick, so even a heavy-issue burst should drain inside
+/// an hour.
+pub const PAIRING_CODES_STALE_BUDGET: i64 = 50;
+
+#[async_trait]
+impl DoctorCheck for PairingCodesStaleCheck {
+    fn name(&self) -> &'static str {
+        "pairing-codes-stale"
+    }
+    fn description(&self) -> &'static str {
+        "expired-unconsumed pairing codes count vs soft budget"
+    }
+    async fn run(&self, ctx: &CheckCtx) -> CheckReport {
+        let row = match sqlx::query!(
+            r#"SELECT
+                COALESCE(SUM(CASE
+                    WHEN consumed_token_id IS NULL
+                     AND expires_at < strftime('%s','now')
+                    THEN 1 ELSE 0 END), 0) AS "stale!: i64",
+                COUNT(*) AS "total!: i64"
+              FROM pairing_codes"#,
+        )
+        .fetch_one(ctx.ephemeral.pool())
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let mut r = CheckReport::fail("pairing_codes count query failed");
+                r.details.push(CheckFinding {
+                    severity: CheckStatus::Failure,
+                    message: e.to_string(),
+                    remediation: Some(
+                        "Inspect ab-db logs; verify the ephemeral DB is reachable.".into(),
+                    ),
+                    doc_url: None,
+                });
+                return r;
+            }
+        };
+        if row.stale <= PAIRING_CODES_STALE_BUDGET {
+            return CheckReport::ok(format!(
+                "{total} pairing code(s); {stale} expired-unconsumed (budget {budget})",
+                total = row.total,
+                stale = row.stale,
+                budget = PAIRING_CODES_STALE_BUDGET,
+            ));
+        }
+        let mut r = CheckReport::warn(format!(
+            "{total} pairing code(s); {stale} expired-unconsumed (budget {budget})",
+            total = row.total,
+            stale = row.stale,
+            budget = PAIRING_CODES_STALE_BUDGET,
+        ));
+        r.details.push(CheckFinding {
+            severity: CheckStatus::Warning,
+            message: format!(
+                "{stale} expired-unconsumed pairing codes accumulated above the \
+                 soft budget of {budget}. Healthy daemons drain this table on the \
+                 cleanup loop; a backlog suggests cleanup isn't firing.",
+                stale = row.stale,
+                budget = PAIRING_CODES_STALE_BUDGET,
+            ),
+            remediation: Some(
+                "Drain via `aborg clean queue --commit` (runs \
+                 `ExpiredPairingCodesTarget`). If the table refills shortly after, \
+                 inspect daemon logs for the `api.cleanup.applied` tracing event — \
+                 absence means the periodic loop is wedged."
+                    .into(),
+            ),
+            doc_url: None,
+        });
+        r
+    }
+}
+
 /// `cover-cache-writable` — `<cache_dir>/covers/` exists or can be
 /// created, and is writable.
 ///
@@ -1732,5 +1831,92 @@ mod tests {
             "summary: {}",
             report.summary
         );
+    }
+
+    /// Insert a `pairing_codes` row. `expires_offset_secs` is added
+    /// to `strftime('%s','now')`; negative = already expired.
+    /// `consumed` controls the `consumed_token_id` sentinel.
+    async fn seed_pairing_code(
+        ctx: &CheckCtx,
+        label: &str,
+        expires_offset_secs: i64,
+        consumed: bool,
+    ) {
+        let consumed_token_id: Option<i64> = if consumed { Some(1) } else { None };
+        sqlx::query!(
+            "INSERT INTO pairing_codes \
+                (code_hash, device_label, scopes_json, expires_at, consumed_token_id) \
+             VALUES (?, ?, '[]', strftime('%s','now') + ?, ?)",
+            "$argon2id$v=19$dummy$dummy",
+            label,
+            expires_offset_secs,
+            consumed_token_id,
+        )
+        .execute(ctx.ephemeral.pool())
+        .await
+        .expect("seed pairing_code");
+    }
+
+    #[tokio::test]
+    async fn pairing_codes_stale_ok_when_empty() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        let report = PairingCodesStaleCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Ok);
+        assert!(
+            report.summary.contains("0 pairing"),
+            "summary: {}",
+            report.summary
+        );
+    }
+
+    #[tokio::test]
+    async fn pairing_codes_stale_ok_when_only_active_codes() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        // 3 codes valid for another 600s (still active).
+        for i in 0..3 {
+            seed_pairing_code(&ctx, &format!("active-{i}"), 600, false).await;
+        }
+        let report = PairingCodesStaleCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Ok);
+        assert!(
+            report.summary.contains("0 expired-unconsumed"),
+            "summary: {}",
+            report.summary
+        );
+    }
+
+    #[tokio::test]
+    async fn pairing_codes_stale_ignores_consumed_codes() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        // Budget+1 consumed-but-expired rows; should still report Ok
+        // because consumed rows are kept as audit trail and don't
+        // count toward the stale budget.
+        for i in 0..=PAIRING_CODES_STALE_BUDGET {
+            seed_pairing_code(&ctx, &format!("consumed-{i}"), -3600, true).await;
+        }
+        let report = PairingCodesStaleCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Ok);
+        assert!(
+            report.summary.contains("0 expired-unconsumed"),
+            "summary: {}",
+            report.summary
+        );
+    }
+
+    #[tokio::test]
+    async fn pairing_codes_stale_warns_when_budget_exceeded() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        // Budget+1 expired-unconsumed rows. Each expired 1 hour ago.
+        for i in 0..=PAIRING_CODES_STALE_BUDGET {
+            seed_pairing_code(&ctx, &format!("stale-{i}"), -3600, false).await;
+        }
+        let report = PairingCodesStaleCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Warning);
+        assert!(
+            report.summary.contains("expired-unconsumed"),
+            "summary: {}",
+            report.summary
+        );
+        assert_eq!(report.details.len(), 1);
     }
 }
