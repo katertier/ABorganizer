@@ -355,6 +355,11 @@ async fn operation_journal_protected() {
 }
 
 #[tokio::test]
+async fn operation_journal_replayers_protected() {
+    assert_protected("GET", "/operation_journal/replayers").await;
+}
+
+#[tokio::test]
 async fn books_status_protected() {
     assert_protected("PATCH", "/books/1/status").await;
 }
