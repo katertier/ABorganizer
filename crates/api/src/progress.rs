@@ -3,6 +3,9 @@
 //! Five routes:
 //!
 //! * `PATCH /books/{id}/status`  — operator-set reading status.
+//!   Captures an `operation_journal` row per ADR-0039 — pre-state
+//!   carries the previous status + the intended new status so a
+//!   future `Replayer` can re-execute idempotently after a crash.
 //! * `PATCH /books/{id}/rating`  — 1..=5 stars, `null` clears.
 //! * `PATCH /books/{id}/notes`   — free-form text, `""`/whitespace clears.
 //! * `POST  /session/{id}/sync`  — player position sync (LWW).
@@ -15,9 +18,18 @@ use ab_progress::{
 use axum::Json;
 use axum::extract::{Path, State};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::error::ApiError;
 use crate::state::ApiState;
+
+/// `op_kind` recorded in `operation_journal` for `PATCH /books/{id}/status`.
+///
+/// Stable string used by the future `StatusReplayer` to claim
+/// rows from the registry on crash recovery / retry. Exposed
+/// `pub` so the replayer-impl slice can reference the same
+/// constant rather than re-declaring the string.
+pub const OP_KIND_BOOK_STATUS_SET: &str = "book-status-set";
 
 impl From<ProgressError> for ApiError {
     fn from(err: ProgressError) -> Self {
@@ -40,19 +52,90 @@ pub struct Ack {
 
 const ACK_OK: Ack = Ack { ok: true };
 
-/// `PATCH /books/{id}/status` — set `books.reading_status`.
+/// `PATCH /books/{id}/status` — set `books.reading_status` and
+/// record the mutation in `operation_journal` (ADR-0039).
+///
+/// Sequence:
+/// 1. Read the current `reading_status` (returns 404 if the book
+///    is gone — the journal row is *not* created in that case
+///    because there's nothing to replay).
+/// 2. `journal::record` a `pending` row whose `pre_state` carries
+///    both `current` (for drift detection) and `intent` (so a
+///    future `Replayer` knows what to set).
+/// 3. Call `set_status` to apply the mutation.
+/// 4. `journal::mark_done` with `post_state = { reading_status }`
+///    on success, or `journal::mark_failed` with the error string
+///    on failure. The handler still returns the original error
+///    after marking — `mark_failed` is best-effort.
 pub async fn books_status_patch(
     State(state): State<ApiState>,
     Path(book_id): Path<i64>,
     Json(body): Json<StatusBody>,
 ) -> Result<Json<Ack>, ApiError> {
-    set_status(
-        state.inner.library.pool(),
-        BookId(book_id),
-        body.reading_status,
+    let pool = state.inner.library.pool();
+
+    let current: Option<String> = sqlx::query_scalar!(
+        r#"SELECT reading_status AS "reading_status!: String"
+             FROM books WHERE book_id = ?"#,
+        book_id,
     )
-    .await?;
-    Ok(Json(ACK_OK))
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        ApiError::Internal(ab_core::Error::Database(format!(
+            "read pre-state for book {book_id}: {e}"
+        )))
+    })?;
+    let Some(current) = current else {
+        return Err(ApiError::NotFound(format!("book {book_id}")));
+    };
+
+    let intent = body.reading_status.as_str();
+    let pre_state = json!({ "current": current, "intent": intent });
+    let op_id = ab_journal::record(
+        pool,
+        &ab_journal::NewEntry {
+            op_kind: OP_KIND_BOOK_STATUS_SET,
+            target: ab_journal::Target {
+                kind: "book".to_owned(),
+                id: book_id,
+            },
+            pre_state,
+            reversible: true,
+            batch_id: None,
+        },
+    )
+    .await
+    .map_err(|e| ApiError::Internal(ab_core::Error::Database(format!("journal record: {e}"))))?;
+
+    match set_status(pool, BookId(book_id), body.reading_status).await {
+        Ok(()) => {
+            let post_state = json!({ "reading_status": intent });
+            // mark_done is best-effort: a failure here means the
+            // mutation already succeeded but the journal row is
+            // stuck `pending`, which the startup recovery sweep
+            // will later flip to `failed`. Log and continue.
+            if let Err(e) = ab_journal::mark_done(pool, op_id, &post_state).await {
+                tracing::warn!(
+                    op_id,
+                    error = %e,
+                    "api.books_status_patch.journal_mark_done_failed"
+                );
+            }
+            Ok(Json(ACK_OK))
+        }
+        Err(err) => {
+            let reason = err.to_string();
+            if let Err(e) = ab_journal::mark_failed(pool, op_id, &reason).await {
+                tracing::warn!(
+                    op_id,
+                    error = %e,
+                    "api.books_status_patch.journal_mark_failed_failed"
+                );
+            }
+            Err(ApiError::from(err))
+        }
+    }
 }
 
 #[derive(Deserialize)]
