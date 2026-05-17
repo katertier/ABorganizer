@@ -29,6 +29,7 @@ pub mod books_transcript;
 pub mod cleanup_targets;
 pub mod doctor;
 pub mod error;
+pub mod journal_replayers;
 pub mod library_roots;
 pub mod names;
 pub mod narrators;
