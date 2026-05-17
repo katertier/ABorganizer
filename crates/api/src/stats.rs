@@ -17,7 +17,7 @@ impl From<StatsError> for ApiError {
     fn from(e: StatsError) -> Self {
         match e {
             StatsError::UnsupportedDimension(s) => Self::BadRequest(format!(
-                "unsupported dimension {s:?}; supported: language, length, reading_status, acquisition_year, decade, publisher, format, author, narrator"
+                "unsupported dimension {s:?}; supported: language, length, reading_status, acquisition_year, decade, publisher, format, author, narrator, series"
             )),
             StatsError::Db(db) => Self::Internal(ab_core::Error::Database(db.to_string())),
         }
