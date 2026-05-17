@@ -33,7 +33,9 @@ use std::sync::Arc;
 
 use ab_api::ApiState;
 use ab_api::build_router;
-use ab_api::progress::{OP_KIND_BOOK_RATING_SET, OP_KIND_BOOK_STATUS_SET};
+use ab_api::progress::{
+    OP_KIND_BOOK_NOTES_SET, OP_KIND_BOOK_RATING_SET, OP_KIND_BOOK_STATUS_SET,
+};
 use ab_core::auth::{hash_api_token, mint_api_token};
 use ab_core::tunables::{DbTunables, SchedulerTunables, SecurityTunables};
 use ab_db::{EphemeralDb, LibraryDb};
@@ -321,6 +323,76 @@ async fn rating_patch_404_and_no_journal_row_for_missing_book() {
     let token = mint_token(&state).await;
 
     let status = patch_rating(&router, &token, 9999, r#"{"rating":3}"#).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let rows = snapshot_journal(&state.inner.library).await;
+    assert!(rows.is_empty());
+}
+
+async fn patch_notes(router: &axum::Router, token: &str, book_id: i64, body: &str) -> StatusCode {
+    let req = Request::builder()
+        .method("PATCH")
+        .uri(format!("/books/{book_id}/notes"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_owned()))
+        .expect("build req");
+    router.clone().oneshot(req).await.expect("oneshot").status()
+}
+
+#[tokio::test]
+async fn notes_patch_writes_done_journal_row_on_success() {
+    let (router, state, _tmp) = fresh_setup().await;
+    let token = mint_token(&state).await;
+    let book_id = seed_book(&state.inner.library, "Foo").await;
+
+    let status = patch_notes(&router, &token, book_id, r#"{"notes":"loved it"}"#).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let rows = snapshot_journal(&state.inner.library).await;
+    assert_eq!(rows.len(), 1);
+    let r = &rows[0];
+    assert_eq!(r.op_kind, OP_KIND_BOOK_NOTES_SET);
+    assert_eq!(r.op_kind, "book-notes-set");
+    assert_eq!(r.target_kind, "book");
+    assert_eq!(r.progress, "done");
+
+    let pre: Value = serde_json::from_str(&r.pre_state_json).expect("pre json");
+    assert_eq!(pre["current"], Value::Null);
+    assert_eq!(pre["intent"], "loved it");
+
+    let post: Value = serde_json::from_str(r.post_state_json.as_deref().expect("post present"))
+        .expect("post json");
+    assert_eq!(post["notes"], "loved it");
+}
+
+#[tokio::test]
+async fn notes_patch_normalises_whitespace_only_to_null_in_journal() {
+    let (router, state, _tmp) = fresh_setup().await;
+    let token = mint_token(&state).await;
+    let book_id = seed_book(&state.inner.library, "Bar").await;
+
+    // Whitespace-only → normalised to null in BOTH pre_state.intent
+    // and post_state.notes.
+    let status = patch_notes(&router, &token, book_id, r#"{"notes":"   "}"#).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let rows = snapshot_journal(&state.inner.library).await;
+    assert_eq!(rows.len(), 1);
+    let r = &rows[0];
+    let pre: Value = serde_json::from_str(&r.pre_state_json).expect("pre json");
+    let post: Value = serde_json::from_str(r.post_state_json.as_deref().expect("post present"))
+        .expect("post json");
+    assert_eq!(pre["intent"], Value::Null);
+    assert_eq!(post["notes"], Value::Null);
+}
+
+#[tokio::test]
+async fn notes_patch_404_and_no_journal_row_for_missing_book() {
+    let (router, state, _tmp) = fresh_setup().await;
+    let token = mint_token(&state).await;
+
+    let status = patch_notes(&router, &token, 9999, r#"{"notes":"hi"}"#).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
     let rows = snapshot_journal(&state.inner.library).await;
