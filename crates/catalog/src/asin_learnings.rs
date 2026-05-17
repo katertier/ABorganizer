@@ -21,12 +21,30 @@
 //! table and pick the highest `learned_at`.
 
 use chrono::Utc;
-use sqlx::{Sqlite, Transaction};
+use sqlx::{Sqlite, SqlitePool, Transaction};
 
 /// Source tag for learnings captured from `PATCH
 /// /api/v1/books/{id}`. Other future capture sites pick their own
 /// tag (`'cli'`, `'batch-edit'`, `'voice'`).
 pub const SOURCE_USER_EDIT: &str = "user_edit";
+
+/// Provenance-source tag the audible-search stage writes when it
+/// short-circuits the network call with a learned ASIN hint.
+///
+/// Lives in `book_field_provenance.source` and lets downstream
+/// consumers (audit, UI, debug) tell a learned-hint hit from a
+/// real Audible API result.
+pub const PROVENANCE_SOURCE_LEARN: &str = "asin_learn";
+
+/// Confidence written for ASINs sourced from a learning hit.
+///
+/// Sits between tag-supplied (0.7) and user-edit (1.0). The
+/// operator validated this `(title, author) → asin` mapping on a
+/// previous book; a new ingest with the same normalised key is a
+/// strong signal but not as strong as a tag value the file itself
+/// carries — different recordings / box-sets / region variants
+/// can still share normalised metadata.
+pub const ASIN_LEARN_CONFIDENCE: f64 = 0.8;
 
 /// Normalise a free-form text field for indexed lookup.
 ///
@@ -53,6 +71,41 @@ pub fn normalise(raw: &str) -> String {
         out.pop();
     }
     out
+}
+
+/// Look up the most recently learned ASIN for a normalised
+/// `(title, author)` key. Returns `None` if either key normalises
+/// empty or no learning row matches.
+///
+/// "Most recently learned" via `learned_at DESC` — if the operator
+/// changed their mind about the right ASIN over time, the latest
+/// edit wins.
+///
+/// # Errors
+///
+/// Returns the underlying [`sqlx::Error`] for SELECT failures.
+pub async fn lookup(
+    pool: &SqlitePool,
+    title: &str,
+    author: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    let title_norm = normalise(title);
+    let author_norm = normalise(author);
+    if title_norm.is_empty() || author_norm.is_empty() {
+        return Ok(None);
+    }
+    let row = sqlx::query!(
+        r#"SELECT asin AS "asin!: String"
+             FROM asin_learnings
+            WHERE title_norm = ? AND author_norm = ?
+            ORDER BY learned_at DESC
+            LIMIT 1"#,
+        title_norm,
+        author_norm,
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| r.asin))
 }
 
 /// Capture one `(title, author, asin)` learning inside the

@@ -120,6 +120,34 @@ impl Stage for AudibleSearchStage {
             .await?
             .unwrap_or_default();
 
+        // Auto-learn hint: if a previous operator edit captured this
+        // (title, author) → asin mapping in `asin_learnings`, skip the
+        // network call and write the learned ASIN as a higher-confidence
+        // candidate (0.8). The downstream `enrich-from-audnexus` still
+        // validates the guess by hitting per-region endpoints; a bad
+        // learning silently loses to a real Audnexus result via
+        // consensus.
+        if let Some(learned) = crate::asin_learnings::lookup(ctx.library.pool(), &title, &author)
+            .await
+            .map_err(|e| Error::Database(format!("audible_search learn lookup: {e}")))?
+        {
+            write_provenance_candidate(
+                &ctx.library,
+                book_id,
+                &learned,
+                crate::asin_learnings::PROVENANCE_SOURCE_LEARN,
+                crate::asin_learnings::ASIN_LEARN_CONFIDENCE,
+            )
+            .await?;
+            tracing::info!(
+                book = %book_id,
+                title = %title,
+                asin = %learned,
+                "audible.search.learn_hit"
+            );
+            return Ok(StageOutcome::Done);
+        }
+
         // Region walk: try each configured region in order, stop
         // on the first non-empty response. Transport errors in
         // one region log + continue to the next — a single
@@ -160,7 +188,14 @@ impl Stage for AudibleSearchStage {
             return Ok(StageOutcome::Skipped);
         };
 
-        write_asin_candidate(&ctx.library, book_id, &first.asin).await?;
+        write_provenance_candidate(
+            &ctx.library,
+            book_id,
+            &first.asin,
+            PROVENANCE_SOURCE,
+            AUDIBLE_SEARCH_CONFIDENCE,
+        )
+        .await?;
         tracing::info!(
             book = %book_id,
             title = %title,
@@ -217,11 +252,16 @@ async fn fetch_text_candidate(
     Ok(row.and_then(|r| r.value))
 }
 
-/// Insert the discovered ASIN as a new provenance row.
-async fn write_asin_candidate(
+/// Insert the discovered ASIN as a new provenance row. `source`
+/// and `confidence` vary by which sub-path inside this stage
+/// produced the hit (a fresh Audible API result vs. a hit on
+/// `asin_learnings` from a prior operator edit).
+async fn write_provenance_candidate(
     library: &ab_db::LibraryDb,
     book_id: BookId,
     asin: &str,
+    source: &str,
+    confidence: f64,
 ) -> Result<()> {
     let id = book_id.0;
     let asin_field = Field::Asin.as_str();
@@ -233,9 +273,9 @@ async fn write_asin_candidate(
         id,
         asin_field,
         asin,
-        PROVENANCE_SOURCE,
+        source,
         stage_str,
-        AUDIBLE_SEARCH_CONFIDENCE,
+        confidence,
     )
     .execute(library.pool())
     .await
@@ -319,6 +359,123 @@ mod tests {
             StageOutcome::Skipped,
             "should defer to existing ASIN source"
         );
+    }
+
+    #[tokio::test]
+    async fn learn_hit_short_circuits_network_with_higher_confidence_row() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let ctx = fresh_ctx(tmp.path()).await;
+
+        // Book with title + author candidates but no ASIN.
+        sqlx::query("INSERT INTO books (book_id, title) VALUES (1, 'placeholder')")
+            .execute(ctx.library.pool())
+            .await
+            .expect("seed book");
+        sqlx::query(
+            "INSERT INTO book_field_provenance \
+             (book_id, field, value, source, stage, confidence) \
+             VALUES (1, 'title',  'Mistborn',           'tag_file', 'read-tags', 0.7), \
+                    (1, 'author', 'Brandon Sanderson',  'tag_file', 'read-tags', 0.7)",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed provenance");
+
+        // A previously-captured learning matches the normalised key.
+        sqlx::query(
+            "INSERT INTO asin_learnings (title_norm, author_norm, asin, source, learned_at) \
+             VALUES ('mistborn', 'brandon sanderson', 'B002UZJ8TG', 'user_edit', '2026-05-17T00:00:00Z')",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed learning");
+
+        // Even with audible_allowed = true, the network call must be
+        // short-circuited by the learn-hit branch (test would hang on
+        // a real HTTP call against the default client).
+        let client = AudibleClient::new(&HttpClientTunables::default());
+        let stage = AudibleSearchStage::new(client, &NetworkTunables::default());
+        let outcome = stage.run(&ctx, BookId(1)).await.expect("run");
+        assert_eq!(outcome, StageOutcome::Done);
+
+        // Exactly one new provenance row, with the learned source +
+        // higher confidence.
+        let row = sqlx::query!(
+            r#"SELECT value AS "value!: String",
+                      source AS "source!: String",
+                      confidence AS "confidence!: f64"
+                 FROM book_field_provenance
+                WHERE book_id = 1 AND field = 'asin'"#
+        )
+        .fetch_one(ctx.library.pool())
+        .await
+        .expect("fetch row");
+        assert_eq!(row.value, "B002UZJ8TG");
+        assert_eq!(row.source, crate::asin_learnings::PROVENANCE_SOURCE_LEARN);
+        assert!(
+            (row.confidence - crate::asin_learnings::ASIN_LEARN_CONFIDENCE).abs() < f64::EPSILON
+        );
+    }
+
+    #[tokio::test]
+    async fn no_learn_hit_falls_through_to_network_path() {
+        // Indirect check: with audible_allowed=false the stage skips
+        // before the network call; with NO learning row matching, we
+        // reach that disabled-by-tunables check (i.e., didn't return
+        // Done from the learn-hit branch).
+        let tmp = TempDir::new().expect("tmpdir");
+        let ctx = fresh_ctx(tmp.path()).await;
+        sqlx::query("INSERT INTO books (book_id, title) VALUES (1, 'placeholder')")
+            .execute(ctx.library.pool())
+            .await
+            .expect("seed book");
+        sqlx::query(
+            "INSERT INTO book_field_provenance \
+             (book_id, field, value, source, stage, confidence) \
+             VALUES (1, 'title',  'Mistborn',          'tag_file', 'read-tags', 0.7), \
+                    (1, 'author', 'Brandon Sanderson', 'tag_file', 'read-tags', 0.7)",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed provenance");
+        // No asin_learnings rows for this (title, author).
+
+        // Network calls would hang the test — so we re-disable via
+        // tunables before the run. The point is the learn-hit branch
+        // does NOT fire (otherwise the test would short-circuit to
+        // Done before the network gate).
+        let client = AudibleClient::new(&HttpClientTunables::default());
+        let stage = AudibleSearchStage::new(
+            client,
+            &NetworkTunables {
+                audible_allowed: true,
+                ..NetworkTunables::default()
+            },
+        );
+        // Override: re-construct with audible_allowed = false to
+        // force the early skip and avoid the live HTTP path.
+        let stage_no_net = AudibleSearchStage::new(
+            AudibleClient::new(&HttpClientTunables::default()),
+            &NetworkTunables {
+                audible_allowed: false,
+                ..NetworkTunables::default()
+            },
+        );
+        let outcome = stage_no_net.run(&ctx, BookId(1)).await.expect("run");
+        assert_eq!(
+            outcome,
+            StageOutcome::Skipped,
+            "fell through to network gate which is disabled"
+        );
+
+        // And no provenance row got written.
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM book_field_provenance WHERE field = 'asin'")
+                .fetch_one(ctx.library.pool())
+                .await
+                .expect("count");
+        assert_eq!(count, 0);
+        let _ = stage; // silence unused if compiler complains
     }
 
     #[tokio::test]

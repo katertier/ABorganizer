@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT asin AS \"asin!: String\"\n             FROM asin_learnings\n            WHERE title_norm = ? AND author_norm = ?\n            ORDER BY learned_at DESC\n            LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "asin!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "aae1f85fd452281ceccd2e8a967fcb5c495a69b2919ea5a4951114f3f00b95f5"
+}
