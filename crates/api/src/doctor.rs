@@ -782,6 +782,71 @@ impl DoctorCheck for StaleAsinLearningsCheck {
     }
 }
 
+/// `cover-cache-writable` — `<cache_dir>/covers/` exists or can be
+/// created, and is writable.
+///
+/// `cache_dir()` resolves to `~/Library/Caches/<DisplayName>` per
+/// `ab_core::paths`. macOS may purge this on low-space conditions
+/// (system-managed) so a missing directory is normal — the check
+/// creates it on demand and then verifies a write-probe round-trips.
+/// Catches disk-full / permission failures before they surface as
+/// scattered cover-fetch errors.
+pub struct CoverCacheWritableCheck;
+
+#[async_trait]
+impl DoctorCheck for CoverCacheWritableCheck {
+    fn name(&self) -> &'static str {
+        "cover-cache-writable"
+    }
+    fn description(&self) -> &'static str {
+        "<cache_dir>/covers/ exists (or can be created) and accepts writes"
+    }
+    async fn run(&self, _ctx: &CheckCtx) -> CheckReport {
+        let dir = ab_core::paths::cache_dir().join("covers");
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            let mut r = CheckReport::fail("cover cache directory unavailable");
+            r.details.push(CheckFinding {
+                severity: CheckStatus::Failure,
+                message: format!("create_dir_all({}) failed: {e}", dir.display()),
+                remediation: Some(
+                    "Check ~/Library/Caches/ permissions; if the volume is full, free \
+                     space — macOS may have purged this directory under low-space \
+                     conditions and the daemon needs write access to recreate it."
+                        .into(),
+                ),
+                doc_url: None,
+            });
+            return r;
+        }
+        let probe = dir.join(".aborg-doctor-write-probe");
+        let probe_err = match std::fs::write(&probe, b"ok") {
+            Ok(()) => {
+                // Clean up probe artifact; ignore errors — the next
+                // poll will try again, and an orphan probe file is
+                // harmless.
+                let _ = std::fs::remove_file(&probe);
+                None
+            }
+            Err(e) => Some(e.to_string()),
+        };
+        if let Some(err) = probe_err {
+            let mut r = CheckReport::fail("cover cache write probe failed");
+            r.details.push(CheckFinding {
+                severity: CheckStatus::Failure,
+                message: format!("write({}) failed: {err}", probe.display()),
+                remediation: Some(
+                    "Verify the directory is on a writable volume; if it's a recently \
+                     mounted external drive, check it's not read-only."
+                        .into(),
+                ),
+                doc_url: None,
+            });
+            return r;
+        }
+        CheckReport::ok(format!("cover cache writable at {}", dir.display()))
+    }
+}
+
 // ── HTTP surface ──────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -1164,6 +1229,23 @@ mod tests {
         assert_eq!(report.status, CheckStatus::Ok);
         assert!(
             report.summary.contains("3 row") && report.summary.contains("0 stale"),
+            "summary: {}",
+            report.summary
+        );
+    }
+
+    #[tokio::test]
+    async fn cover_cache_writable_check_ok_on_default_path() {
+        // The default path resolves under $HOME/Library/Caches; on
+        // a developer machine this exists + is writable. CI runners
+        // get $HOME pointed at a writable working dir, so the check
+        // should resolve `Ok` regardless of pre-existing state
+        // (create_dir_all is idempotent).
+        let (ctx, _tmp) = fresh_ctx().await;
+        let report = CoverCacheWritableCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Ok);
+        assert!(
+            report.summary.contains("writable"),
             "summary: {}",
             report.summary
         );
