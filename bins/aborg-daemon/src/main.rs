@@ -632,6 +632,13 @@ fn build_cleanup_registry(tunables: &Tunables) -> CleanupRegistry {
         // backstop already de-emphasises them visually before
         // the row gets removed.
         Arc::new(ab_api::StaleCompanionHintsTarget),
+        // Db: prune `operation_journal` rows in a terminal state
+        // (`done` / `failed` / `reversed`) older than 90 days
+        // (ADR-0039). The journal serves crash-recovery (PR #170)
+        // + the operator undo window; past 90 days it's noise.
+        // `pending` rows are never touched — only the startup
+        // pass flips those.
+        Arc::new(ab_api::StaleOperationJournalTarget),
     ];
     CleanupRegistry::new(targets)
 }
