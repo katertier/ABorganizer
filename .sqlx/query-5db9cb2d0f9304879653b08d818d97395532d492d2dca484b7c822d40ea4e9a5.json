@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT op_kind   AS \"op_kind!: String\",\n                      COUNT(*)  AS \"count!: i64\"\n                 FROM operation_journal\n                WHERE progress = 'pending'\n             GROUP BY op_kind\n             ORDER BY op_kind",
+  "describe": {
+    "columns": [
+      {
+        "name": "op_kind!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "count!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "5db9cb2d0f9304879653b08d818d97395532d492d2dca484b7c822d40ea4e9a5"
+}

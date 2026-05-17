@@ -372,7 +372,17 @@ async fn main() -> Result<()> {
     // re-execution; that's per-op-kind work owned by future
     // slices. Errors here log + continue; failing startup over a
     // journal sweep would be worse than running un-recovered.
-    match ab_journal::recover_pending(library.pool()).await {
+    //
+    // The `replay_registry` is the canonical source for "which
+    // op_kinds can recover": currently empty, which makes
+    // `recover_pending_with` identical to the legacy
+    // `recover_pending` (mark every pending row as failed). Once
+    // a concrete `Replayer` impl ships, it registers here and
+    // every consumer (recovery pass, `/operation_journal/replayers`
+    // endpoint, `pending-without-replayer` doctor check) sees
+    // the same set.
+    let replay_registry = ab_journal::ReplayRegistry::default();
+    match ab_journal::recover_pending_with(library.pool(), &replay_registry).await {
         Ok(report) if report.failed_count == 0 && report.retried_count == 0 => {
             tracing::info!("startup.recovery.clean — no pending operations");
         }
@@ -488,8 +498,11 @@ async fn main() -> Result<()> {
         Arc::new(ab_api::doctor::AiCacheSizeCheck),
         Arc::new(ab_api::doctor::StaleAsinLearningsCheck),
         Arc::new(ab_api::doctor::CoverCacheWritableCheck),
+        Arc::new(ab_api::doctor::PendingWithoutReplayerCheck::new(
+            replay_registry.clone(),
+        )),
     ]);
-    let api_state = ab_api::ApiState::new(
+    let api_state = ab_api::ApiState::with_replay_registry(
         library.clone(),
         ephemeral.clone(),
         scheduler,
@@ -500,6 +513,7 @@ async fn main() -> Result<()> {
         scan_excludes,
         background_registry,
         doctor_registry,
+        replay_registry,
     );
 
     // Build the unified Router for the API port (api + webuis).
