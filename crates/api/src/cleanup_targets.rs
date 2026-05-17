@@ -209,6 +209,108 @@ fn stale_hints_cutoff(_policy: &Policy) -> i64 {
     unix_now_secs().saturating_sub(STALE_COMPANION_HINTS_AGE_SECS)
 }
 
+// ─── Stale operation-journal rows ─────────────────────────────
+
+/// Prunes `operation_journal` rows that have reached a terminal
+/// state (`done` / `failed` / `reversed`) and are older than the
+/// retention window.
+///
+/// The journal serves two purposes: crash-recovery (PR #170 reads
+/// `pending` rows at startup and flips them to `failed`) and
+/// reversible-operation history (the operator can undo recent
+/// mutations). Once a row is past the undo window, it's noise —
+/// the audit trail proper lives in `mass_edit_history`.
+///
+/// Retention: 90 days (ADR-0039 schema header). `force = true`
+/// drops every terminal-state row regardless of age. `pending`
+/// rows are never touched — they're the crash-recovery surface
+/// and only the `recover_pending` startup pass should flip them.
+pub struct StaleOperationJournalTarget;
+
+/// Retention threshold from the migration-028 schema comment.
+const STALE_OPERATION_JOURNAL_AGE_SECS: i64 = 90 * 86_400;
+
+#[async_trait]
+impl CleanupTarget for StaleOperationJournalTarget {
+    fn category(&self) -> Category {
+        Category::Db
+    }
+
+    fn name(&self) -> &'static str {
+        "stale-operation-journal"
+    }
+
+    async fn report(&self, ctx: &CleanupCtx, policy: &Policy) -> Result<CleanupReport> {
+        let cutoff = stale_journal_cutoff();
+        let count = if policy.force {
+            sqlx::query_scalar!(
+                "SELECT COUNT(*) FROM operation_journal \
+                 WHERE progress IN ('done', 'failed', 'reversed')"
+            )
+            .fetch_one(ctx.library.pool())
+            .await
+            .map_err(|e| Error::Database(format!("count operation_journal: {e}")))?
+        } else {
+            sqlx::query_scalar!(
+                "SELECT COUNT(*) FROM operation_journal \
+                 WHERE progress IN ('done', 'failed', 'reversed') \
+                   AND created_at < ?",
+                cutoff,
+            )
+            .fetch_one(ctx.library.pool())
+            .await
+            .map_err(|e| Error::Database(format!("count operation_journal: {e}")))?
+        };
+        Ok(CleanupReport {
+            category: Category::Db,
+            name: self.name().to_owned(),
+            items: u64::try_from(count).unwrap_or(0),
+            bytes: 0,
+        })
+    }
+
+    async fn apply(&self, ctx: &CleanupCtx, policy: &Policy) -> Result<CleanupReport> {
+        let cutoff = stale_journal_cutoff();
+        let affected = if policy.force {
+            sqlx::query!(
+                "DELETE FROM operation_journal \
+                 WHERE progress IN ('done', 'failed', 'reversed')"
+            )
+            .execute(ctx.library.pool())
+            .await
+            .map_err(|e| Error::Database(format!("delete operation_journal: {e}")))?
+            .rows_affected()
+        } else {
+            sqlx::query!(
+                "DELETE FROM operation_journal \
+                 WHERE progress IN ('done', 'failed', 'reversed') \
+                   AND created_at < ?",
+                cutoff,
+            )
+            .execute(ctx.library.pool())
+            .await
+            .map_err(|e| Error::Database(format!("delete operation_journal: {e}")))?
+            .rows_affected()
+        };
+        tracing::info!(
+            target = self.name(),
+            deleted = affected,
+            force = policy.force,
+            "api.cleanup.applied"
+        );
+        Ok(CleanupReport {
+            category: Category::Db,
+            name: self.name().to_owned(),
+            items: affected,
+            bytes: 0,
+        })
+    }
+}
+
+fn stale_journal_cutoff() -> i64 {
+    unix_now_secs().saturating_sub(STALE_OPERATION_JOURNAL_AGE_SECS)
+}
+
 /// Seconds since the Unix epoch. Saturates on the clock-skew edge
 /// case (`UNIX_EPOCH` somehow in the future), matching the rest of
 /// the codebase's defensive convention.
@@ -458,5 +560,91 @@ mod tests {
         assert_eq!(first.items, 1);
         let second = target.apply(&ctx, &policy).await.expect("second apply");
         assert_eq!(second.items, 0, "second apply must be a no-op");
+    }
+
+    // ─── StaleOperationJournalTarget ────────────────────────────
+
+    async fn seed_journal(ctx: &CleanupCtx, op_kind: &str, progress: &str, created_at: i64) {
+        sqlx::query(
+            "INSERT INTO operation_journal \
+                (op_kind, target_kind, target_id, pre_state_json, created_at, progress) \
+              VALUES (?, 'book', 1, '{}', ?, ?)",
+        )
+        .bind(op_kind)
+        .bind(created_at)
+        .bind(progress)
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed journal");
+    }
+
+    #[tokio::test]
+    async fn journal_report_drops_old_terminal_rows_only() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        let now = unix_now_secs();
+        // Eligible: old + terminal.
+        seed_journal(&ctx, "old-done", "done", now - (100 * 86_400)).await;
+        seed_journal(&ctx, "old-failed", "failed", now - (100 * 86_400)).await;
+        seed_journal(&ctx, "old-reversed", "reversed", now - (100 * 86_400)).await;
+        // Not eligible: pending (the recovery-pass concern, never cleaned here).
+        seed_journal(&ctx, "old-pending", "pending", now - (100 * 86_400)).await;
+        // Not eligible: terminal but inside the retention window.
+        seed_journal(&ctx, "fresh-done", "done", now - (30 * 86_400)).await;
+
+        let target = StaleOperationJournalTarget;
+        let report = target
+            .report(
+                &ctx,
+                &Policy {
+                    age_seconds: 86_400,
+                    force: false,
+                    apply: false,
+                },
+            )
+            .await
+            .expect("report");
+        assert_eq!(report.items, 3);
+    }
+
+    #[tokio::test]
+    async fn journal_apply_with_force_drops_every_terminal_row() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        seed_journal(&ctx, "a", "done", unix_now_secs() - 60).await;
+        seed_journal(&ctx, "b", "failed", unix_now_secs() - 60).await;
+        seed_journal(&ctx, "c", "pending", unix_now_secs() - 60).await;
+        let target = StaleOperationJournalTarget;
+        let report = target
+            .apply(
+                &ctx,
+                &Policy {
+                    age_seconds: 86_400,
+                    force: true,
+                    apply: true,
+                },
+            )
+            .await
+            .expect("apply");
+        assert_eq!(report.items, 2, "pending must survive even under force");
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM operation_journal")
+            .fetch_one(ctx.library.pool())
+            .await
+            .expect("count");
+        assert_eq!(remaining, 1);
+    }
+
+    #[tokio::test]
+    async fn journal_apply_is_idempotent() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        seed_journal(&ctx, "a", "done", unix_now_secs() - (100 * 86_400)).await;
+        let target = StaleOperationJournalTarget;
+        let policy = Policy {
+            age_seconds: 86_400,
+            force: false,
+            apply: true,
+        };
+        let first = target.apply(&ctx, &policy).await.expect("first");
+        assert_eq!(first.items, 1);
+        let second = target.apply(&ctx, &policy).await.expect("second");
+        assert_eq!(second.items, 0);
     }
 }

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM operation_journal WHERE progress IN ('done', 'failed', 'reversed') AND created_at < ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "06efe23e617942aeade1a9a001cae7311eee6e28ec8af8cd02a0f6d7165524ed"
+}
