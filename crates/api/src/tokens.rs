@@ -44,12 +44,23 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use ab_core::Error;
 use ab_core::auth::{hash_api_token, mint_api_token};
 
 use crate::error::ApiError;
 use crate::state::ApiState;
+
+/// `op_kind` recorded in `operation_journal` for
+/// `DELETE /api/v1/tokens/{id}` revocation.
+///
+/// `reversible = false` — a revoked token cannot be un-revoked
+/// because the server only persists the blake3 hash, not the raw
+/// bytes. The journal row exists for audit ("who revoked what,
+/// when") not for replay. `pre_state` carries the row's
+/// non-secret metadata (NO `token_hash`).
+pub const OP_KIND_TOKEN_REVOKE: &str = "token-revoke";
 
 /// One token row, as returned by `GET /api/v1/tokens`.
 ///
@@ -241,8 +252,20 @@ pub async fn tokens_create(
 }
 
 /// `DELETE /api/v1/tokens/{token_id}` — revoke a token (set
-/// `revoked_at = now()`). Idempotent: a second DELETE on an
-/// already-revoked row is a no-op `204`.
+/// `revoked_at = now()`).
+///
+/// Idempotent: a second DELETE on an already-revoked row is a
+/// no-op `204` and records NO new journal row (the revocation
+/// already happened — the journal carries the row from the
+/// first call).
+///
+/// Records an `operation_journal` row with
+/// `op_kind = "token-revoke"` and `reversible = false`. The
+/// row's `pre_state` carries non-secret metadata
+/// (`token_id`, `nickname`, `scopes`, `issued_at`,
+/// `last_used_at`, `expires_at`) so the audit surface can show
+/// "operator revoked X at time Y"; `token_hash` is NEVER copied
+/// into the journal.
 ///
 /// # Errors
 ///
@@ -251,30 +274,91 @@ pub async fn tokens_revoke(
     State(state): State<ApiState>,
     Path(token_id): Path<i64>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let pool = state.inner.library.pool();
+
+    // Snapshot the row's non-secret metadata for pre_state +
+    // detect "already revoked" / "doesn't exist" before doing
+    // any mutation. Single SELECT covers both.
+    let row = sqlx::query!(
+        r#"SELECT token_id    AS "token_id!: i64",
+                  user_id     AS "user_id!: i64",
+                  nickname    AS "nickname?: String",
+                  scopes      AS "scopes!: String",
+                  issued_at   AS "issued_at!: i64",
+                  last_used_at AS "last_used_at?: i64",
+                  expires_at  AS "expires_at?: i64",
+                  revoked_at  AS "revoked_at?: i64"
+             FROM tokens WHERE token_id = ?"#,
+        token_id,
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| Error::Database(format!("tokens revoke pre-read: {e}")))?;
+    let Some(row) = row else {
+        return Err(ApiError::NotFound(format!("token {token_id}")));
+    };
+
+    // Idempotent: already-revoked row → 204 with no journal write.
+    if row.revoked_at.is_some() {
+        tracing::info!(token_id, "api.tokens.revoke.idempotent_no_op");
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
+    let pre_state = json!({
+        "token_id": row.token_id,
+        "user_id": row.user_id,
+        "nickname": row.nickname,
+        "scopes": row.scopes,
+        "issued_at": row.issued_at,
+        "last_used_at": row.last_used_at,
+        "expires_at": row.expires_at,
+    });
+    let entry = ab_journal::NewEntry {
+        op_kind: OP_KIND_TOKEN_REVOKE,
+        target: ab_journal::Target {
+            kind: "token".to_owned(),
+            id: token_id,
+        },
+        pre_state,
+        reversible: false,
+        batch_id: None,
+    };
+    let op_id = crate::journal_capture::record_pending(pool, &entry).await?;
+
     let now = ab_db::unix_now_secs();
-    let affected = sqlx::query!(
+    let result = sqlx::query!(
         "UPDATE tokens
             SET revoked_at = ?
           WHERE token_id = ? AND revoked_at IS NULL",
         now,
         token_id,
     )
-    .execute(state.inner.library.pool())
-    .await
-    .map_err(|e| Error::Database(format!("tokens revoke: {e}")))?
-    .rows_affected();
-    if affected == 0 {
-        let exists: Option<i64> =
-            sqlx::query_scalar!("SELECT token_id FROM tokens WHERE token_id = ?", token_id,)
-                .fetch_optional(state.inner.library.pool())
-                .await
-                .map_err(|e| Error::Database(format!("tokens revoke check: {e}")))?;
-        if exists.is_none() {
-            return Err(ApiError::NotFound(format!("token {token_id}")));
+    .execute(pool)
+    .await;
+
+    match result {
+        Ok(out) => {
+            crate::journal_capture::mark_done_or_log(
+                pool,
+                op_id,
+                &json!({ "revoked_at": now }),
+                "api.tokens_revoke",
+            )
+            .await;
+            tracing::info!(
+                token_id,
+                rows_affected = out.rows_affected(),
+                "api.tokens.revoked"
+            );
+            Ok(StatusCode::NO_CONTENT)
+        }
+        Err(e) => {
+            let reason = format!("tokens revoke: {e}");
+            crate::journal_capture::mark_failed_or_log(pool, op_id, &reason, "api.tokens_revoke")
+                .await;
+            Err(ApiError::Internal(Error::Database(reason)))
         }
     }
-    tracing::info!(token_id, rows_affected = affected, "api.tokens.revoked");
-    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Look up a token by its raw bearer string.
