@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n            audiologo_status AS \"bucket_label!: String\",\n            COUNT(*) AS \"n!: i64\",\n            COALESCE(SUM(duration_ms), 0) AS \"hours_ms!: i64\"\n         FROM books\n         WHERE deleted_at IS NULL\n         GROUP BY audiologo_status\n         ORDER BY COUNT(*) DESC",
+  "describe": {
+    "columns": [
+      {
+        "name": "bucket_label!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "n!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "hours_ms!: i64",
+        "ordinal": 2,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "4689f5d2f979949d4a63d760f08c672ba8f55dd1425ca0b1ec893d563db1cdbf"
+}
