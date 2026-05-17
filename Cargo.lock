@@ -126,6 +126,7 @@ dependencies = [
 name = "ab-catalog"
 version = "0.1.0"
 dependencies = [
+ "ab-companion-extract",
  "ab-core",
  "ab-db",
  "ab-pipeline",
@@ -145,6 +146,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "zip 8.6.0",
 ]
 
 [[package]]

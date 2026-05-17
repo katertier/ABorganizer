@@ -114,6 +114,10 @@ fn build_pipeline_stages(tunables: &Tunables) -> Vec<Arc<dyn Stage>> {
         // files (CD-ripped audiobooks) and writes chapter rows
         // with `source = 'cue'`.
         Arc::new(ab_catalog::CueSidecarChaptersStage::new()),
+        // `read-epub-chapters` reads the EPUB companion's nav doc
+        // (EPUB 3 nav preferred, EPUB 2 NCX fallback) and emits
+        // `source = 'epub'` rows when N_files == N_titles.
+        Arc::new(ab_catalog::EpubChaptersStage::new()),
         // `pick-chapter-winner` flips `is_winner` so exactly one
         // chapter source per book is surfaced to the player.
         Arc::new(ab_catalog::ChapterWinnerStage::new()),
