@@ -504,6 +504,91 @@ impl DoctorCheck for LibraryRootsReachableCheck {
     }
 }
 
+/// `db-integrity` — runs `PRAGMA integrity_check` against both the library
+/// and ephemeral SQLite databases.
+///
+/// SQLite returns the single string `ok` for a clean DB; any other output
+/// is a list of corruption findings (one per line). Cheap to run on small-
+/// to-medium DBs (microseconds to single-digit seconds at 100k books per
+/// SQLite's own benchmarks); catches B-tree corruption / orphan pages /
+/// invalid free-list entries that no application-level check would catch.
+pub struct DbIntegrityCheck;
+
+#[async_trait]
+impl DoctorCheck for DbIntegrityCheck {
+    fn name(&self) -> &'static str {
+        "db-integrity"
+    }
+    fn description(&self) -> &'static str {
+        "PRAGMA integrity_check on the library + ephemeral SQLite databases"
+    }
+    async fn run(&self, ctx: &CheckCtx) -> CheckReport {
+        let library = pragma_integrity(ctx.library.pool(), "library").await;
+        let ephemeral = pragma_integrity(ctx.ephemeral.pool(), "ephemeral").await;
+        let mut findings = Vec::new();
+        let mut summary_parts = Vec::new();
+        let mut overall = CheckStatus::Ok;
+        for (label, result) in [("library", library), ("ephemeral", ephemeral)] {
+            match result {
+                Ok(messages) if messages.iter().all(|m| m == "ok") => {
+                    summary_parts.push(format!("{label} ok"));
+                }
+                Ok(messages) => {
+                    overall = CheckStatus::Failure;
+                    summary_parts.push(format!("{label} corrupt"));
+                    for m in messages {
+                        findings.push(CheckFinding {
+                            severity: CheckStatus::Failure,
+                            message: format!("{label}: {m}"),
+                            remediation: Some(
+                                "Restore from the most recent backup; investigate root cause \
+                                 (disk error, abrupt shutdown). If recent writes are \
+                                 unrecoverable, dump the DB with `.dump` and re-create."
+                                    .into(),
+                            ),
+                            doc_url: None,
+                        });
+                    }
+                }
+                Err(e) => {
+                    overall = CheckStatus::Failure;
+                    summary_parts.push(format!("{label} query failed"));
+                    findings.push(CheckFinding {
+                        severity: CheckStatus::Failure,
+                        message: format!("{label}: {e}"),
+                        remediation: Some(
+                            "Check the DB is reachable; inspect ab-db logs for open errors.".into(),
+                        ),
+                        doc_url: None,
+                    });
+                }
+            }
+        }
+        let summary = summary_parts.join(", ");
+        let mut report = match overall {
+            CheckStatus::Ok => CheckReport::ok(summary),
+            CheckStatus::Warning => CheckReport::warn(summary),
+            CheckStatus::Failure => CheckReport::fail(summary),
+        };
+        report.details = findings;
+        report
+    }
+}
+
+async fn pragma_integrity(
+    pool: &sqlx::SqlitePool,
+    _label: &str,
+) -> Result<Vec<String>, sqlx::Error> {
+    // PRAGMA integrity_check returns one row per finding. A clean DB returns
+    // a single row with the value "ok". Built at runtime (sqlx::query!
+    // macro can't bind PRAGMA statements meaningfully) — fine here, the
+    // SQL is a fixed literal with no user input.
+    let rows: Vec<(String,)> = sqlx::query_as("PRAGMA integrity_check")
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.into_iter().map(|(s,)| s).collect())
+}
+
 // ── HTTP surface ──────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -768,7 +853,6 @@ mod tests {
         .expect("seed mixed roots");
         let report = LibraryRootsReachableCheck.run(&ctx).await;
         assert_eq!(report.status, CheckStatus::Warning);
-        // 2 unreachable of 3.
         assert!(
             report.summary.contains("2 of 3"),
             "summary: {}",
@@ -787,6 +871,35 @@ mod tests {
             .await
             .expect("seed inactive root");
         let report = LibraryRootsReachableCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Ok);
+    }
+
+    #[tokio::test]
+    async fn db_integrity_check_ok_for_fresh_db() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        let report = DbIntegrityCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Ok);
+        assert!(
+            report.summary.contains("library ok") && report.summary.contains("ephemeral ok"),
+            "summary: {}",
+            report.summary
+        );
+        assert!(report.details.is_empty());
+    }
+
+    #[tokio::test]
+    async fn db_integrity_check_runs_after_writes() {
+        // Sanity: a DB that has been written to should still report ok.
+        let (ctx, _tmp) = fresh_ctx().await;
+        for i in 1..=10 {
+            sqlx::query("INSERT INTO books (book_id, title) VALUES (?, ?)")
+                .bind(i)
+                .bind(format!("book {i}"))
+                .execute(ctx.library.pool())
+                .await
+                .expect("insert book");
+        }
+        let report = DbIntegrityCheck.run(&ctx).await;
         assert_eq!(report.status, CheckStatus::Ok);
     }
 }
