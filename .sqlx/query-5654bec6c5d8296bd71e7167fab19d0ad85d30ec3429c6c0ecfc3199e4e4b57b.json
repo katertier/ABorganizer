@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT reading_status AS \"reading_status!: String\"\n             FROM books WHERE book_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "reading_status!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5654bec6c5d8296bd71e7167fab19d0ad85d30ec3429c6c0ecfc3199e4e4b57b"
+}
