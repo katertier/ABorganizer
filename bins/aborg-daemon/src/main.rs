@@ -373,15 +373,27 @@ async fn main() -> Result<()> {
     // slices. Errors here log + continue; failing startup over a
     // journal sweep would be worse than running un-recovered.
     match ab_journal::recover_pending(library.pool()).await {
-        Ok(report) if report.failed_count == 0 => {
+        Ok(report) if report.failed_count == 0 && report.retried_count == 0 => {
             tracing::info!("startup.recovery.clean — no pending operations");
         }
         Ok(report) => {
+            // Render per-op_kind split for operator audit. Stable
+            // order via BTreeMap means the log lines are diffable
+            // across restarts.
+            let by_kind: String = report
+                .by_op_kind
+                .iter()
+                .map(|(k, c)| format!("{k}={}r/{}f", c.retried, c.failed))
+                .collect::<Vec<_>>()
+                .join(", ");
             tracing::warn!(
                 failed_count = report.failed_count,
+                retried_count = report.retried_count,
                 batches = report.batches.len(),
+                by_op_kind = %by_kind,
                 "startup.recovery.flushed — pending operations from prior \
-                 crash marked failed"
+                 crash resolved (retried where a replayer was registered, \
+                 otherwise marked failed)"
             );
         }
         Err(e) => {

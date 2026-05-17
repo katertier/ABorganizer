@@ -10,7 +10,7 @@
 #![forbid(unsafe_code)]
 #![allow(missing_docs)] // scaffold; tightened in follow-up slices
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -284,6 +284,26 @@ pub struct RecoveryReport {
     #[serde(default)]
     pub retried_count: usize,
     pub batches: Vec<RecoveredBatch>,
+    /// New in PR #195 — per-`op_kind` retried/failed split. Empty
+    /// when the journal had no pending rows. `BTreeMap` for stable
+    /// iteration order in startup logs + diff-friendly JSON.
+    #[serde(default)]
+    pub by_op_kind: BTreeMap<String, OpKindCounts>,
+}
+
+/// Per-`op_kind` outcome counts inside a [`RecoveryReport`].
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct OpKindCounts {
+    pub retried: usize,
+    pub failed: usize,
+}
+
+impl OpKindCounts {
+    /// Total of retried + failed; convenience for log formatting.
+    #[must_use]
+    pub const fn total(&self) -> usize {
+        self.retried + self.failed
+    }
 }
 
 /// One batch row in a [`RecoveryReport`].
@@ -361,6 +381,7 @@ pub async fn recover_pending_with(
     let mut failed_count = 0usize;
     let mut retried_count = 0usize;
     let mut recovered: Vec<RecoveredBatch> = Vec::with_capacity(batches.len());
+    let mut by_op_kind: BTreeMap<String, OpKindCounts> = BTreeMap::new();
 
     for (batch_id, op_ids) in batches {
         for op_id in &op_ids {
@@ -369,18 +390,22 @@ pub async fn recover_pending_with(
                 Some(handler) => handler.try_replay(pool, &entry).await,
                 None => Err(JournalError::NotFound(*op_id)),
             };
+            let counts = by_op_kind.entry(entry.op_kind.clone()).or_default();
             match outcome {
                 Ok(ReplayDecision::Retried(post_state)) => {
                     mark_done(pool, *op_id, &post_state).await?;
                     retried_count += 1;
+                    counts.retried += 1;
                 }
                 Ok(ReplayDecision::Skipped(reason)) => {
                     mark_failed(pool, *op_id, &reason).await?;
                     failed_count += 1;
+                    counts.failed += 1;
                 }
                 Err(_) => {
                     mark_failed(pool, *op_id, RECOVERY_FAILED_REASON).await?;
                     failed_count += 1;
+                    counts.failed += 1;
                 }
             }
         }
@@ -391,6 +416,7 @@ pub async fn recover_pending_with(
         failed_count,
         retried_count,
         batches: recovered,
+        by_op_kind,
     })
 }
 
@@ -889,6 +915,7 @@ mod tests {
         assert_eq!(report.failed_count, 0);
         assert_eq!(report.retried_count, 0);
         assert!(report.batches.is_empty());
+        assert!(report.by_op_kind.is_empty());
     }
 
     // ── ReplayRegistry tests ─────────────────────────────────────
@@ -1070,6 +1097,89 @@ mod tests {
         kinds.sort_unstable();
         assert_eq!(kinds, vec!["a", "b"]);
         assert!(!registry.is_empty());
+    }
+
+    #[tokio::test]
+    async fn recover_pending_with_splits_counts_per_op_kind() {
+        let (_d, db) = db().await;
+        // Two retried (tag-write-final) + one failed (skip-me) + one
+        // unhandled (no replayer, falls through to canonical reason).
+        for _ in 0..2 {
+            record(
+                db.pool(),
+                &NewEntry {
+                    op_kind: "tag-write-final",
+                    target: Target {
+                        kind: "book".into(),
+                        id: 1,
+                    },
+                    pre_state: json!({ "ok": true }),
+                    reversible: true,
+                    batch_id: None,
+                },
+            )
+            .await
+            .expect("record tag-write");
+        }
+        record(
+            db.pool(),
+            &NewEntry {
+                op_kind: "skip-me",
+                target: Target {
+                    kind: "book".into(),
+                    id: 1,
+                },
+                pre_state: json!({}),
+                reversible: true,
+                batch_id: None,
+            },
+        )
+        .await
+        .expect("record skip");
+        record(
+            db.pool(),
+            &NewEntry {
+                op_kind: "unhandled",
+                target: Target {
+                    kind: "book".into(),
+                    id: 1,
+                },
+                pre_state: json!({}),
+                reversible: true,
+                batch_id: None,
+            },
+        )
+        .await
+        .expect("record unhandled");
+
+        let registry = ReplayRegistry::new(vec![
+            Arc::new(EchoReplayer {
+                op_kind: "tag-write-final",
+            }),
+            Arc::new(SkipReplayer),
+        ]);
+        let report = recover_pending_with(db.pool(), &registry)
+            .await
+            .expect("recover with");
+
+        assert_eq!(report.retried_count, 2);
+        assert_eq!(report.failed_count, 2);
+        let tag = report
+            .by_op_kind
+            .get("tag-write-final")
+            .expect("tag bucket");
+        assert_eq!(tag.retried, 2);
+        assert_eq!(tag.failed, 0);
+        assert_eq!(tag.total(), 2);
+        let skip = report.by_op_kind.get("skip-me").expect("skip bucket");
+        assert_eq!(skip.retried, 0);
+        assert_eq!(skip.failed, 1);
+        let unhandled = report
+            .by_op_kind
+            .get("unhandled")
+            .expect("unhandled bucket");
+        assert_eq!(unhandled.retried, 0);
+        assert_eq!(unhandled.failed, 1);
     }
 
     #[test]
