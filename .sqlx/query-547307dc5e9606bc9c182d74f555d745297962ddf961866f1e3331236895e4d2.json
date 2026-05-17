@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT value AS \"value!: String\",\n                      source AS \"source!: String\",\n                      confidence AS \"confidence!: f64\"\n                 FROM book_field_provenance\n                WHERE book_id = 1 AND field = 'asin'",
+  "describe": {
+    "columns": [
+      {
+        "name": "value!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "source!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "confidence!: f64",
+        "ordinal": 2,
+        "type_info": "Float"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "547307dc5e9606bc9c182d74f555d745297962ddf961866f1e3331236895e4d2"
+}
