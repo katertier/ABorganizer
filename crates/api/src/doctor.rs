@@ -410,6 +410,100 @@ impl DoctorCheck for OrphanCompanionsCheck {
     }
 }
 
+/// `library-roots-reachable` — every active `library_roots.path` must exist
+/// on disk and be a directory.
+///
+/// Catches the operator's "external drive unmounted, the daemon is still
+/// pointing at the old SMB share" failure mode. Read-only: just `stat()`
+/// per path.
+pub struct LibraryRootsReachableCheck;
+
+#[async_trait]
+impl DoctorCheck for LibraryRootsReachableCheck {
+    fn name(&self) -> &'static str {
+        "library-roots-reachable"
+    }
+    fn description(&self) -> &'static str {
+        "every active library_roots.path exists on disk and is a directory"
+    }
+    async fn run(&self, ctx: &CheckCtx) -> CheckReport {
+        let rows = match sqlx::query!(
+            r#"SELECT root_id AS "root_id!: i64", path, label
+             FROM library_roots
+             WHERE is_active = 1
+             ORDER BY root_id"#
+        )
+        .fetch_all(ctx.library.pool())
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let mut r = CheckReport::fail("library_roots query failed");
+                r.details.push(CheckFinding {
+                    severity: CheckStatus::Failure,
+                    message: e.to_string(),
+                    remediation: Some(
+                        "Inspect ab-db logs; verify the library DB is reachable.".into(),
+                    ),
+                    doc_url: None,
+                });
+                return r;
+            }
+        };
+        if rows.is_empty() {
+            return CheckReport::ok("no active library roots configured");
+        }
+        let mut missing = Vec::new();
+        let mut not_dir = Vec::new();
+        for row in &rows {
+            let p = std::path::Path::new(&row.path);
+            match std::fs::symlink_metadata(p) {
+                Ok(md) if md.is_dir() => {}
+                Ok(_) => not_dir.push((row.root_id, row.path.clone(), row.label.clone())),
+                Err(_) => missing.push((row.root_id, row.path.clone(), row.label.clone())),
+            }
+        }
+        if missing.is_empty() && not_dir.is_empty() {
+            return CheckReport::ok(format!("{} library root(s) reachable", rows.len()));
+        }
+        let mut r = CheckReport::warn(format!(
+            "{} of {} library root(s) unreachable",
+            missing.len() + not_dir.len(),
+            rows.len()
+        ));
+        for (root_id, path, label) in &missing {
+            r.details.push(CheckFinding {
+                severity: CheckStatus::Warning,
+                message: format!(
+                    "library_roots root_id={root_id} label={label:?} path={path:?} not found"
+                ),
+                remediation: Some(
+                    "Mount the source volume, or DELETE the root via the library_roots API if \
+                     it's gone for good."
+                        .into(),
+                ),
+                doc_url: None,
+            });
+        }
+        for (root_id, path, label) in &not_dir {
+            r.details.push(CheckFinding {
+                severity: CheckStatus::Warning,
+                message: format!(
+                    "library_roots root_id={root_id} label={label:?} path={path:?} exists but \
+                     is not a directory"
+                ),
+                remediation: Some(
+                    "Verify the path; if a file was created where a directory belongs, remove \
+                     it or correct the library_roots row."
+                        .into(),
+                ),
+                doc_url: None,
+            });
+        }
+        r
+    }
+}
+
 // ── HTTP surface ──────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -619,5 +713,80 @@ mod tests {
             "summary should mention 2 orphans: {}",
             report.summary
         );
+    }
+
+    #[tokio::test]
+    async fn library_roots_reachable_check_ok_when_no_roots() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        let report = LibraryRootsReachableCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Ok);
+        assert!(
+            report.summary.contains("no active"),
+            "summary: {}",
+            report.summary
+        );
+    }
+
+    #[tokio::test]
+    async fn library_roots_reachable_check_ok_when_all_paths_exist() {
+        let (ctx, tmp) = fresh_ctx().await;
+        let root_a = tmp.path().join("a");
+        let root_b = tmp.path().join("b");
+        std::fs::create_dir_all(&root_a).expect("mkdir a");
+        std::fs::create_dir_all(&root_b).expect("mkdir b");
+        let path_a = root_a.to_string_lossy().to_string();
+        let path_b = root_b.to_string_lossy().to_string();
+        sqlx::query("INSERT INTO library_roots (path, label) VALUES (?, 'A'), (?, 'B')")
+            .bind(&path_a)
+            .bind(&path_b)
+            .execute(ctx.library.pool())
+            .await
+            .expect("seed roots");
+        let report = LibraryRootsReachableCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Ok);
+        assert!(report.summary.contains('2'), "summary: {}", report.summary);
+    }
+
+    #[tokio::test]
+    async fn library_roots_reachable_check_warns_on_missing_and_not_dir() {
+        let (ctx, tmp) = fresh_ctx().await;
+        let real_dir = tmp.path().join("real");
+        let plain_file = tmp.path().join("not_a_dir.txt");
+        std::fs::create_dir_all(&real_dir).expect("mkdir real");
+        std::fs::write(&plain_file, b"x").expect("write file");
+        let path_real = real_dir.to_string_lossy().to_string();
+        let path_file = plain_file.to_string_lossy().to_string();
+        let path_missing = tmp.path().join("vanished").to_string_lossy().to_string();
+        sqlx::query(
+            "INSERT INTO library_roots (path, label) VALUES (?, 'real'), (?, 'file'), (?, 'gone')",
+        )
+        .bind(&path_real)
+        .bind(&path_file)
+        .bind(&path_missing)
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed mixed roots");
+        let report = LibraryRootsReachableCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Warning);
+        // 2 unreachable of 3.
+        assert!(
+            report.summary.contains("2 of 3"),
+            "summary: {}",
+            report.summary
+        );
+        assert_eq!(report.details.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn library_roots_reachable_check_skips_inactive_rows() {
+        let (ctx, tmp) = fresh_ctx().await;
+        let path_missing = tmp.path().join("gone").to_string_lossy().to_string();
+        sqlx::query("INSERT INTO library_roots (path, label, is_active) VALUES (?, 'soft', 0)")
+            .bind(&path_missing)
+            .execute(ctx.library.pool())
+            .await
+            .expect("seed inactive root");
+        let report = LibraryRootsReachableCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Ok);
     }
 }
