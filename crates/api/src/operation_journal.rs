@@ -189,6 +189,62 @@ pub async fn operation_journal_list(
     }))
 }
 
+/// `GET /api/v1/operation_journal/{op_id}` — fetch a single entry by id.
+///
+/// Same shape as one row of `operation_journal_list`. Useful for an
+/// operator-facing detail view that surfaces full `pre_state_json` /
+/// `post_state_json` (the list view typically truncates for table
+/// rendering).
+///
+/// # Errors
+///
+/// - `404` if `op_id` doesn't exist.
+/// - `500` for DB failures.
+pub async fn operation_journal_get(
+    State(state): State<ApiState>,
+    Path(op_id): Path<i64>,
+) -> Result<Json<OperationJournalRow>, ApiError> {
+    let raw = sqlx::query!(
+        r#"SELECT op_id          AS "op_id!: i64",
+                  op_kind         AS "op_kind!: String",
+                  target_kind     AS "target_kind!: String",
+                  target_id       AS "target_id!: i64",
+                  progress        AS "progress!: String",
+                  batch_id        AS "batch_id?: String",
+                  created_at      AS "created_at!: i64",
+                  reversible      AS "reversible!: i64",
+                  failed_reason   AS "failed_reason?: String",
+                  pre_state_json  AS "pre_state_json!: String",
+                  post_state_json AS "post_state_json?: String"
+             FROM operation_journal
+            WHERE op_id = ?"#,
+        op_id,
+    )
+    .fetch_optional(state.inner.library.pool())
+    .await
+    .map_err(|e| {
+        ApiError::Internal(ab_core::Error::Database(format!(
+            "operation_journal get: {e}"
+        )))
+    })?;
+
+    let r = raw.ok_or_else(|| ApiError::NotFound(format!("operation_journal op_id={op_id}")))?;
+
+    Ok(Json(OperationJournalRow {
+        op_id: r.op_id,
+        op_kind: r.op_kind,
+        target_kind: r.target_kind,
+        target_id: r.target_id,
+        progress: r.progress,
+        batch_id: r.batch_id,
+        created_at: r.created_at,
+        reversible: r.reversible != 0,
+        failed_reason: r.failed_reason,
+        pre_state_json: r.pre_state_json,
+        post_state_json: r.post_state_json,
+    }))
+}
+
 /// `POST /api/v1/operation_journal/{op_id}/retry` — re-dispatch a single pending entry.
 ///
 /// Looks up the row, finds the registered [`ab_journal::Replayer`] for its
@@ -361,5 +417,112 @@ mod tests {
         let json = serde_json::to_string(&r).expect("serialize");
         assert!(json.contains("\"reversible\":true"));
         assert!(json.contains("\"failed_reason\":null"));
+    }
+
+    mod get_handler {
+        use super::*;
+        use ab_core::tunables::{DbTunables, SchedulerTunables, SecurityTunables};
+        use ab_db::{EphemeralDb, LibraryDb};
+        use ab_pipeline::cleanup::CleanupRegistry;
+        use ab_pipeline::{Dag, Scheduler, StageContext};
+        use std::sync::Arc;
+        use tempfile::TempDir;
+        use tokio_util::sync::CancellationToken;
+
+        async fn fresh_state() -> (ApiState, TempDir) {
+            let tmp = TempDir::new().expect("tmpdir");
+            let library = LibraryDb::open(&tmp.path().join("library.db"), &DbTunables::default())
+                .await
+                .expect("open library");
+            let ephemeral =
+                EphemeralDb::open(&tmp.path().join("ephemeral.db"), &DbTunables::default())
+                    .await
+                    .expect("open ephemeral");
+            let cancel = CancellationToken::new();
+            let dag = Arc::new(Dag::build(Vec::new()).expect("empty dag"));
+            let ctx = StageContext {
+                library: library.clone(),
+                ephemeral: ephemeral.clone(),
+                cancel: cancel.clone(),
+                stage_name: "test",
+            };
+            let scheduler = Arc::new(Scheduler::spawn(
+                Arc::clone(&dag),
+                ctx,
+                &SchedulerTunables::default(),
+            ));
+            let state = ApiState::new(
+                library,
+                ephemeral,
+                scheduler,
+                dag,
+                CleanupRegistry::new(Vec::new()),
+                cancel,
+                SecurityTunables::default(),
+                globset::GlobSet::empty(),
+                ab_background::BackgroundRegistry::new(vec![]),
+                crate::doctor::DoctorRegistry::new(vec![]),
+            );
+            (state, tmp)
+        }
+
+        async fn seed_done_row(state: &ApiState, op_kind: &str, target_id: i64) -> i64 {
+            sqlx::query_scalar!(
+                r#"INSERT INTO operation_journal
+                       (op_kind, target_kind, target_id, pre_state_json,
+                        post_state_json, progress, reversible)
+                   VALUES (?, 'book', ?, '{"a":1}', '{"a":2}', 'done', 1)
+                   RETURNING op_id AS "op_id!: i64""#,
+                op_kind,
+                target_id,
+            )
+            .fetch_one(state.inner.library.pool())
+            .await
+            .expect("seed journal row")
+        }
+
+        #[tokio::test]
+        async fn returns_row_when_present() {
+            let (state, _tmp) = fresh_state().await;
+            let op_id = seed_done_row(&state, "tag-write-final", 42).await;
+            let Json(row) = operation_journal_get(State(state), Path(op_id))
+                .await
+                .expect("handler ok");
+            assert_eq!(row.op_id, op_id);
+            assert_eq!(row.op_kind, "tag-write-final");
+            assert_eq!(row.target_kind, "book");
+            assert_eq!(row.target_id, 42);
+            assert_eq!(row.progress, "done");
+            assert!(row.reversible);
+            assert_eq!(row.pre_state_json, r#"{"a":1}"#);
+            assert_eq!(row.post_state_json.as_deref(), Some(r#"{"a":2}"#));
+            assert!(row.failed_reason.is_none());
+        }
+
+        #[tokio::test]
+        async fn returns_404_when_op_id_missing() {
+            let (state, _tmp) = fresh_state().await;
+            let err = operation_journal_get(State(state), Path(99_999))
+                .await
+                .expect_err("expected 404");
+            assert!(
+                matches!(err, ApiError::NotFound(ref msg) if msg.contains("99999")),
+                "got: {err:?}",
+            );
+        }
+
+        #[tokio::test]
+        async fn picks_correct_row_among_many() {
+            let (state, _tmp) = fresh_state().await;
+            let _a = seed_done_row(&state, "kind-a", 1).await;
+            let b = seed_done_row(&state, "kind-b", 2).await;
+            let _c = seed_done_row(&state, "kind-c", 3).await;
+            let Json(row) = operation_journal_get(State(state), Path(b))
+                .await
+                .expect("handler ok");
+            assert_eq!(row.op_id, b);
+            assert_eq!(row.op_kind, "kind-b");
+            assert_eq!(row.target_id, 2);
+        }
     }
 }

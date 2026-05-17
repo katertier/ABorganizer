@@ -365,6 +365,11 @@ async fn operation_journal_retry_protected() {
 }
 
 #[tokio::test]
+async fn operation_journal_get_protected() {
+    assert_protected("GET", "/operation_journal/1").await;
+}
+
+#[tokio::test]
 async fn books_status_protected() {
     assert_protected("PATCH", "/books/1/status").await;
 }
