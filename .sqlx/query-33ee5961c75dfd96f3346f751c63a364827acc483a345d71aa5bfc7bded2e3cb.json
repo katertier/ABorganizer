@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO narrators (name) VALUES ('Jane Doe')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "33ee5961c75dfd96f3346f751c63a364827acc483a345d71aa5bfc7bded2e3cb"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO narrators (name) VALUES ('John Roe')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "da6fba624f4fc04d3d97972bcf30bced85dcef0776cfaf5d0ea0347750bdd48a"
+}

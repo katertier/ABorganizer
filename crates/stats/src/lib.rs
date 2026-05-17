@@ -94,6 +94,15 @@ pub enum Dimension {
     /// the response bounded; operator libraries with many
     /// one-off authors naturally roll a heavy tail into `Others`.
     Author,
+    /// Books per narrator. Joins through the `book_narrator`
+    /// bridge — multi-narrator (full-cast) recordings contribute
+    /// one row per (book, narrator) pair, so a 3-cast book lands
+    /// in 3 narrator buckets. The bucket count is therefore the
+    /// number of books a narrator participated in (not the total
+    /// number of distinct books across all buckets); `hours_ms`
+    /// likewise over-sums for full-cast recordings. Books with no
+    /// `book_narrator` row roll into `unknown`.
+    Narrator,
 }
 
 impl Dimension {
@@ -107,6 +116,7 @@ impl Dimension {
             "publisher" => Self::Publisher,
             "format" => Self::Format,
             "author" => Self::Author,
+            "narrator" => Self::Narrator,
             other => return Err(StatsError::UnsupportedDimension(other.to_owned())),
         })
     }
@@ -122,6 +132,7 @@ impl Dimension {
             Self::Publisher => "publisher",
             Self::Format => "format",
             Self::Author => "author",
+            Self::Narrator => "narrator",
         }
     }
 }
@@ -228,6 +239,7 @@ pub async fn breakdown(
         Dimension::Publisher => publisher_breakdown(pool).await?,
         Dimension::Format => format_breakdown(pool).await?,
         Dimension::Author => author_breakdown(pool).await?,
+        Dimension::Narrator => narrator_breakdown(pool).await?,
     };
     let buckets = collapse_long_tail(raw);
     let buckets = with_percentages(buckets);
@@ -443,6 +455,31 @@ async fn author_breakdown(pool: &SqlitePool) -> Result<Vec<RawBucket>, StatsErro
          LEFT JOIN authors a ON a.author_id = b.author_id
          WHERE b.deleted_at IS NULL
          GROUP BY b.author_id
+         ORDER BY COUNT(*) DESC"#,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| RawBucket {
+            label: r.bucket_label,
+            count: r.n,
+            hours_ms: r.hours_ms,
+        })
+        .collect())
+}
+
+async fn narrator_breakdown(pool: &SqlitePool) -> Result<Vec<RawBucket>, StatsError> {
+    let rows = sqlx::query!(
+        r#"SELECT
+            COALESCE(n.name, 'unknown') AS "bucket_label!: String",
+            COUNT(*) AS "n!: i64",
+            COALESCE(SUM(b.duration_ms), 0) AS "hours_ms!: i64"
+         FROM books b
+         LEFT JOIN book_narrator bn ON bn.book_id = b.book_id
+         LEFT JOIN narrators n ON n.narrator_id = bn.narrator_id
+         WHERE b.deleted_at IS NULL
+         GROUP BY n.narrator_id
          ORDER BY COUNT(*) DESC"#,
     )
     .fetch_all(pool)
@@ -761,6 +798,7 @@ mod tests {
             Dimension::Publisher,
             Dimension::Format,
             Dimension::Author,
+            Dimension::Narrator,
         ] {
             assert_eq!(Dimension::parse(d.as_str()).expect("parse"), d);
         }
@@ -819,6 +857,52 @@ mod tests {
             .collect();
         assert_eq!(counts.get("Stephen King").copied(), Some(2));
         assert_eq!(counts.get("Margaret Atwood").copied(), Some(1));
+        assert_eq!(counts.get("unknown").copied(), Some(1));
+    }
+
+    #[tokio::test]
+    async fn narrator_buckets_count_book_narrator_edges() {
+        let (_d, db) = open_db().await;
+        let doe_id = sqlx::query!("INSERT INTO narrators (name) VALUES ('Jane Doe')")
+            .execute(db.pool())
+            .await
+            .expect("insert narrator doe")
+            .last_insert_rowid();
+        let roe_id = sqlx::query!("INSERT INTO narrators (name) VALUES ('John Roe')")
+            .execute(db.pool())
+            .await
+            .expect("insert narrator roe")
+            .last_insert_rowid();
+        let id1 = add_book(&db, "A", Some("en"), Some(1), "reading").await;
+        let id2 = add_book(&db, "B", Some("en"), Some(1), "reading").await;
+        let id3 = add_book(&db, "C", Some("en"), Some(1), "reading").await;
+        let _id4 = add_book(&db, "D", Some("en"), Some(1), "reading").await;
+        // id1: solo Doe. id2: full-cast Doe + Roe (counts in both buckets).
+        // id3: solo Roe. id4: no narrator → unknown.
+        for (b, n) in [(id1, doe_id), (id2, doe_id), (id2, roe_id), (id3, roe_id)] {
+            sqlx::query!(
+                "INSERT INTO book_narrator (book_id, narrator_id) VALUES (?, ?)",
+                b,
+                n,
+            )
+            .execute(db.pool())
+            .await
+            .expect("insert book_narrator");
+        }
+
+        let b = breakdown(db.pool(), Dimension::Narrator)
+            .await
+            .expect("breakdown");
+        let counts: std::collections::HashMap<String, u64> = b
+            .buckets
+            .iter()
+            .map(|x| (x.label.clone(), x.count))
+            .collect();
+        // Doe narrates id1 + id2 → 2. Roe narrates id2 + id3 → 2. id4 → unknown (1).
+        // Sum of bucket counts (5) > total books (4) — the multi-narrator
+        // over-count documented on Dimension::Narrator.
+        assert_eq!(counts.get("Jane Doe").copied(), Some(2));
+        assert_eq!(counts.get("John Roe").copied(), Some(2));
         assert_eq!(counts.get("unknown").copied(), Some(1));
     }
 }
