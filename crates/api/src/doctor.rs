@@ -589,6 +589,92 @@ async fn pragma_integrity(
     Ok(rows.into_iter().map(|(s,)| s).collect())
 }
 
+/// `ai-cache-size` — `ai_cache` row count + total content bytes.
+///
+/// Catches runaway cache growth (transcript blobs, DNA-tag JSON,
+/// per-chapter caches) before it eats the operator's disk.
+///
+/// Status is `Ok` until total bytes exceed [`AI_CACHE_BUDGET_BYTES`]
+/// (5 `GiB`) — then `Warning`, with the actual figure in the summary.
+/// `Failure` only when the COUNT/SUM query itself errors.
+pub struct AiCacheSizeCheck;
+
+/// Soft budget for the `ai_cache` table.
+///
+/// Crosses → doctor warns. Set well above the 100k-book ceiling's
+/// expected cache footprint (transcript caches dominate, ~10 KB
+/// compressed per book → ~1 `GiB` at 100k books); 5 `GiB` leaves
+/// headroom for `DNA-tags` + samples + future cache types without
+/// nagging on healthy libraries.
+pub const AI_CACHE_BUDGET_BYTES: i64 = 5 * 1024 * 1024 * 1024;
+
+#[async_trait]
+impl DoctorCheck for AiCacheSizeCheck {
+    fn name(&self) -> &'static str {
+        "ai-cache-size"
+    }
+    fn description(&self) -> &'static str {
+        "ai_cache row count + total content bytes vs soft budget"
+    }
+    async fn run(&self, ctx: &CheckCtx) -> CheckReport {
+        let row = match sqlx::query!(
+            r#"SELECT
+                COUNT(*) AS "rows!: i64",
+                COALESCE(SUM(LENGTH(content)), 0) AS "bytes!: i64"
+              FROM ai_cache"#,
+        )
+        .fetch_one(ctx.library.pool())
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let mut r = CheckReport::fail("ai_cache size query failed");
+                r.details.push(CheckFinding {
+                    severity: CheckStatus::Failure,
+                    message: e.to_string(),
+                    remediation: Some(
+                        "Inspect ab-db logs; verify the library DB is reachable.".into(),
+                    ),
+                    doc_url: None,
+                });
+                return r;
+            }
+        };
+        let mib = row.bytes / (1024 * 1024);
+        let budget_mib = AI_CACHE_BUDGET_BYTES / (1024 * 1024);
+        if row.bytes <= AI_CACHE_BUDGET_BYTES {
+            return CheckReport::ok(format!(
+                "ai_cache: {rows} row(s), {mib} MiB (budget {budget_mib} MiB)",
+                rows = row.rows,
+            ));
+        }
+        let mut r = CheckReport::warn(format!(
+            "ai_cache: {rows} row(s), {mib} MiB exceeds budget {budget_mib} MiB",
+            rows = row.rows,
+        ));
+        r.details.push(CheckFinding {
+            severity: CheckStatus::Warning,
+            message: format!(
+                "ai_cache content totals {mib} MiB across {rows} row(s); soft budget is \
+                 {budget_mib} MiB. Most space is usually transcript caches (compressed); \
+                 DNA-tag + sample caches are small.",
+                rows = row.rows,
+            ),
+            remediation: Some(
+                "If growth is unexpected, audit cache_type distribution \
+                 (SELECT cache_type, COUNT(*), SUM(LENGTH(content)) FROM ai_cache GROUP BY \
+                 cache_type ORDER BY 3 DESC) — a single cache_type dominating may indicate \
+                 a stuck pipeline rerun loop. Cleanup options: drop transient cache_types \
+                 (`DELETE FROM ai_cache WHERE cache_type = 'samples'` etc.); the stages \
+                 that fill them will re-cache on demand."
+                    .into(),
+            ),
+            doc_url: None,
+        });
+        r
+    }
+}
+
 // ── HTTP surface ──────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -885,6 +971,42 @@ mod tests {
             report.summary
         );
         assert!(report.details.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ai_cache_size_check_ok_when_empty() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        let report = AiCacheSizeCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Ok);
+        assert!(
+            report.summary.contains("0 row"),
+            "summary: {}",
+            report.summary
+        );
+    }
+
+    #[tokio::test]
+    async fn ai_cache_size_check_ok_within_budget() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        // Seed a book + a tiny cache row. Well under budget.
+        sqlx::query("INSERT INTO books (book_id, title) VALUES (1, 'b')")
+            .execute(ctx.library.pool())
+            .await
+            .expect("seed book");
+        sqlx::query(
+            "INSERT INTO ai_cache (book_id, cache_type, content) VALUES (1, 'dna_tags', ?)",
+        )
+        .bind(vec![0u8; 1024]) // 1 KiB
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed cache row");
+        let report = AiCacheSizeCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Ok);
+        assert!(
+            report.summary.contains("1 row"),
+            "summary: {}",
+            report.summary
+        );
     }
 
     #[tokio::test]
