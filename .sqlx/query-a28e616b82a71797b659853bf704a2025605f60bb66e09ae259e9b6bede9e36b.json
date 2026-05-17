@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO authors (name) VALUES ('Margaret Atwood')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "a28e616b82a71797b659853bf704a2025605f60bb66e09ae259e9b6bede9e36b"
+}
