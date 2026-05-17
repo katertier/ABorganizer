@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT op_id          AS \"op_id!: i64\",\n                  op_kind         AS \"op_kind!: String\",\n                  target_kind     AS \"target_kind!: String\",\n                  target_id       AS \"target_id!: i64\",\n                  progress        AS \"progress!: String\",\n                  batch_id        AS \"batch_id?: String\",\n                  created_at      AS \"created_at!: i64\",\n                  reversible      AS \"reversible!: i64\",\n                  failed_reason   AS \"failed_reason?: String\",\n                  pre_state_json  AS \"pre_state_json!: String\",\n                  post_state_json AS \"post_state_json?: String\"\n             FROM operation_journal\n            WHERE (?1 IS NULL OR op_kind   = ?1)\n              AND (?2 IS NULL OR progress  = ?2)\n              AND (?3 IS NULL OR batch_id  = ?3)\n            ORDER BY created_at DESC, op_id DESC\n            LIMIT ?4 OFFSET ?5",
+  "query": "SELECT op_id          AS \"op_id!: i64\",\n                  op_kind         AS \"op_kind!: String\",\n                  target_kind     AS \"target_kind!: String\",\n                  target_id       AS \"target_id!: i64\",\n                  progress        AS \"progress!: String\",\n                  batch_id        AS \"batch_id?: String\",\n                  created_at      AS \"created_at!: i64\",\n                  reversible      AS \"reversible!: i64\",\n                  failed_reason   AS \"failed_reason?: String\",\n                  pre_state_json  AS \"pre_state_json!: String\",\n                  post_state_json AS \"post_state_json?: String\"\n             FROM operation_journal\n            WHERE (?1 IS NULL OR op_kind     = ?1)\n              AND (?2 IS NULL OR progress    = ?2)\n              AND (?3 IS NULL OR batch_id    = ?3)\n              AND (?4 IS NULL OR target_kind = ?4)\n              AND (?5 IS NULL OR target_id   = ?5)\n            ORDER BY created_at DESC, op_id DESC\n            LIMIT ?6 OFFSET ?7",
   "describe": {
     "columns": [
       {
@@ -60,7 +60,7 @@
       }
     ],
     "parameters": {
-      "Right": 5
+      "Right": 7
     },
     "nullable": [
       true,
@@ -76,5 +76,5 @@
       true
     ]
   },
-  "hash": "ca0c021571fcf4dbf307131fbb400eaf49e07e22cb4035945bf036aa596b20a3"
+  "hash": "b0e756448c48a1007573c7760b53d5f672805bebf57a49ffa4e112abc494b7eb"
 }
