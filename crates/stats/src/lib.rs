@@ -121,6 +121,15 @@ pub enum Dimension {
     /// are settled; `detected` is the operator review queue;
     /// `unknown` hasn't been touched yet.
     AudiologoStatus,
+    /// Books per `books.abridged` value. Three buckets:
+    /// `unabridged` (column = 0), `abridged` (= 1), and
+    /// `unknown` (NULL — the column has never been populated by
+    /// tag-read or an enrichment source). No JOIN. The operator
+    /// uses this to spot enrichment coverage gaps: a healthy
+    /// library has a near-zero `unknown` slice because every
+    /// post-enrichment book either has the lofty-decoded value
+    /// or a falsifiable `0` from default.
+    Abridged,
 }
 
 impl Dimension {
@@ -137,6 +146,7 @@ impl Dimension {
             "narrator" => Self::Narrator,
             "series" => Self::Series,
             "audiologo_status" => Self::AudiologoStatus,
+            "abridged" => Self::Abridged,
             other => return Err(StatsError::UnsupportedDimension(other.to_owned())),
         })
     }
@@ -155,6 +165,7 @@ impl Dimension {
             Self::Narrator => "narrator",
             Self::Series => "series",
             Self::AudiologoStatus => "audiologo_status",
+            Self::Abridged => "abridged",
         }
     }
 }
@@ -264,6 +275,7 @@ pub async fn breakdown(
         Dimension::Narrator => narrator_breakdown(pool).await?,
         Dimension::Series => series_breakdown(pool).await?,
         Dimension::AudiologoStatus => audiologo_status_breakdown(pool).await?,
+        Dimension::Abridged => abridged_breakdown(pool).await?,
     };
     let buckets = collapse_long_tail(raw);
     let buckets = with_percentages(buckets);
@@ -552,6 +564,34 @@ async fn audiologo_status_breakdown(pool: &SqlitePool) -> Result<Vec<RawBucket>,
          FROM books
          WHERE deleted_at IS NULL
          GROUP BY audiologo_status
+         ORDER BY COUNT(*) DESC"#,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| RawBucket {
+            label: r.bucket_label,
+            count: r.n,
+            hours_ms: r.hours_ms,
+        })
+        .collect())
+}
+
+async fn abridged_breakdown(pool: &SqlitePool) -> Result<Vec<RawBucket>, StatsError> {
+    let rows = sqlx::query!(
+        r#"SELECT
+            CASE
+                WHEN abridged IS NULL THEN 'unknown'
+                WHEN abridged = 0    THEN 'unabridged'
+                WHEN abridged = 1    THEN 'abridged'
+                ELSE 'unknown'
+            END AS "bucket_label!: String",
+            COUNT(*) AS "n!: i64",
+            COALESCE(SUM(duration_ms), 0) AS "hours_ms!: i64"
+         FROM books
+         WHERE deleted_at IS NULL
+         GROUP BY 1
          ORDER BY COUNT(*) DESC"#,
     )
     .fetch_all(pool)
@@ -1061,5 +1101,40 @@ mod tests {
         assert_eq!(counts.get("applied").copied(), Some(2));
         assert_eq!(counts.get("detected").copied(), Some(1));
         assert_eq!(counts.get("unknown").copied(), Some(1));
+    }
+
+    #[tokio::test]
+    async fn abridged_buckets_partition_unknown_unabridged_abridged() {
+        let (_d, db) = open_db().await;
+        // 5 books: 2 unabridged (0), 1 abridged (1), 2 unknown (NULL).
+        let id_unabr_a = add_book(&db, "A", Some("en"), Some(1), "reading").await;
+        let id_unabr_b = add_book(&db, "B", Some("en"), Some(1), "reading").await;
+        let id_abr = add_book(&db, "C", Some("en"), Some(1), "reading").await;
+        let _id_null1 = add_book(&db, "D", Some("en"), Some(1), "reading").await;
+        let _id_null2 = add_book(&db, "E", Some("en"), Some(1), "reading").await;
+        for (id, value) in [(id_unabr_a, 0_i64), (id_unabr_b, 0), (id_abr, 1)] {
+            sqlx::query!("UPDATE books SET abridged = ? WHERE book_id = ?", value, id,)
+                .execute(db.pool())
+                .await
+                .expect("set abridged");
+        }
+        let b = breakdown(db.pool(), Dimension::Abridged)
+            .await
+            .expect("breakdown");
+        let counts: std::collections::HashMap<String, u64> = b
+            .buckets
+            .iter()
+            .map(|x| (x.label.clone(), x.count))
+            .collect();
+        assert_eq!(counts.get("unabridged").copied(), Some(2));
+        assert_eq!(counts.get("abridged").copied(), Some(1));
+        assert_eq!(counts.get("unknown").copied(), Some(2));
+    }
+
+    #[test]
+    fn dimension_parse_abridged_round_trip() {
+        let d = Dimension::parse("abridged").expect("parse");
+        assert_eq!(d.as_str(), "abridged");
+        assert!(matches!(d, Dimension::Abridged));
     }
 }
