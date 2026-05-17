@@ -130,6 +130,15 @@ pub enum Dimension {
     /// post-enrichment book either has the lofty-decoded value
     /// or a falsifiable `0` from default.
     Abridged,
+    /// Books per `books.rating` (1-5 star score, ADR-0033).
+    ///
+    /// Six fixed buckets: `unrated` (NULL) plus `1`, `2`, `3`,
+    /// `4`, `5`. No JOIN, no long-tail collapse — the value
+    /// range is bounded by the schema CHECK constraint on the
+    /// column. Doubles as a discovery signal ("what have I
+    /// scored highly?") and an enrichment-coverage gauge
+    /// ("what fraction of finished books still has no rating?").
+    Rating,
 }
 
 impl Dimension {
@@ -147,6 +156,7 @@ impl Dimension {
             "series" => Self::Series,
             "audiologo_status" => Self::AudiologoStatus,
             "abridged" => Self::Abridged,
+            "rating" => Self::Rating,
             other => return Err(StatsError::UnsupportedDimension(other.to_owned())),
         })
     }
@@ -166,6 +176,7 @@ impl Dimension {
             Self::Series => "series",
             Self::AudiologoStatus => "audiologo_status",
             Self::Abridged => "abridged",
+            Self::Rating => "rating",
         }
     }
 }
@@ -276,6 +287,7 @@ pub async fn breakdown(
         Dimension::Series => series_breakdown(pool).await?,
         Dimension::AudiologoStatus => audiologo_status_breakdown(pool).await?,
         Dimension::Abridged => abridged_breakdown(pool).await?,
+        Dimension::Rating => rating_breakdown(pool).await?,
     };
     let buckets = collapse_long_tail(raw);
     let buckets = with_percentages(buckets);
@@ -606,6 +618,37 @@ async fn abridged_breakdown(pool: &SqlitePool) -> Result<Vec<RawBucket>, StatsEr
         .collect())
 }
 
+async fn rating_breakdown(pool: &SqlitePool) -> Result<Vec<RawBucket>, StatsError> {
+    let rows = sqlx::query!(
+        r#"SELECT
+            CASE
+                WHEN rating IS NULL THEN 'unrated'
+                WHEN rating = 1     THEN '1'
+                WHEN rating = 2     THEN '2'
+                WHEN rating = 3     THEN '3'
+                WHEN rating = 4     THEN '4'
+                WHEN rating = 5     THEN '5'
+                ELSE 'unrated'
+            END AS "bucket_label!: String",
+            COUNT(*) AS "n!: i64",
+            COALESCE(SUM(duration_ms), 0) AS "hours_ms!: i64"
+         FROM books
+         WHERE deleted_at IS NULL
+         GROUP BY 1
+         ORDER BY COUNT(*) DESC"#,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| RawBucket {
+            label: r.bucket_label,
+            count: r.n,
+            hours_ms: r.hours_ms,
+        })
+        .collect())
+}
+
 fn collapse_long_tail(mut raw: Vec<RawBucket>) -> Vec<Bucket> {
     if raw.len() <= TOP_N {
         return raw
@@ -913,6 +956,7 @@ mod tests {
             Dimension::Narrator,
             Dimension::Series,
             Dimension::AudiologoStatus,
+            Dimension::Rating,
         ] {
             assert_eq!(Dimension::parse(d.as_str()).expect("parse"), d);
         }
@@ -1136,5 +1180,48 @@ mod tests {
         let d = Dimension::parse("abridged").expect("parse");
         assert_eq!(d.as_str(), "abridged");
         assert!(matches!(d, Dimension::Abridged));
+    }
+
+    #[tokio::test]
+    async fn rating_buckets_partition_unrated_and_one_to_five() {
+        let (_d, db) = open_db().await;
+        // 7 books: 2 unrated (NULL), 1 rated 1, 1 rated 3, 2 rated 5, 1 rated 4.
+        let _id_null_a = add_book(&db, "A", Some("en"), Some(1), "reading").await;
+        let _id_null_b = add_book(&db, "B", Some("en"), Some(1), "reading").await;
+        let id_1 = add_book(&db, "C", Some("en"), Some(1), "reading").await;
+        let id_3 = add_book(&db, "D", Some("en"), Some(1), "reading").await;
+        let id_five_first = add_book(&db, "E", Some("en"), Some(1), "reading").await;
+        let id_five_second = add_book(&db, "F", Some("en"), Some(1), "reading").await;
+        let id_4 = add_book(&db, "G", Some("en"), Some(1), "reading").await;
+        for (id, value) in [
+            (id_1, 1_i64),
+            (id_3, 3),
+            (id_five_first, 5),
+            (id_five_second, 5),
+            (id_4, 4),
+        ] {
+            sqlx::query!("UPDATE books SET rating = ? WHERE book_id = ?", value, id)
+                .execute(db.pool())
+                .await
+                .expect("set rating");
+        }
+        let b = breakdown(db.pool(), Dimension::Rating)
+            .await
+            .expect("breakdown");
+        let counts: std::collections::HashMap<String, u64> = b
+            .buckets
+            .iter()
+            .map(|x| (x.label.clone(), x.count))
+            .collect();
+        assert_eq!(counts.get("unrated").copied(), Some(2));
+        assert_eq!(counts.get("1").copied(), Some(1));
+        assert_eq!(counts.get("3").copied(), Some(1));
+        assert_eq!(counts.get("4").copied(), Some(1));
+        assert_eq!(counts.get("5").copied(), Some(2));
+        // No bucket for unrated levels (2): SQLite GROUP BY only emits
+        // labels with at least one row.
+        assert!(!counts.contains_key("2"));
+        // No Others — bounded range.
+        assert!(!counts.contains_key("Others"));
     }
 }
