@@ -469,6 +469,8 @@ async fn main() -> Result<()> {
         Arc::new(ab_api::doctor::SpeechCheck),
         Arc::new(ab_api::doctor::LlmCheck),
         Arc::new(ab_api::doctor::JournalCheck),
+        Arc::new(ab_api::doctor::FailedOpsCheck),
+        Arc::new(ab_api::doctor::OrphanCompanionsCheck),
     ]);
     let api_state = ab_api::ApiState::new(
         library.clone(),

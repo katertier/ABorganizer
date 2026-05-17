@@ -28,6 +28,7 @@ dependencies = [
  "ab-db",
  "ab-fingerprint",
  "ab-foundation-models",
+ "ab-journal",
  "ab-pipeline",
  "ab-progress",
  "ab-query",
