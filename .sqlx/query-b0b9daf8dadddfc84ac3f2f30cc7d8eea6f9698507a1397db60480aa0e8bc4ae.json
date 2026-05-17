@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO asin_learnings\n              (title_norm, author_norm, asin, source, learned_at)\n            VALUES (?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "b0b9daf8dadddfc84ac3f2f30cc7d8eea6f9698507a1397db60480aa0e8bc4ae"
+}

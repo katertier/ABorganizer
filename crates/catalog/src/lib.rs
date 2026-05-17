@@ -13,6 +13,7 @@
 
 #![allow(missing_docs)] // scaffold
 
+pub mod asin_learnings;
 pub mod audible;
 pub mod audible_search;
 pub mod audnexus;

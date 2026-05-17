@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT b.title AS \"title!: String\",\n                      a.name  AS \"author_name?: String\"\n                 FROM books b\n                 LEFT JOIN authors a ON a.author_id = b.author_id\n                 WHERE b.book_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "title!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "author_name?: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "6a9d2b65511d454608b0636c91c2906415a7d20df3ee775760b3dad10243d230"
+}

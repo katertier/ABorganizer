@@ -1321,6 +1321,42 @@ async fn books_patch(
                 ApiError::Internal(ab_core::Error::Database(format!("books_patch asin: {e}")))
             })?;
         updated.push(Field::Asin.as_str().to_owned());
+
+        // Auto-learn: feed the (title, author, asin) tuple back to
+        // the catalogue layer so the next audible-search call has
+        // a hint. Read the current title + canonical author after
+        // any in-flight PATCH updates so the captured row reflects
+        // the operator's latest understanding of the book.
+        let learn_row = sqlx::query!(
+            r#"SELECT b.title AS "title!: String",
+                      a.name  AS "author_name?: String"
+                 FROM books b
+                 LEFT JOIN authors a ON a.author_id = b.author_id
+                 WHERE b.book_id = ?"#,
+            book_id,
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| {
+            ApiError::Internal(ab_core::Error::Database(format!(
+                "books_patch asin auto-learn read: {e}"
+            )))
+        })?;
+        if let Some(author_name) = learn_row.author_name {
+            ab_catalog::asin_learnings::capture(
+                &mut tx,
+                &learn_row.title,
+                &author_name,
+                v,
+                ab_catalog::asin_learnings::SOURCE_USER_EDIT,
+            )
+            .await
+            .map_err(|e| {
+                ApiError::Internal(ab_core::Error::Database(format!(
+                    "books_patch asin auto-learn write: {e}"
+                )))
+            })?;
+        }
     }
     if let Some(v) = req.isbn.as_deref() {
         record_user_edit(&mut tx, book_id, Field::Isbn, Some(v)).await?;
