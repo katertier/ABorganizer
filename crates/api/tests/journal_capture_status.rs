@@ -8,9 +8,9 @@
 )]
 
 //! Integration tests for the `operation_journal` capture half of
-//! `PATCH /books/{id}/status` (ADR-0039 step 1).
+//! `PATCH /books/{id}/status` and `/rating` (ADR-0039 step 1).
 //!
-//! Asserts:
+//! Asserts (status):
 //! - On success: a `book-status-set` row is inserted with
 //!   `progress = 'done'`, `pre_state` carries `{current, intent}`,
 //!   and `post_state` carries `{reading_status}`.
@@ -20,12 +20,20 @@
 //! - The `reversible` column lands as `1` (boolean true).
 //! - `op_kind` matches the published `OP_KIND_BOOK_STATUS_SET`
 //!   constant so the future StatusReplayer slice can claim it.
+//!
+//! Asserts (rating):
+//! - A `book-rating-set` row is inserted on success; `pre_state`
+//!   carries integer 1..=5 or `null` for `{current, intent}`.
+//! - Invalid rating (>5) returns 400 and writes NO journal row
+//!   (validation happens before capture).
+//! - Three consecutive flips each get their own row with
+//!   `pre_state.current` reflecting the previous mutation.
 
 use std::sync::Arc;
 
 use ab_api::ApiState;
 use ab_api::build_router;
-use ab_api::progress::OP_KIND_BOOK_STATUS_SET;
+use ab_api::progress::{OP_KIND_BOOK_RATING_SET, OP_KIND_BOOK_STATUS_SET};
 use ab_core::auth::{hash_api_token, mint_api_token};
 use ab_core::tunables::{DbTunables, SchedulerTunables, SecurityTunables};
 use ab_db::{EphemeralDb, LibraryDb};
@@ -223,4 +231,98 @@ async fn status_patch_records_each_call_distinctly() {
     assert_eq!(pre0["current"], "want_to_read");
     assert_eq!(pre1["current"], "reading");
     assert_eq!(pre2["current"], "finished");
+}
+
+async fn patch_rating(router: &axum::Router, token: &str, book_id: i64, body: &str) -> StatusCode {
+    let req = Request::builder()
+        .method("PATCH")
+        .uri(format!("/books/{book_id}/rating"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_owned()))
+        .expect("build req");
+    router.clone().oneshot(req).await.expect("oneshot").status()
+}
+
+#[tokio::test]
+async fn rating_patch_writes_done_journal_row_on_success() {
+    let (router, state, _tmp) = fresh_setup().await;
+    let token = mint_token(&state).await;
+    let book_id = seed_book(&state.inner.library, "Foo").await;
+
+    let status = patch_rating(&router, &token, book_id, r#"{"rating":4}"#).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let rows = snapshot_journal(&state.inner.library).await;
+    assert_eq!(rows.len(), 1);
+    let r = &rows[0];
+    assert_eq!(r.op_kind, OP_KIND_BOOK_RATING_SET);
+    assert_eq!(r.op_kind, "book-rating-set");
+    assert_eq!(r.target_kind, "book");
+    assert_eq!(r.target_id, book_id);
+    assert_eq!(r.progress, "done");
+    assert_eq!(r.reversible, 1);
+
+    let pre: Value = serde_json::from_str(&r.pre_state_json).expect("pre json");
+    assert_eq!(pre["current"], Value::Null); // fresh book has no rating
+    assert_eq!(pre["intent"], 4);
+
+    let post: Value = serde_json::from_str(r.post_state_json.as_deref().expect("post present"))
+        .expect("post json");
+    assert_eq!(post["rating"], 4);
+}
+
+#[tokio::test]
+async fn rating_patch_records_null_clear_correctly() {
+    let (router, state, _tmp) = fresh_setup().await;
+    let token = mint_token(&state).await;
+    let book_id = seed_book(&state.inner.library, "Bar").await;
+
+    // First set to 3, then clear to null.
+    assert_eq!(
+        patch_rating(&router, &token, book_id, r#"{"rating":3}"#).await,
+        StatusCode::OK,
+    );
+    assert_eq!(
+        patch_rating(&router, &token, book_id, r#"{"rating":null}"#).await,
+        StatusCode::OK,
+    );
+
+    let rows = snapshot_journal(&state.inner.library).await;
+    assert_eq!(rows.len(), 2);
+    let pre0: Value = serde_json::from_str(&rows[0].pre_state_json).unwrap();
+    let pre1: Value = serde_json::from_str(&rows[1].pre_state_json).unwrap();
+    assert_eq!(pre0["current"], Value::Null);
+    assert_eq!(pre0["intent"], 3);
+    assert_eq!(pre1["current"], 3);
+    assert_eq!(pre1["intent"], Value::Null);
+}
+
+#[tokio::test]
+async fn rating_patch_400_and_no_journal_row_on_invalid_rating() {
+    let (router, state, _tmp) = fresh_setup().await;
+    let token = mint_token(&state).await;
+    let book_id = seed_book(&state.inner.library, "Bad").await;
+
+    // Out-of-range — validation runs before capture, so no row.
+    let status = patch_rating(&router, &token, book_id, r#"{"rating":9}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let rows = snapshot_journal(&state.inner.library).await;
+    assert!(
+        rows.is_empty(),
+        "no row should be written on validation failure"
+    );
+}
+
+#[tokio::test]
+async fn rating_patch_404_and_no_journal_row_for_missing_book() {
+    let (router, state, _tmp) = fresh_setup().await;
+    let token = mint_token(&state).await;
+
+    let status = patch_rating(&router, &token, 9999, r#"{"rating":3}"#).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let rows = snapshot_journal(&state.inner.library).await;
+    assert!(rows.is_empty());
 }
