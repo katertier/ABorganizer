@@ -267,8 +267,7 @@ pub fn new_batch_id() -> String {
     uuid::Uuid::now_v7().to_string()
 }
 
-/// Report from a single [`recover_pending`] (or
-/// [`recover_pending_with`]) pass.
+/// Report from a single [`recover_pending_with`] pass.
 ///
 /// `failed_count` is the number of `pending` rows the recovery pass
 /// flipped to `failed`; `retried_count` is the number flipped to
@@ -321,50 +320,36 @@ pub struct RecoveredBatch {
 pub const RECOVERY_FAILED_REASON: &str =
     "daemon crash detected — operation was in flight at restart";
 
-/// Crash-recovery pass: scan `operation_journal` for `progress =
-/// 'pending'` rows and mark them all `failed` with a constant
-/// reason.
+/// Crash-recovery pass over `operation_journal` pending rows.
 ///
-/// **Safe by default.** This pass does NOT re-execute the
-/// operation — different op kinds need different idempotency
-/// reasoning (file-system writes, ASIN promotions, etc.), and
-/// silently retrying could double-apply a mutation that mostly
-/// succeeded before the crash. Marking pending → failed keeps
-/// the operator in the loop: they see exactly what didn't
-/// complete and can re-run intentionally.
+/// Each `progress = 'pending'` row is either retried (when a
+/// [`Replayer`] is registered for its `op_kind`) or marked
+/// `failed` with [`RECOVERY_FAILED_REASON`].
 ///
-/// Per-op-kind replay handlers can attach later via separate
-/// slices. Each handler reads the `pre_state_json` for "is the
-/// target still in the expected state?", then either retries
-/// (idempotent) or leaves the row at `failed` (non-idempotent
-/// or pre-state drift).
-///
-/// Idempotent: running this twice in succession only flips
-/// rows the first call missed; the second call's
-/// `pending_batches()` returns an empty list.
-///
-/// # Errors
-///
-/// Returns [`JournalError::Sql`] if any SQL step fails. The
-/// recovery pass is best-effort — daemon startup should log the
-/// error and continue (failing the whole startup on a journal
-/// crash sweep would be worse than running un-recovered).
-pub async fn recover_pending(pool: &SqlitePool) -> Result<RecoveryReport, JournalError> {
-    recover_pending_with(pool, &ReplayRegistry::default()).await
-}
-
-/// Same as [`recover_pending`] but consults `registry` first.
+/// **Safe by default.** With an empty `registry`, every pending
+/// row is marked `failed` — no auto-re-execution. Different op
+/// kinds need different idempotency reasoning (file-system
+/// writes, ASIN promotions, etc.), so silently retrying could
+/// double-apply a partial mutation. Marking pending → failed
+/// keeps the operator in the loop. Once concrete `Replayer`
+/// impls ship, they attach to a populated `ReplayRegistry` and
+/// only kinds they handle get retried; the rest still flush to
+/// `failed`.
 ///
 /// For each pending row:
 /// - If `registry` has a [`Replayer`] matching `op_kind`, call
 ///   it. [`ReplayDecision::Retried`] flips the row to `done` with
 ///   the handler-supplied post-state; [`ReplayDecision::Skipped`]
 ///   flips it to `failed` with the handler-supplied reason.
-/// - A handler that returns `Err` is treated like no handler — the
-///   row falls through to the canonical [`RECOVERY_FAILED_REASON`]
-///   so a buggy handler can't break the safe-by-default contract.
-/// - No handler → mark `failed` with [`RECOVERY_FAILED_REASON`]
-///   (the original [`recover_pending`] behaviour).
+/// - A handler that returns `Err` is treated like no handler —
+///   the row falls through to the canonical
+///   [`RECOVERY_FAILED_REASON`] so a buggy handler can't break
+///   the safe-by-default contract.
+/// - No handler → mark `failed` with [`RECOVERY_FAILED_REASON`].
+///
+/// Idempotent: running this twice in succession only flips
+/// rows the first call missed; the second call's
+/// `pending_batches()` returns an empty list.
 ///
 /// # Errors
 ///
@@ -443,7 +428,8 @@ pub enum ReplayDecision {
 /// A daemon registers one handler per mutating `op_kind` it knows
 /// how to idempotently re-execute (or knowingly refuse to). Op
 /// kinds with no handler fall through to the safe-by-default
-/// failed-reason flush — that's the [`recover_pending`] behaviour.
+/// failed-reason flush — that's [`recover_pending_with`]'s
+/// behaviour when no handler matches.
 #[async_trait]
 pub trait Replayer: Send + Sync {
     /// Exact `op_kind` this handler claims. Match is exact — no
@@ -788,7 +774,9 @@ mod tests {
         .await
         .expect("record op2");
 
-        let report = recover_pending(db.pool()).await.expect("recover");
+        let report = recover_pending_with(db.pool(), &ReplayRegistry::default())
+            .await
+            .expect("recover");
         assert_eq!(report.failed_count, 2);
         assert_eq!(report.batches.len(), 1);
         assert_eq!(report.batches[0].batch_id.as_deref(), Some(batch.as_str()));
@@ -861,7 +849,9 @@ mod tests {
             .await
             .expect("mark failed");
 
-        let report = recover_pending(db.pool()).await.expect("recover");
+        let report = recover_pending_with(db.pool(), &ReplayRegistry::default())
+            .await
+            .expect("recover");
         assert_eq!(
             report.failed_count, 1,
             "only the one pending row should be touched"
@@ -898,8 +888,12 @@ mod tests {
         .await
         .expect("record");
 
-        let r1 = recover_pending(db.pool()).await.expect("recover 1");
-        let r2 = recover_pending(db.pool()).await.expect("recover 2");
+        let r1 = recover_pending_with(db.pool(), &ReplayRegistry::default())
+            .await
+            .expect("recover 1");
+        let r2 = recover_pending_with(db.pool(), &ReplayRegistry::default())
+            .await
+            .expect("recover 2");
         assert_eq!(r1.failed_count, 1);
         assert_eq!(
             r2.failed_count, 0,
@@ -911,7 +905,9 @@ mod tests {
     #[tokio::test]
     async fn recover_pending_handles_empty_journal() {
         let (_d, db) = db().await;
-        let report = recover_pending(db.pool()).await.expect("recover empty");
+        let report = recover_pending_with(db.pool(), &ReplayRegistry::default())
+            .await
+            .expect("recover empty");
         assert_eq!(report.failed_count, 0);
         assert_eq!(report.retried_count, 0);
         assert!(report.batches.is_empty());
@@ -1077,7 +1073,7 @@ mod tests {
         )
         .await
         .expect("record");
-        // Empty registry → behaves exactly like recover_pending.
+        // Empty registry → safe-by-default no-replay branch.
         let report = recover_pending_with(db.pool(), &ReplayRegistry::default())
             .await
             .expect("recover with empty");
