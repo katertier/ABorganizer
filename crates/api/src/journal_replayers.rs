@@ -23,7 +23,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
 
-use crate::progress::{OP_KIND_BOOK_RATING_SET, OP_KIND_BOOK_STATUS_SET};
+use crate::progress::{OP_KIND_BOOK_NOTES_SET, OP_KIND_BOOK_RATING_SET, OP_KIND_BOOK_STATUS_SET};
 
 /// Re-applies `PATCH /books/{id}/status` mutations after a crash
 /// or on operator-triggered retry.
@@ -257,6 +257,124 @@ fn parse_rating(v: &Value) -> ParsedRating {
         Some(n) if (1..=5).contains(&n) => ParsedRating::Rated(n),
         _ => ParsedRating::Malformed,
     }
+}
+
+/// Re-applies `PATCH /books/{id}/notes` mutations after a crash
+/// or on operator-triggered retry.
+///
+/// Twin of [`StatusReplayer`] / [`RatingReplayer`] — same
+/// drift-detection / already-applied / book-deleted /
+/// malformed-`pre_state` decision tree, applied to string-or-null
+/// notes values.
+///
+/// `pre_state.intent` is `null` OR a non-empty string (the
+/// [`crate::progress::books_notes_patch`] capture normalises
+/// whitespace-only input to `null` BEFORE recording, so the
+/// `pre_state` always matches what was persisted). The replayer
+/// compares against the DB's current notes column directly.
+pub struct NotesReplayer;
+
+#[async_trait]
+impl Replayer for NotesReplayer {
+    fn op_kind(&self) -> &'static str {
+        OP_KIND_BOOK_NOTES_SET
+    }
+
+    async fn try_replay(
+        &self,
+        pool: &SqlitePool,
+        entry: &JournalEntry,
+    ) -> Result<ReplayDecision, JournalError> {
+        let book_id = entry.target.id;
+        let pre = &entry.pre_state;
+        let Some(intent_value) = pre.get("intent") else {
+            return Ok(ReplayDecision::Skipped(
+                "pre_state missing 'intent' field".to_owned(),
+            ));
+        };
+        let Some(current_value) = pre.get("current") else {
+            return Ok(ReplayDecision::Skipped(
+                "pre_state missing 'current' field".to_owned(),
+            ));
+        };
+        let intent = match parse_notes(intent_value) {
+            ParsedNotes::Malformed => {
+                return Ok(ReplayDecision::Skipped(format!(
+                    "pre_state.intent={intent_value} is not a valid notes value (null or string)"
+                )));
+            }
+            ParsedNotes::Cleared => None,
+            ParsedNotes::Set(s) => Some(s),
+        };
+        let recorded_current = match parse_notes(current_value) {
+            ParsedNotes::Malformed => {
+                return Ok(ReplayDecision::Skipped(format!(
+                    "pre_state.current={current_value} is not a valid notes value"
+                )));
+            }
+            ParsedNotes::Cleared => None,
+            ParsedNotes::Set(s) => Some(s),
+        };
+
+        let current: Option<Option<String>> = sqlx::query_scalar!(
+            r#"SELECT notes AS "notes: String" FROM books WHERE book_id = ?"#,
+            book_id,
+        )
+        .fetch_optional(pool)
+        .await?;
+        let Some(current) = current else {
+            return Ok(ReplayDecision::Skipped(format!(
+                "book {book_id} no longer exists"
+            )));
+        };
+
+        if current == intent {
+            return Ok(ReplayDecision::Skipped(format!(
+                "already applied — notes is already {intent_value}"
+            )));
+        }
+        if current != recorded_current {
+            return Ok(ReplayDecision::Skipped(format!(
+                "drift detected — current notes is {current:?}, \
+                 expected {recorded_current:?} (someone else changed it)"
+            )));
+        }
+
+        ab_progress::set_notes(pool, BookId(book_id), intent.as_deref())
+            .await
+            .map_err(|e| match e {
+                ab_progress::ProgressError::NotFound(_) => JournalError::NotFound(book_id),
+                ab_progress::ProgressError::Core(core) => {
+                    JournalError::Db(sqlx::Error::Protocol(format!("set_notes replay: {core}")))
+                }
+            })?;
+
+        Ok(ReplayDecision::Retried(json!({ "notes": intent_value })))
+    }
+}
+
+/// Tri-state outcome of parsing a JSON notes value.
+///
+/// `Cleared` matches `null`; `Set(string)` matches a (possibly
+/// empty) JSON string — the capture handler normalises so we
+/// won't normally see whitespace-only or empty strings in
+/// `pre_state.intent`, but we accept them rather than rejecting
+/// (treating `""` as `Set("")` lets a manually-edited journal
+/// row replay cleanly if the operator wants to set an empty
+/// string). `Malformed` matches anything else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ParsedNotes {
+    Cleared,
+    Set(String),
+    Malformed,
+}
+
+fn parse_notes(v: &Value) -> ParsedNotes {
+    if v.is_null() {
+        return ParsedNotes::Cleared;
+    }
+    v.as_str()
+        .map_or(ParsedNotes::Malformed, |s| ParsedNotes::Set(s.to_owned()))
 }
 
 #[cfg(test)]
@@ -566,6 +684,131 @@ mod tests {
         match decision {
             ReplayDecision::Skipped(r) => {
                 assert!(r.contains("not a valid rating"), "reason: {r}");
+            }
+            ReplayDecision::Retried(_) => panic!("expected Skipped for malformed intent"),
+        }
+    }
+
+    // ── NotesReplayer tests ──────────────────────────────────────────
+
+    async fn seed_book_with_notes(db: &LibraryDb, notes: Option<&str>) -> i64 {
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO books (title, duration_ms, raw_duration_ms, notes) \
+             VALUES ('T', 60000, 60000, ?) RETURNING book_id",
+        )
+        .bind(notes)
+        .fetch_one(db.pool())
+        .await
+        .expect("insert book");
+        id
+    }
+
+    fn notes_entry(op_id: i64, book_id: i64, pre: Value) -> JournalEntry {
+        JournalEntry {
+            op_id,
+            op_kind: OP_KIND_BOOK_NOTES_SET.to_owned(),
+            target: ab_journal::Target {
+                kind: "book".to_owned(),
+                id: book_id,
+            },
+            pre_state: pre,
+            post_state: None,
+            created_at: 0,
+            reversible: true,
+            batch_id: None,
+            progress: ab_journal::Progress::Pending,
+            failed_reason: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn notes_op_kind_matches_capture_constant() {
+        assert_eq!(NotesReplayer.op_kind(), "book-notes-set");
+        assert_eq!(NotesReplayer.op_kind(), OP_KIND_BOOK_NOTES_SET);
+    }
+
+    #[tokio::test]
+    async fn notes_retries_when_no_drift_setting_value() {
+        let (_d, db) = open_db().await;
+        let book_id = seed_book_with_notes(&db, None).await;
+        let e = notes_entry(1, book_id, json!({ "current": null, "intent": "loved it" }));
+        let decision = NotesReplayer
+            .try_replay(db.pool(), &e)
+            .await
+            .expect("try_replay");
+        match decision {
+            ReplayDecision::Retried(post) => assert_eq!(post["notes"], "loved it"),
+            ReplayDecision::Skipped(r) => panic!("expected Retried, got Skipped({r})"),
+        }
+        let st: Option<String> = sqlx::query_scalar("SELECT notes FROM books WHERE book_id = ?")
+            .bind(book_id)
+            .fetch_one(db.pool())
+            .await
+            .expect("read");
+        assert_eq!(st, Some("loved it".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn notes_retries_when_clearing_to_null() {
+        let (_d, db) = open_db().await;
+        let book_id = seed_book_with_notes(&db, Some("draft")).await;
+        let e = notes_entry(1, book_id, json!({ "current": "draft", "intent": null }));
+        let decision = NotesReplayer
+            .try_replay(db.pool(), &e)
+            .await
+            .expect("try_replay");
+        assert!(matches!(decision, ReplayDecision::Retried(_)));
+        let st: Option<String> = sqlx::query_scalar("SELECT notes FROM books WHERE book_id = ?")
+            .bind(book_id)
+            .fetch_one(db.pool())
+            .await
+            .expect("read");
+        assert_eq!(st, None);
+    }
+
+    #[tokio::test]
+    async fn notes_skips_when_already_applied() {
+        let (_d, db) = open_db().await;
+        let book_id = seed_book_with_notes(&db, Some("loved it")).await;
+        let e = notes_entry(1, book_id, json!({ "current": null, "intent": "loved it" }));
+        let decision = NotesReplayer
+            .try_replay(db.pool(), &e)
+            .await
+            .expect("try_replay");
+        match decision {
+            ReplayDecision::Skipped(r) => assert!(r.contains("already applied"), "reason: {r}"),
+            ReplayDecision::Retried(_) => panic!("expected Skipped"),
+        }
+    }
+
+    #[tokio::test]
+    async fn notes_skips_on_drift() {
+        let (_d, db) = open_db().await;
+        let book_id = seed_book_with_notes(&db, Some("operator-edit")).await;
+        let e = notes_entry(1, book_id, json!({ "current": null, "intent": "loved it" }));
+        let decision = NotesReplayer
+            .try_replay(db.pool(), &e)
+            .await
+            .expect("try_replay");
+        match decision {
+            ReplayDecision::Skipped(r) => assert!(r.contains("drift"), "reason: {r}"),
+            ReplayDecision::Retried(_) => panic!("expected Skipped"),
+        }
+    }
+
+    #[tokio::test]
+    async fn notes_skips_on_malformed_intent_type() {
+        let (_d, db) = open_db().await;
+        let book_id = seed_book_with_notes(&db, None).await;
+        // intent must be string-or-null; integer is malformed.
+        let e = notes_entry(1, book_id, json!({ "current": null, "intent": 42 }));
+        let decision = NotesReplayer
+            .try_replay(db.pool(), &e)
+            .await
+            .expect("try_replay");
+        match decision {
+            ReplayDecision::Skipped(r) => {
+                assert!(r.contains("not a valid notes value"), "reason: {r}");
             }
             ReplayDecision::Retried(_) => panic!("expected Skipped for malformed intent"),
         }
