@@ -885,6 +885,140 @@ impl DoctorCheck for PendingWithoutReplayerCheck {
     }
 }
 
+/// `tokens-unused` — credential hygiene check over the `tokens`
+/// table.
+///
+/// Warns when too many API tokens have either been issued long
+/// ago and never used, or haven't been used in a long time. Both
+/// patterns suggest revocation candidates — a token that's been
+/// sitting unused for months is a credential the operator
+/// probably forgot exists, and forgotten credentials are a
+/// classic key-disclosure risk.
+///
+/// Aggregate-only: doesn't surface individual `token_hash` values.
+/// `Failure` only when the underlying COUNT query itself errors.
+pub struct TokensUnusedCheck;
+
+/// Cutoff (days) past `issued_at` after which a never-used token
+/// counts as "stale never-used".
+pub const TOKENS_NEVER_USED_AGE_DAYS: i64 = 30;
+
+/// Cutoff (days) past `last_used_at` after which a previously-used
+/// token counts as "stale last-used".
+pub const TOKENS_LAST_USED_AGE_DAYS: i64 = 180;
+
+/// Soft budget for stale-never-used tokens. Above this, warn.
+///
+/// 3 leaves headroom for the "I generated a few tokens during
+/// setup but only ended up using the iPad one" pattern.
+pub const TOKENS_NEVER_USED_STALE_BUDGET: i64 = 3;
+
+/// Soft budget for stale-last-used tokens. Above this, warn.
+///
+/// 3 mirrors the never-used budget. The two budgets are
+/// independent — exceeding either triggers `Warning`.
+pub const TOKENS_LAST_USED_STALE_BUDGET: i64 = 3;
+
+#[async_trait]
+impl DoctorCheck for TokensUnusedCheck {
+    fn name(&self) -> &'static str {
+        "tokens-unused"
+    }
+    fn description(&self) -> &'static str {
+        "API tokens never-used or last-used long ago vs soft budgets"
+    }
+    async fn run(&self, ctx: &CheckCtx) -> CheckReport {
+        let never_used_cutoff = -TOKENS_NEVER_USED_AGE_DAYS * 86_400;
+        let last_used_cutoff = -TOKENS_LAST_USED_AGE_DAYS * 86_400;
+        // SQLite expects 'modifier' strings like '-30 days'; we
+        // format the integer into a textual expression and let
+        // datetime() do the arithmetic. Both cutoffs are signed
+        // negatives so the SQL stays consistent.
+        let never_used_modifier = format!("{never_used_cutoff} seconds");
+        let last_used_modifier = format!("{last_used_cutoff} seconds");
+
+        let row = match sqlx::query!(
+            r#"SELECT
+                COALESCE(SUM(CASE
+                    WHEN last_used_at IS NULL
+                     AND issued_at < strftime('%s', 'now', ?1)
+                    THEN 1 ELSE 0 END), 0) AS "stale_never_used!: i64",
+                COALESCE(SUM(CASE
+                    WHEN last_used_at IS NOT NULL
+                     AND last_used_at < strftime('%s', 'now', ?2)
+                    THEN 1 ELSE 0 END), 0) AS "stale_last_used!: i64",
+                COUNT(*) AS "total!: i64"
+              FROM tokens"#,
+            never_used_modifier,
+            last_used_modifier,
+        )
+        .fetch_one(ctx.library.pool())
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let mut r = CheckReport::fail("tokens count query failed");
+                r.details.push(CheckFinding {
+                    severity: CheckStatus::Failure,
+                    message: e.to_string(),
+                    remediation: Some(
+                        "Inspect ab-db logs; verify the library DB is reachable.".into(),
+                    ),
+                    doc_url: None,
+                });
+                return r;
+            }
+        };
+        let never_ok = row.stale_never_used <= TOKENS_NEVER_USED_STALE_BUDGET;
+        let last_ok = row.stale_last_used <= TOKENS_LAST_USED_STALE_BUDGET;
+        if never_ok && last_ok {
+            return CheckReport::ok(format!(
+                "{total} token(s); {sn} stale-never-used (>{snd}d), \
+                 {sl} stale-last-used (>{sld}d)",
+                total = row.total,
+                sn = row.stale_never_used,
+                snd = TOKENS_NEVER_USED_AGE_DAYS,
+                sl = row.stale_last_used,
+                sld = TOKENS_LAST_USED_AGE_DAYS,
+            ));
+        }
+        let mut r = CheckReport::warn(format!(
+            "{total} token(s); {sn} stale-never-used (>{snd}d, budget {snb}), \
+             {sl} stale-last-used (>{sld}d, budget {slb})",
+            total = row.total,
+            sn = row.stale_never_used,
+            snd = TOKENS_NEVER_USED_AGE_DAYS,
+            snb = TOKENS_NEVER_USED_STALE_BUDGET,
+            sl = row.stale_last_used,
+            sld = TOKENS_LAST_USED_AGE_DAYS,
+            slb = TOKENS_LAST_USED_STALE_BUDGET,
+        ));
+        r.details.push(CheckFinding {
+            severity: CheckStatus::Warning,
+            message: format!(
+                "{sn} tokens were issued >{snd} days ago and have never been used; \
+                 {sl} tokens were last used >{sld} days ago. Tokens above their \
+                 budgets are revocation candidates — they're credentials the \
+                 operator likely forgot exists.",
+                sn = row.stale_never_used,
+                snd = TOKENS_NEVER_USED_AGE_DAYS,
+                sl = row.stale_last_used,
+                sld = TOKENS_LAST_USED_AGE_DAYS,
+            ),
+            remediation: Some(
+                "Audit via `SELECT token_id, nickname, issued_at, last_used_at FROM \
+                 tokens ORDER BY COALESCE(last_used_at, 0)`. Revoke unwanted rows via \
+                 `DELETE FROM tokens WHERE token_id = ?`. There is no API endpoint for \
+                 token deletion yet; if you find yourself doing this often, file a \
+                 slice for `DELETE /tokens/{id}`."
+                    .into(),
+            ),
+            doc_url: None,
+        });
+        r
+    }
+}
+
 /// `cover-cache-writable` — `<cache_dir>/covers/` exists or can be
 /// created, and is writable.
 ///
@@ -1470,5 +1604,107 @@ mod tests {
             report.summary
         );
         assert_eq!(report.details.len(), 1);
+    }
+
+    async fn seed_token(
+        ctx: &CheckCtx,
+        nickname: &str,
+        issued_at_offset_seconds: i64,
+        last_used_at_offset_seconds: Option<i64>,
+    ) {
+        sqlx::query(
+            "INSERT INTO users (user_id, name, display_name) VALUES (1, 'test', 'test') \
+             ON CONFLICT(user_id) DO NOTHING",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed user");
+        let hash = format!("hash-{nickname}");
+        sqlx::query(
+            "INSERT INTO tokens (user_id, token_hash, nickname, scopes, issued_at, last_used_at) \
+             VALUES (1, ?, ?, '[]', \
+                     strftime('%s','now') + ?, \
+                     CASE WHEN ? IS NULL THEN NULL ELSE strftime('%s','now') + ? END)",
+        )
+        .bind(&hash)
+        .bind(nickname)
+        .bind(issued_at_offset_seconds)
+        .bind(last_used_at_offset_seconds)
+        .bind(last_used_at_offset_seconds)
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed token");
+    }
+
+    #[tokio::test]
+    async fn tokens_unused_ok_when_empty() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        let report = TokensUnusedCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Ok);
+        assert!(
+            report.summary.contains("0 token"),
+            "summary: {}",
+            report.summary
+        );
+    }
+
+    #[tokio::test]
+    async fn tokens_unused_ok_when_only_fresh_tokens() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        // Two tokens: never-used but fresh (issued 1 day ago), and
+        // one used yesterday. Neither should count as stale.
+        seed_token(&ctx, "fresh-never", -86_400, None).await;
+        seed_token(&ctx, "fresh-used", -2 * 86_400, Some(-86_400)).await;
+        let report = TokensUnusedCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Ok);
+        assert!(
+            report.summary.contains("0 stale-never-used"),
+            "summary: {}",
+            report.summary
+        );
+        assert!(
+            report.summary.contains("0 stale-last-used"),
+            "summary: {}",
+            report.summary
+        );
+    }
+
+    #[tokio::test]
+    async fn tokens_unused_warns_when_never_used_budget_exceeded() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        // 4 tokens issued 60 days ago, never used. Budget is 3.
+        for i in 0..=TOKENS_NEVER_USED_STALE_BUDGET {
+            seed_token(&ctx, &format!("never-{i}"), -60 * 86_400, None).await;
+        }
+        let report = TokensUnusedCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Warning);
+        assert!(
+            report.summary.contains("stale-never-used"),
+            "summary: {}",
+            report.summary
+        );
+        assert_eq!(report.details.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn tokens_unused_warns_when_last_used_budget_exceeded() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        // 4 tokens last-used 200 days ago. Budget is 3.
+        for i in 0..=TOKENS_LAST_USED_STALE_BUDGET {
+            seed_token(
+                &ctx,
+                &format!("last-{i}"),
+                -210 * 86_400,
+                Some(-200 * 86_400),
+            )
+            .await;
+        }
+        let report = TokensUnusedCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Warning);
+        assert!(
+            report.summary.contains("stale-last-used"),
+            "summary: {}",
+            report.summary
+        );
     }
 }
