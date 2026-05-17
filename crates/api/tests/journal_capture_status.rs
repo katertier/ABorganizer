@@ -33,9 +33,7 @@ use std::sync::Arc;
 
 use ab_api::ApiState;
 use ab_api::build_router;
-use ab_api::progress::{
-    OP_KIND_BOOK_NOTES_SET, OP_KIND_BOOK_RATING_SET, OP_KIND_BOOK_STATUS_SET,
-};
+use ab_api::progress::{OP_KIND_BOOK_NOTES_SET, OP_KIND_BOOK_RATING_SET, OP_KIND_BOOK_STATUS_SET};
 use ab_core::auth::{hash_api_token, mint_api_token};
 use ab_core::tunables::{DbTunables, SchedulerTunables, SecurityTunables};
 use ab_db::{EphemeralDb, LibraryDb};

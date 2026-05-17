@@ -228,9 +228,9 @@ impl Replayer for RatingReplayer {
             .await
             .map_err(|e| match e {
                 ab_progress::ProgressError::NotFound(_) => JournalError::NotFound(book_id),
-                ab_progress::ProgressError::Core(core) => JournalError::Db(sqlx::Error::Protocol(
-                    format!("set_rating replay: {core}"),
-                )),
+                ab_progress::ProgressError::Core(core) => {
+                    JournalError::Db(sqlx::Error::Protocol(format!("set_rating replay: {core}")))
+                }
             })?;
 
         Ok(ReplayDecision::Retried(json!({ "rating": intent_value })))
