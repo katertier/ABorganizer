@@ -73,6 +73,12 @@ pub struct ApiStateInner {
     /// trait contract; consumed by `/doctor`, `/doctor/all`,
     /// `/doctor/{name}` handlers.
     pub doctor: DoctorRegistry,
+    /// Registered per-`op_kind` replayers (ADR-0039, PR #194).
+    /// Consumed at daemon startup by `recover_pending_with` and by
+    /// the `/operation_journal/replayers` endpoint. Default-empty
+    /// when no per-op_kind handler has shipped yet — that's the
+    /// safe-by-default `recover_pending` behaviour.
+    pub replay_registry: ab_journal::ReplayRegistry,
 }
 
 impl ApiState {
@@ -98,6 +104,44 @@ impl ApiState {
         background: BackgroundRegistry,
         doctor: DoctorRegistry,
     ) -> Self {
+        Self::with_replay_registry(
+            library,
+            ephemeral,
+            scheduler,
+            dag,
+            cleanup,
+            cancel,
+            security,
+            scan_excludes,
+            background,
+            doctor,
+            ab_journal::ReplayRegistry::default(),
+        )
+    }
+
+    /// Construct shared state with an explicit `ReplayRegistry`.
+    ///
+    /// Use this from the daemon `main` once one or more concrete
+    /// [`ab_journal::Replayer`] impls are wired. Tests + the
+    /// no-replayers `new()` path use `ReplayRegistry::default()`
+    /// implicitly via [`ApiState::new`].
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Extends ApiState::new with the new replay registry arg; same justification — these are runtime singletons threaded through one constructor."
+    )]
+    pub fn with_replay_registry(
+        library: LibraryDb,
+        ephemeral: EphemeralDb,
+        scheduler: Arc<Scheduler>,
+        dag: Arc<Dag>,
+        cleanup: CleanupRegistry,
+        cancel: CancellationToken,
+        security: SecurityTunables,
+        scan_excludes: GlobSet,
+        background: BackgroundRegistry,
+        doctor: DoctorRegistry,
+        replay_registry: ab_journal::ReplayRegistry,
+    ) -> Self {
         Self {
             inner: Arc::new(ApiStateInner {
                 library,
@@ -112,6 +156,7 @@ impl ApiState {
                 scan_excludes,
                 background,
                 doctor,
+                replay_registry,
             }),
         }
     }

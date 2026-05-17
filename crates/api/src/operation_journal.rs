@@ -71,6 +71,18 @@ pub struct OperationJournalListResponse {
     pub offset: i64,
 }
 
+/// Response shape for `GET /operation_journal/replayers`.
+///
+/// Lists the `op_kind`s for which a concrete [`ab_journal::Replayer`]
+/// has been registered at daemon startup (ADR-0039, PR #194). An empty
+/// list means `recover_pending` will only mark stragglers as `failed`
+/// — no per-`op_kind` retry has been wired yet.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OperationJournalReplayersResponse {
+    /// Sorted ascending for stable diffs.
+    pub op_kinds: Vec<String>,
+}
+
 /// `GET /api/v1/operation_journal` — paginated read with optional
 /// filters. Ordered `created_at DESC, op_id DESC` (newest first).
 ///
@@ -158,6 +170,31 @@ pub async fn operation_journal_list(
     }))
 }
 
+/// `GET /api/v1/operation_journal/replayers` — list of registered `op_kind`s.
+///
+/// Used by the operator-facing dashboard and `aborg doctor` to confirm
+/// which mutating operations `recover_pending` can actually replay after
+/// a daemon crash.
+///
+/// # Errors
+///
+/// Infallible today; signature returns `Result` to leave room
+/// for future enrichments (per-`op_kind` health, last-run stats).
+#[allow(clippy::unused_async, reason = "axum handler signature")]
+pub async fn operation_journal_replayers_get(
+    State(state): State<ApiState>,
+) -> Result<Json<OperationJournalReplayersResponse>, ApiError> {
+    let mut op_kinds: Vec<String> = state
+        .inner
+        .replay_registry
+        .op_kinds()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    op_kinds.sort();
+    Ok(Json(OperationJournalReplayersResponse { op_kinds }))
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
@@ -176,6 +213,24 @@ mod tests {
         assert!(json.contains("\"total\""));
         assert!(json.contains("\"limit\""));
         assert!(json.contains("\"offset\""));
+    }
+
+    #[test]
+    fn replayers_response_serializes_op_kinds_array() {
+        let r = OperationJournalReplayersResponse {
+            op_kinds: vec!["tag-write-final".into(), "audiologo-cut".into()],
+        };
+        let json = serde_json::to_string(&r).expect("serialize");
+        assert!(json.contains("\"op_kinds\""));
+        assert!(json.contains("\"tag-write-final\""));
+        assert!(json.contains("\"audiologo-cut\""));
+    }
+
+    #[test]
+    fn replayers_response_empty_serializes_as_empty_array() {
+        let r = OperationJournalReplayersResponse { op_kinds: vec![] };
+        let json = serde_json::to_string(&r).expect("serialize");
+        assert_eq!(json, r#"{"op_kinds":[]}"#);
     }
 
     #[test]

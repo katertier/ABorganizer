@@ -93,6 +93,10 @@ pub fn build_router(state: ApiState) -> Router {
             get(crate::operation_journal::operation_journal_list),
         )
         .route(
+            "/operation_journal/replayers",
+            get(crate::operation_journal::operation_journal_replayers_get),
+        )
+        .route(
             "/asin_learnings",
             get(crate::asin_learnings::asin_learnings_list),
         )
