@@ -468,6 +468,7 @@ async fn main() -> Result<()> {
     let doctor_registry = ab_api::doctor::DoctorRegistry::new(vec![
         Arc::new(ab_api::doctor::SpeechCheck),
         Arc::new(ab_api::doctor::LlmCheck),
+        Arc::new(ab_api::doctor::JournalCheck),
     ]);
     let api_state = ab_api::ApiState::new(
         library.clone(),

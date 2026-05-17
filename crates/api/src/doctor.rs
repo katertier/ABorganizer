@@ -217,6 +217,68 @@ impl DoctorCheck for SpeechCheck {
     }
 }
 
+/// `journal` — `operation_journal` health.
+///
+/// Counts `pending` rows. After daemon startup PR #170's
+/// `recover_pending` pass should have flushed every pending row to
+/// `failed`, so a non-zero count here means either (a) the daemon
+/// is mid-batch and these are live in-flight ops, or (b) something
+/// is wedged and the operator should investigate. Either way it's
+/// a `Warning` rather than `Failure` — `pending` is a normal
+/// transient state for an active daemon.
+pub struct JournalCheck;
+
+#[async_trait]
+impl DoctorCheck for JournalCheck {
+    fn name(&self) -> &'static str {
+        "journal"
+    }
+    fn description(&self) -> &'static str {
+        "operation_journal pending-row count (crash-recovery surface, ADR-0039)"
+    }
+    async fn run(&self, ctx: &CheckCtx) -> CheckReport {
+        let pending: i64 = match sqlx::query_scalar!(
+            "SELECT COUNT(*) FROM operation_journal WHERE progress = 'pending'",
+        )
+        .fetch_one(ctx.library.pool())
+        .await
+        {
+            Ok(n) => n,
+            Err(e) => {
+                let mut r = CheckReport::fail("operation_journal pending count failed");
+                r.details.push(CheckFinding {
+                    severity: CheckStatus::Failure,
+                    message: e.to_string(),
+                    remediation: Some(
+                        "Inspect ab-db logs; verify the library DB is reachable.".into(),
+                    ),
+                    doc_url: None,
+                });
+                return r;
+            }
+        };
+        if pending == 0 {
+            return CheckReport::ok("no pending journal rows");
+        }
+        let mut r = CheckReport::warn(format!("{pending} pending journal row(s)"));
+        r.details.push(CheckFinding {
+            severity: CheckStatus::Warning,
+            message: format!(
+                "{pending} operation_journal row(s) in 'pending' state. Normal for an active \
+                 daemon mid-batch; suspicious after a clean restart."
+            ),
+            remediation: Some(
+                "If the daemon was restarted, the startup recover_pending pass should have \
+                 flipped these to 'failed'. Re-check after a clean restart; if the count \
+                 persists, file an issue with the affected op_kind values."
+                    .into(),
+            ),
+            doc_url: None,
+        });
+        r
+    }
+}
+
 // ── HTTP surface ──────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -289,4 +351,68 @@ pub async fn doctor_one(
     };
     let report = check.run(&ctx).await;
     Ok(Json(report))
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+    use ab_core::tunables::DbTunables;
+    use tempfile::TempDir;
+
+    async fn fresh_ctx() -> (CheckCtx, TempDir) {
+        let tmp = TempDir::new().expect("tmpdir");
+        let library = LibraryDb::open(&tmp.path().join("library.db"), &DbTunables::default())
+            .await
+            .expect("open library");
+        let ephemeral = EphemeralDb::open(&tmp.path().join("ephemeral.db"), &DbTunables::default())
+            .await
+            .expect("open ephemeral");
+        (CheckCtx { library, ephemeral }, tmp)
+    }
+
+    #[tokio::test]
+    async fn journal_check_ok_when_no_pending_rows() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        let report = JournalCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Ok);
+    }
+
+    #[tokio::test]
+    async fn journal_check_warns_when_pending_rows_present() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        sqlx::query(
+            "INSERT INTO operation_journal \
+                (op_kind, target_kind, target_id, pre_state_json, progress) \
+              VALUES ('tag-write-final', 'book', 1, '{}', 'pending'), \
+                     ('batch-edit', 'book', 2, '{}', 'pending')",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed pending");
+        let report = JournalCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Warning);
+        assert!(
+            report.summary.contains('2'),
+            "summary should mention 2 pending rows: {}",
+            report.summary
+        );
+    }
+
+    #[tokio::test]
+    async fn journal_check_ignores_done_failed_reversed_rows() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        sqlx::query(
+            "INSERT INTO operation_journal \
+                (op_kind, target_kind, target_id, pre_state_json, progress) \
+              VALUES ('a', 'book', 1, '{}', 'done'), \
+                     ('b', 'book', 2, '{}', 'failed'), \
+                     ('c', 'book', 3, '{}', 'reversed')",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed terminal rows");
+        let report = JournalCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Ok);
+    }
 }
