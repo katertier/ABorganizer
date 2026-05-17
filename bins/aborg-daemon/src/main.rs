@@ -502,6 +502,7 @@ async fn main() -> Result<()> {
         Arc::new(ab_api::doctor::PendingWithoutReplayerCheck::new(
             replay_registry.clone(),
         )),
+        Arc::new(ab_api::doctor::TokensUnusedCheck),
     ]);
     let api_state = ab_api::ApiState::with_replay_registry(
         library.clone(),
