@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO authors (name) VALUES ('Stephen King')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "cb16f65f68468cbab16a8bf0fbae071692c5bf79e866a75c2c618692570caa8f"
+}

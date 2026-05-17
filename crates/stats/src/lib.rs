@@ -87,6 +87,13 @@ pub enum Dimension {
     /// file (`MIN(file_id) WHERE is_active = 1`); books with no
     /// active file or no recorded format roll into `unknown`.
     Format,
+    /// Books per author. Joins through `authors.name` via
+    /// `books.author_id` (single-FK — multi-author books are not
+    /// modelled today, so every book lands in exactly one bucket
+    /// or `unknown`). The `TOP_N` collapse-long-tail step keeps
+    /// the response bounded; operator libraries with many
+    /// one-off authors naturally roll a heavy tail into `Others`.
+    Author,
 }
 
 impl Dimension {
@@ -99,6 +106,7 @@ impl Dimension {
             "decade" => Self::Decade,
             "publisher" => Self::Publisher,
             "format" => Self::Format,
+            "author" => Self::Author,
             other => return Err(StatsError::UnsupportedDimension(other.to_owned())),
         })
     }
@@ -113,6 +121,7 @@ impl Dimension {
             Self::Decade => "decade",
             Self::Publisher => "publisher",
             Self::Format => "format",
+            Self::Author => "author",
         }
     }
 }
@@ -218,6 +227,7 @@ pub async fn breakdown(
         Dimension::Decade => decade_breakdown(pool).await?,
         Dimension::Publisher => publisher_breakdown(pool).await?,
         Dimension::Format => format_breakdown(pool).await?,
+        Dimension::Author => author_breakdown(pool).await?,
     };
     let buckets = collapse_long_tail(raw);
     let buckets = with_percentages(buckets);
@@ -409,6 +419,30 @@ async fn format_breakdown(pool: &SqlitePool) -> Result<Vec<RawBucket>, StatsErro
          LEFT JOIN book_files bf ON bf.file_id = first.file_id
          WHERE b.deleted_at IS NULL
          GROUP BY LOWER(bf.format)
+         ORDER BY COUNT(*) DESC"#,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| RawBucket {
+            label: r.bucket_label,
+            count: r.n,
+            hours_ms: r.hours_ms,
+        })
+        .collect())
+}
+
+async fn author_breakdown(pool: &SqlitePool) -> Result<Vec<RawBucket>, StatsError> {
+    let rows = sqlx::query!(
+        r#"SELECT
+            COALESCE(a.name, 'unknown') AS "bucket_label!: String",
+            COUNT(*) AS "n!: i64",
+            COALESCE(SUM(b.duration_ms), 0) AS "hours_ms!: i64"
+         FROM books b
+         LEFT JOIN authors a ON a.author_id = b.author_id
+         WHERE b.deleted_at IS NULL
+         GROUP BY b.author_id
          ORDER BY COUNT(*) DESC"#,
     )
     .fetch_all(pool)
@@ -726,9 +760,65 @@ mod tests {
             Dimension::Decade,
             Dimension::Publisher,
             Dimension::Format,
+            Dimension::Author,
         ] {
             assert_eq!(Dimension::parse(d.as_str()).expect("parse"), d);
         }
         assert!(Dimension::parse("bogus").is_err());
+    }
+
+    #[tokio::test]
+    async fn author_buckets_join_authors_table() {
+        let (_d, db) = open_db().await;
+        let a_king = sqlx::query!("INSERT INTO authors (name) VALUES ('Stephen King')")
+            .execute(db.pool())
+            .await
+            .expect("insert author king")
+            .last_insert_rowid();
+        let a_atwood = sqlx::query!("INSERT INTO authors (name) VALUES ('Margaret Atwood')")
+            .execute(db.pool())
+            .await
+            .expect("insert author atwood")
+            .last_insert_rowid();
+        let id1 = add_book(&db, "A", Some("en"), Some(1), "reading").await;
+        let id2 = add_book(&db, "B", Some("en"), Some(1), "reading").await;
+        let id3 = add_book(&db, "C", Some("en"), Some(1), "reading").await;
+        let _id4 = add_book(&db, "D", Some("en"), Some(1), "reading").await;
+        sqlx::query!(
+            "UPDATE books SET author_id = ? WHERE book_id = ?",
+            a_king,
+            id1,
+        )
+        .execute(db.pool())
+        .await
+        .expect("set a1");
+        sqlx::query!(
+            "UPDATE books SET author_id = ? WHERE book_id = ?",
+            a_king,
+            id2,
+        )
+        .execute(db.pool())
+        .await
+        .expect("set a2");
+        sqlx::query!(
+            "UPDATE books SET author_id = ? WHERE book_id = ?",
+            a_atwood,
+            id3,
+        )
+        .execute(db.pool())
+        .await
+        .expect("set a3");
+
+        let b = breakdown(db.pool(), Dimension::Author)
+            .await
+            .expect("breakdown");
+        let counts: std::collections::HashMap<String, u64> = b
+            .buckets
+            .iter()
+            .map(|x| (x.label.clone(), x.count))
+            .collect();
+        assert_eq!(counts.get("Stephen King").copied(), Some(2));
+        assert_eq!(counts.get("Margaret Atwood").copied(), Some(1));
+        assert_eq!(counts.get("unknown").copied(), Some(1));
     }
 }
