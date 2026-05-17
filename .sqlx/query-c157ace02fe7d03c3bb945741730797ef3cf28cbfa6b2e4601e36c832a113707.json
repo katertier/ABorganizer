@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"n!: i64\"\n             FROM book_narrator bn\n             JOIN books b ON b.book_id = bn.book_id\n            WHERE bn.narrator_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "n!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c157ace02fe7d03c3bb945741730797ef3cf28cbfa6b2e4601e36c832a113707"
+}
