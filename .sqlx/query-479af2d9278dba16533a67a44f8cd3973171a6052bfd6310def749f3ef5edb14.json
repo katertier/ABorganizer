@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n            COALESCE(n.name, 'unknown') AS \"bucket_label!: String\",\n            COUNT(*) AS \"n!: i64\",\n            COALESCE(SUM(b.duration_ms), 0) AS \"hours_ms!: i64\"\n         FROM books b\n         LEFT JOIN book_narrator bn ON bn.book_id = b.book_id\n         LEFT JOIN narrators n ON n.narrator_id = bn.narrator_id\n         WHERE b.deleted_at IS NULL\n         GROUP BY n.narrator_id\n         ORDER BY COUNT(*) DESC",
+  "describe": {
+    "columns": [
+      {
+        "name": "bucket_label!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "n!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "hours_ms!: i64",
+        "ordinal": 2,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "479af2d9278dba16533a67a44f8cd3973171a6052bfd6310def749f3ef5edb14"
+}
