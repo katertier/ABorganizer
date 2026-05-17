@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n                COUNT(*) AS \"total!: i64\",\n                COALESCE(SUM(\n                    CASE WHEN learned_at < datetime('now', '-180 days')\n                         THEN 1 ELSE 0 END\n                ), 0) AS \"stale!: i64\"\n              FROM asin_learnings",
+  "describe": {
+    "columns": [
+      {
+        "name": "total!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "stale!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "7cccb9961e4473a1217787ab3b0938f9025f2b55e7551a5d1f34b839d1144a18"
+}

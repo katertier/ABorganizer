@@ -675,6 +675,113 @@ impl DoctorCheck for AiCacheSizeCheck {
     }
 }
 
+/// `stale-asin-learnings` — `asin_learnings` row count + stale-row count.
+///
+/// The table is append-only by design (PR #177 capture / PR #178 consume),
+/// and there's no eviction beyond manual `DELETE /asin_learnings/{id}`. A
+/// growing tail of stale entries doesn't break correctness — the lookup
+/// index makes search-time cost constant — but it inflates backups and
+/// `audible-search` cache misses where the operator deleted the original
+/// book months ago. This check surfaces "you have N entries older than
+/// 180 days; consider pruning if the count looks wrong."
+///
+/// Status: `Ok` until either the total row count exceeds
+/// [`ASIN_LEARNINGS_TOTAL_BUDGET`] (10000) or the stale-row count
+/// (rows with `learned_at` older than 180 days) exceeds
+/// [`ASIN_LEARNINGS_STALE_BUDGET`] (1000). `Failure` only when the
+/// count query itself errors.
+pub struct StaleAsinLearningsCheck;
+
+/// Soft total-row budget for `asin_learnings`.
+///
+/// 10000 is well above the operator's library size (20k books,
+/// mostly with ASINs at import — auto-learn fires on the long tail
+/// of mis-tagged imports + manual PATCH-asin operations).
+pub const ASIN_LEARNINGS_TOTAL_BUDGET: i64 = 10_000;
+
+/// Soft stale-row budget.
+///
+/// `learned_at` older than 180 days suggests either the source book
+/// is long-gone OR the learning never hit (no consumer cache update).
+/// Either way, a backlog of >1000 such rows is worth surfacing.
+pub const ASIN_LEARNINGS_STALE_BUDGET: i64 = 1_000;
+
+#[async_trait]
+impl DoctorCheck for StaleAsinLearningsCheck {
+    fn name(&self) -> &'static str {
+        "stale-asin-learnings"
+    }
+    fn description(&self) -> &'static str {
+        "asin_learnings row count + stale-row count vs soft budgets"
+    }
+    async fn run(&self, ctx: &CheckCtx) -> CheckReport {
+        let row = match sqlx::query!(
+            r#"SELECT
+                COUNT(*) AS "total!: i64",
+                COALESCE(SUM(
+                    CASE WHEN learned_at < datetime('now', '-180 days')
+                         THEN 1 ELSE 0 END
+                ), 0) AS "stale!: i64"
+              FROM asin_learnings"#,
+        )
+        .fetch_one(ctx.library.pool())
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let mut r = CheckReport::fail("asin_learnings count query failed");
+                r.details.push(CheckFinding {
+                    severity: CheckStatus::Failure,
+                    message: e.to_string(),
+                    remediation: Some(
+                        "Inspect ab-db logs; verify the library DB is reachable.".into(),
+                    ),
+                    doc_url: None,
+                });
+                return r;
+            }
+        };
+        let total_ok = row.total <= ASIN_LEARNINGS_TOTAL_BUDGET;
+        let stale_ok = row.stale <= ASIN_LEARNINGS_STALE_BUDGET;
+        if total_ok && stale_ok {
+            return CheckReport::ok(format!(
+                "asin_learnings: {total} row(s), {stale} stale (>180d)",
+                total = row.total,
+                stale = row.stale,
+            ));
+        }
+        let mut r = CheckReport::warn(format!(
+            "asin_learnings: {total} row(s), {stale} stale (>180d) — budgets {tb}/{sb}",
+            total = row.total,
+            stale = row.stale,
+            tb = ASIN_LEARNINGS_TOTAL_BUDGET,
+            sb = ASIN_LEARNINGS_STALE_BUDGET,
+        ));
+        r.details.push(CheckFinding {
+            severity: CheckStatus::Warning,
+            message: format!(
+                "asin_learnings has {total} entries ({stale} older than 180 days). \
+                 Soft budgets: total {tb}, stale {sb}. Growth past these doesn't break \
+                 correctness — lookup remains constant-time via the (title_norm, \
+                 author_norm) index — but suggests pruning would tighten backups.",
+                total = row.total,
+                stale = row.stale,
+                tb = ASIN_LEARNINGS_TOTAL_BUDGET,
+                sb = ASIN_LEARNINGS_STALE_BUDGET,
+            ),
+            remediation: Some(
+                "Audit via `GET /asin_learnings?limit=...`; drop unwanted rows \
+                 individually via `DELETE /asin_learnings/{learning_id}`. A bulk-prune \
+                 cleanup target is not yet implemented; if the count grows past 50k, \
+                 file a slice for `StaleAsinLearningsTarget`."
+                    .into(),
+            ),
+            doc_url: None,
+        });
+        r
+    }
+}
+
 // ── HTTP surface ──────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -1023,5 +1130,71 @@ mod tests {
         }
         let report = DbIntegrityCheck.run(&ctx).await;
         assert_eq!(report.status, CheckStatus::Ok);
+    }
+
+    #[tokio::test]
+    async fn stale_asin_learnings_check_ok_when_empty() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        let report = StaleAsinLearningsCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Ok);
+        assert!(
+            report.summary.contains("0 row"),
+            "summary: {}",
+            report.summary
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_asin_learnings_check_ok_when_below_budgets() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        // 3 fresh rows (well below both budgets) — all stamped now.
+        for i in 1..=3 {
+            sqlx::query(
+                "INSERT INTO asin_learnings \
+                    (title_norm, author_norm, asin, source, learned_at) \
+                 VALUES (?, 'a', ?, 'patch', datetime('now'))",
+            )
+            .bind(format!("t{i}"))
+            .bind(format!("ASIN{i}"))
+            .execute(ctx.library.pool())
+            .await
+            .expect("seed fresh");
+        }
+        let report = StaleAsinLearningsCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Ok);
+        assert!(
+            report.summary.contains("3 row") && report.summary.contains("0 stale"),
+            "summary: {}",
+            report.summary
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_asin_learnings_check_warns_when_stale_budget_exceeded() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        // Seed > ASIN_LEARNINGS_STALE_BUDGET stale rows (anything
+        // older than 180 days). To keep the test fast, lower the
+        // sample size by writing exactly budget+1 dated 200d ago.
+        let stale_count = ASIN_LEARNINGS_STALE_BUDGET + 1;
+        for i in 0..stale_count {
+            sqlx::query(
+                "INSERT INTO asin_learnings \
+                    (title_norm, author_norm, asin, source, learned_at) \
+                 VALUES (?, 'a', ?, 'patch', datetime('now', '-200 days'))",
+            )
+            .bind(format!("t{i}"))
+            .bind(format!("ASIN{i}"))
+            .execute(ctx.library.pool())
+            .await
+            .expect("seed stale");
+        }
+        let report = StaleAsinLearningsCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Warning);
+        assert!(
+            report.summary.contains("stale"),
+            "summary should mention stale: {}",
+            report.summary
+        );
+        assert_eq!(report.details.len(), 1);
     }
 }
