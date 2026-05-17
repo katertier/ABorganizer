@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT learning_id  AS \"learning_id!: i64\",\n                  title_norm   AS \"title_norm!: String\",\n                  author_norm  AS \"author_norm!: String\",\n                  asin         AS \"asin!: String\",\n                  source       AS \"source!: String\",\n                  learned_at   AS \"learned_at!: String\"\n             FROM asin_learnings\n            ORDER BY learned_at DESC, learning_id DESC\n            LIMIT ? OFFSET ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "learning_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "title_norm!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "author_norm!: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "asin!: String",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "source!: String",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "learned_at!: String",
+        "ordinal": 5,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "701506d3e0f9b7ad13fd57693aca98288b3ce03bf6b53fcc2d4af65b0f34ec20"
+}

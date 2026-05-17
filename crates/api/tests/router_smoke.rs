@@ -340,6 +340,16 @@ async fn search_protected() {
 }
 
 #[tokio::test]
+async fn asin_learnings_list_protected() {
+    assert_protected("GET", "/asin_learnings").await;
+}
+
+#[tokio::test]
+async fn asin_learnings_delete_protected() {
+    assert_protected("DELETE", "/asin_learnings/1").await;
+}
+
+#[tokio::test]
 async fn books_status_protected() {
     assert_protected("PATCH", "/books/1/status").await;
 }
