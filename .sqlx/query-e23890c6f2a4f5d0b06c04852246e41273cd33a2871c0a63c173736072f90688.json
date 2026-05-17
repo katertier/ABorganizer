@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n            CASE\n                WHEN rating IS NULL THEN 'unrated'\n                WHEN rating = 1     THEN '1'\n                WHEN rating = 2     THEN '2'\n                WHEN rating = 3     THEN '3'\n                WHEN rating = 4     THEN '4'\n                WHEN rating = 5     THEN '5'\n                ELSE 'unrated'\n            END AS \"bucket_label!: String\",\n            COUNT(*) AS \"n!: i64\",\n            COALESCE(SUM(duration_ms), 0) AS \"hours_ms!: i64\"\n         FROM books\n         WHERE deleted_at IS NULL\n         GROUP BY 1\n         ORDER BY COUNT(*) DESC",
+  "describe": {
+    "columns": [
+      {
+        "name": "bucket_label!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "n!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "hours_ms!: i64",
+        "ordinal": 2,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "e23890c6f2a4f5d0b06c04852246e41273cd33a2871c0a63c173736072f90688"
+}
