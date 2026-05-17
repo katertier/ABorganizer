@@ -472,6 +472,7 @@ async fn main() -> Result<()> {
         Arc::new(ab_api::doctor::FailedOpsCheck),
         Arc::new(ab_api::doctor::OrphanCompanionsCheck),
         Arc::new(ab_api::doctor::LibraryRootsReachableCheck),
+        Arc::new(ab_api::doctor::DbIntegrityCheck),
     ]);
     let api_state = ab_api::ApiState::new(
         library.clone(),
