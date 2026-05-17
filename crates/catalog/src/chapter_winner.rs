@@ -82,6 +82,7 @@ impl Stage for ChapterWinnerStage {
             crate::chapters::STAGE_ID,
             crate::embedded_chapters::STAGE_ID,
             crate::cue_chapters::STAGE_ID,
+            crate::epub_chapters::STAGE_ID,
         ]
     }
 
@@ -220,6 +221,7 @@ mod tests {
                 crate::chapters::STAGE_ID,
                 crate::embedded_chapters::STAGE_ID,
                 crate::cue_chapters::STAGE_ID,
+                crate::epub_chapters::STAGE_ID,
             ]
         );
     }

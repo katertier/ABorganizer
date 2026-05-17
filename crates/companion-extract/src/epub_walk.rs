@@ -124,7 +124,7 @@ pub fn extract_name_dict_from_epub(
     Ok((extract_name_dict_from_html(&body.spine_html), body.language))
 }
 
-fn read_zip_entry<R: Read + Seek>(
+pub(crate) fn read_zip_entry<R: Read + Seek>(
     zip: &mut ZipArchive<R>,
     name: &str,
 ) -> Result<String, EpubWalkError> {
@@ -141,7 +141,9 @@ fn read_zip_entry<R: Read + Seek>(
     Ok(buf)
 }
 
-fn find_opf_path<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Result<String, EpubWalkError> {
+pub(crate) fn find_opf_path<R: Read + Seek>(
+    zip: &mut ZipArchive<R>,
+) -> Result<String, EpubWalkError> {
     let xml = read_zip_entry(zip, CONTAINER_XML)?;
     let doc = Document::parse(&xml).map_err(|e| EpubWalkError::Xml {
         path: CONTAINER_XML.to_owned(),

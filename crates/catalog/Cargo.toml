@@ -12,11 +12,12 @@ description  = "Audnexus + Audible clients for book metadata enrichment."
 workspace = true
 
 [dependencies]
-ab-core     = { workspace = true }
-ab-db       = { workspace = true }
-ab-pipeline = { workspace = true }
+ab-companion-extract = { workspace = true }
+ab-core              = { workspace = true }
+ab-db                = { workspace = true }
+ab-pipeline          = { workspace = true }
 # For Stage::requires() typed dependencies on read-tags.
-ab-tag-read = { workspace = true }
+ab-tag-read          = { workspace = true }
 async-trait = { workspace = true }
 # Used by `release_state` to parse Audible `release_date` /
 # `publication_datetime` fields (RFC 3339 or date-only) and
@@ -48,3 +49,5 @@ uuid        = { workspace = true }
 [dev-dependencies]
 tempfile   = { workspace = true }
 tokio-util = { workspace = true }
+# epub_chapters tests synthesise minimal EPUB ZIP files on disk.
+zip        = { workspace = true }

@@ -37,8 +37,10 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use unicode_segmentation::UnicodeSegmentation;
 
+pub mod epub_toc;
 pub mod epub_walk;
 
+pub use epub_toc::{read_chapter_titles, read_chapter_titles_from_path};
 pub use epub_walk::{EpubBody, EpubWalkError, extract_name_dict_from_epub, walk_spine};
 
 /// One canonical proper-noun candidate with its observed

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT path AS \"path!: String\"\n             FROM book_companions\n            WHERE book_id = ? AND format = 'epub'\n            ORDER BY companion_id\n            LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "path!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e7d4e82c513f2d8b3319af7caa4ab32f1c843f8b1473143ee27a751bb18ef8c9"
+}
