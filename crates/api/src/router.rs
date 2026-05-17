@@ -80,6 +80,10 @@ pub fn build_router(state: ApiState) -> Router {
         )
         .route("/authors", get(crate::authors::authors_list))
         .route("/authors/{author_id}", get(crate::authors::authors_get))
+        .route(
+            "/authors/{author_id}/books",
+            get(crate::authors::authors_books),
+        )
         .route("/narrators", get(crate::narrators::narrators_list))
         .route(
             "/narrators/{narrator_id}",
