@@ -1,0 +1,80 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT op_id          AS \"op_id!: i64\",\n                  op_kind         AS \"op_kind!: String\",\n                  target_kind     AS \"target_kind!: String\",\n                  target_id       AS \"target_id!: i64\",\n                  progress        AS \"progress!: String\",\n                  batch_id        AS \"batch_id?: String\",\n                  created_at      AS \"created_at!: i64\",\n                  reversible      AS \"reversible!: i64\",\n                  failed_reason   AS \"failed_reason?: String\",\n                  pre_state_json  AS \"pre_state_json!: String\",\n                  post_state_json AS \"post_state_json?: String\"\n             FROM operation_journal\n            WHERE op_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "op_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "op_kind!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "target_kind!: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "target_id!: i64",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "progress!: String",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "batch_id?: String",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at!: i64",
+        "ordinal": 6,
+        "type_info": "Integer"
+      },
+      {
+        "name": "reversible!: i64",
+        "ordinal": 7,
+        "type_info": "Integer"
+      },
+      {
+        "name": "failed_reason?: String",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "pre_state_json!: String",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "post_state_json?: String",
+        "ordinal": 10,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "9acae2112532fd8d378763a6271b703c6e9c719160d865278d8b5b7ba66c1140"
+}

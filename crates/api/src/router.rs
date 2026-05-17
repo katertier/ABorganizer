@@ -97,6 +97,10 @@ pub fn build_router(state: ApiState) -> Router {
             get(crate::operation_journal::operation_journal_replayers_get),
         )
         .route(
+            "/operation_journal/{op_id}",
+            get(crate::operation_journal::operation_journal_get),
+        )
+        .route(
             "/operation_journal/{op_id}/retry",
             post(crate::operation_journal::operation_journal_retry_post),
         )

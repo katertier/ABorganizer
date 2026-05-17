@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO operation_journal\n                       (op_kind, target_kind, target_id, pre_state_json,\n                        post_state_json, progress, reversible)\n                   VALUES (?, 'book', ?, '{\"a\":1}', '{\"a\":2}', 'done', 1)\n                   RETURNING op_id AS \"op_id!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "op_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "2d899be39c37d5da4ec09bc8e6a121e8d0e8f83168e1cfcc3114e0385ff06242"
+}
