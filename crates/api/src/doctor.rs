@@ -937,6 +937,10 @@ impl DoctorCheck for TokensUnusedCheck {
         let never_used_modifier = format!("{never_used_cutoff} seconds");
         let last_used_modifier = format!("{last_used_cutoff} seconds");
 
+        // Revoked tokens are excluded — they're already gone
+        // logically. The `total` count likewise reflects only
+        // live tokens. Otherwise the operator's "revoke unwanted
+        // tokens" remediation would never clear the warning.
         let row = match sqlx::query!(
             r#"SELECT
                 COALESCE(SUM(CASE
@@ -948,7 +952,8 @@ impl DoctorCheck for TokensUnusedCheck {
                      AND last_used_at < strftime('%s', 'now', ?2)
                     THEN 1 ELSE 0 END), 0) AS "stale_last_used!: i64",
                 COUNT(*) AS "total!: i64"
-              FROM tokens"#,
+              FROM tokens
+              WHERE revoked_at IS NULL"#,
             never_used_modifier,
             last_used_modifier,
         )
@@ -1006,11 +1011,11 @@ impl DoctorCheck for TokensUnusedCheck {
                 sld = TOKENS_LAST_USED_AGE_DAYS,
             ),
             remediation: Some(
-                "Audit via `SELECT token_id, nickname, issued_at, last_used_at FROM \
-                 tokens ORDER BY COALESCE(last_used_at, 0)`. Revoke unwanted rows via \
-                 `DELETE FROM tokens WHERE token_id = ?`. There is no API endpoint for \
-                 token deletion yet; if you find yourself doing this often, file a \
-                 slice for `DELETE /tokens/{id}`."
+                "Audit via `GET /api/v1/tokens`; revoke unwanted rows via \
+                 `DELETE /api/v1/tokens/{token_id}` (operator-soft-delete via \
+                 `revoked_at = now()`; revoked rows are excluded from this check's \
+                 counts on the next run). The revoke call records an \
+                 `operation_journal` row with op_kind=`token-revoke` for audit."
                     .into(),
             ),
             doc_url: None,
@@ -1684,6 +1689,27 @@ mod tests {
             report.summary
         );
         assert_eq!(report.details.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn tokens_unused_ignores_revoked_tokens() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        // Seed budget+1 stale never-used tokens, then revoke them
+        // all. The check should report Ok despite the stale rows.
+        for i in 0..=TOKENS_NEVER_USED_STALE_BUDGET {
+            seed_token(&ctx, &format!("revoked-{i}"), -60 * 86_400, None).await;
+        }
+        sqlx::query("UPDATE tokens SET revoked_at = strftime('%s','now')")
+            .execute(ctx.library.pool())
+            .await
+            .expect("revoke all");
+        let report = TokensUnusedCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Ok);
+        assert!(
+            report.summary.contains("0 token"),
+            "summary should report 0 live tokens: {}",
+            report.summary
+        );
     }
 
     #[tokio::test]
