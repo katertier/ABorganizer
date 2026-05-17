@@ -381,7 +381,8 @@ async fn main() -> Result<()> {
     // every consumer (recovery pass, `/operation_journal/replayers`
     // endpoint, `pending-without-replayer` doctor check) sees
     // the same set.
-    let replay_registry = ab_journal::ReplayRegistry::default();
+    let replay_registry =
+        ab_journal::ReplayRegistry::new(vec![Arc::new(ab_api::journal_replayers::StatusReplayer)]);
     match ab_journal::recover_pending_with(library.pool(), &replay_registry).await {
         Ok(report) if report.failed_count == 0 && report.retried_count == 0 => {
             tracing::info!("startup.recovery.clean — no pending operations");
