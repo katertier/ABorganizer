@@ -360,6 +360,11 @@ async fn operation_journal_replayers_protected() {
 }
 
 #[tokio::test]
+async fn operation_journal_retry_protected() {
+    assert_protected("POST", "/operation_journal/1/retry").await;
+}
+
+#[tokio::test]
 async fn books_status_protected() {
     assert_protected("PATCH", "/books/1/status").await;
 }

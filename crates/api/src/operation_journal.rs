@@ -19,7 +19,7 @@
 //!   are non-zero.
 
 use axum::Json;
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
@@ -69,6 +69,25 @@ pub struct OperationJournalListResponse {
     pub total: i64,
     pub limit: i64,
     pub offset: i64,
+}
+
+/// Response shape for `POST /operation_journal/{op_id}/retry`.
+///
+/// `outcome` is one of:
+/// - `"retried"` — Replayer succeeded; row flipped to `done` with
+///   the handler-supplied post-state.
+/// - `"skipped"` — Replayer declined (pre-state drifted, target
+///   gone, non-idempotent invariant); row flipped to `failed` with
+///   `reason` lifted onto `failed_reason`.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OperationJournalRetryResponse {
+    pub op_id: i64,
+    pub op_kind: String,
+    pub outcome: String,
+    /// For `outcome = "skipped"`: the handler-supplied reason.
+    /// For `outcome = "retried"`: `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Response shape for `GET /operation_journal/replayers`.
@@ -168,6 +187,97 @@ pub async fn operation_journal_list(
         limit,
         offset,
     }))
+}
+
+/// `POST /api/v1/operation_journal/{op_id}/retry` — re-dispatch a single pending entry.
+///
+/// Looks up the row, finds the registered [`ab_journal::Replayer`] for its
+/// `op_kind`, and calls `try_replay`. Mirrors `recover_pending_with`'s
+/// per-row logic but for an operator-triggered retry. Idempotent —
+/// once the row leaves `pending` no further retry call succeeds.
+///
+/// # Errors
+///
+/// - `404` if `op_id` doesn't exist or no `Replayer` is registered for
+///   the row's `op_kind`.
+/// - `409` if the row is not in `pending` state (already `done`,
+///   `failed`, or `reversed`).
+/// - `500` for DB / Replayer errors.
+pub async fn operation_journal_retry_post(
+    State(state): State<ApiState>,
+    Path(op_id): Path<i64>,
+) -> Result<Json<OperationJournalRetryResponse>, ApiError> {
+    let entry = match ab_journal::get(state.inner.library.pool(), op_id).await {
+        Ok(e) => e,
+        Err(ab_journal::JournalError::NotFound(_)) => {
+            return Err(ApiError::NotFound(format!(
+                "operation_journal op_id={op_id}"
+            )));
+        }
+        Err(e) => {
+            return Err(ApiError::Internal(ab_core::Error::Database(format!(
+                "operation_journal get: {e}"
+            ))));
+        }
+    };
+
+    if entry.progress != ab_journal::Progress::Pending {
+        return Err(ApiError::Conflict(format!(
+            "op_id={op_id} is in progress={} — only pending rows can be retried",
+            entry.progress.as_str(),
+        )));
+    }
+
+    let Some(handler) = state.inner.replay_registry.get(&entry.op_kind) else {
+        return Err(ApiError::NotFound(format!(
+            "no Replayer registered for op_kind={kind}",
+            kind = entry.op_kind,
+        )));
+    };
+
+    let decision = handler
+        .try_replay(state.inner.library.pool(), &entry)
+        .await
+        .map_err(|e| {
+            ApiError::Internal(ab_core::Error::Database(format!(
+                "Replayer({kind})::try_replay: {e}",
+                kind = entry.op_kind,
+            )))
+        })?;
+
+    let response = match decision {
+        ab_journal::ReplayDecision::Retried(post_state) => {
+            ab_journal::mark_done(state.inner.library.pool(), op_id, &post_state)
+                .await
+                .map_err(|e| {
+                    ApiError::Internal(ab_core::Error::Database(format!(
+                        "operation_journal mark_done: {e}"
+                    )))
+                })?;
+            OperationJournalRetryResponse {
+                op_id,
+                op_kind: entry.op_kind,
+                outcome: "retried".to_owned(),
+                reason: None,
+            }
+        }
+        ab_journal::ReplayDecision::Skipped(reason) => {
+            ab_journal::mark_failed(state.inner.library.pool(), op_id, &reason)
+                .await
+                .map_err(|e| {
+                    ApiError::Internal(ab_core::Error::Database(format!(
+                        "operation_journal mark_failed: {e}"
+                    )))
+                })?;
+            OperationJournalRetryResponse {
+                op_id,
+                op_kind: entry.op_kind,
+                outcome: "skipped".to_owned(),
+                reason: Some(reason),
+            }
+        }
+    };
+    Ok(Json(response))
 }
 
 /// `GET /api/v1/operation_journal/replayers` — list of registered `op_kind`s.
