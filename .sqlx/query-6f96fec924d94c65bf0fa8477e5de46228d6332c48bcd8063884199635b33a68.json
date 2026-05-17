@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO series (name) VALUES ('Mistborn')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "6f96fec924d94c65bf0fa8477e5de46228d6332c48bcd8063884199635b33a68"
+}

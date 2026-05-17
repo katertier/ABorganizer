@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO series (name) VALUES ('Cosmere')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "a5b5589bf4676b6c1e19f18c4c5eabdda7241298e9072484da4b8e5cfef0d11c"
+}
