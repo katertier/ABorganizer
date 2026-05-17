@@ -10,6 +10,10 @@
 #![forbid(unsafe_code)]
 #![allow(missing_docs)] // scaffold; tightened in follow-up slices
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sqlx::SqlitePool;
@@ -263,15 +267,22 @@ pub fn new_batch_id() -> String {
     uuid::Uuid::now_v7().to_string()
 }
 
-/// Report from a single [`recover_pending`] pass.
+/// Report from a single [`recover_pending`] (or
+/// [`recover_pending_with`]) pass.
 ///
-/// `failed_count` is the number of `pending` rows the recovery
-/// pass flipped to `failed`. `batches` lists per-batch detail so
-/// the daemon's startup log can show "found N pending operations
-/// across M batches; marked all failed."
+/// `failed_count` is the number of `pending` rows the recovery pass
+/// flipped to `failed`; `retried_count` is the number flipped to
+/// `done` by a [`Replayer`] in the registry. Without a
+/// registry every row falls into `failed_count`. `batches` lists
+/// per-batch detail so the daemon's startup log can show "found N
+/// pending operations across M batches; R retried, F failed."
 #[derive(Debug, Clone, Serialize)]
 pub struct RecoveryReport {
     pub failed_count: usize,
+    /// New in PR #194 — defaults to 0 when no replay handlers
+    /// are wired up.
+    #[serde(default)]
+    pub retried_count: usize,
     pub batches: Vec<RecoveredBatch>,
 }
 
@@ -319,22 +330,160 @@ pub const RECOVERY_FAILED_REASON: &str =
 /// error and continue (failing the whole startup on a journal
 /// crash sweep would be worse than running un-recovered).
 pub async fn recover_pending(pool: &SqlitePool) -> Result<RecoveryReport, JournalError> {
+    recover_pending_with(pool, &ReplayRegistry::default()).await
+}
+
+/// Same as [`recover_pending`] but consults `registry` first.
+///
+/// For each pending row:
+/// - If `registry` has a [`Replayer`] matching `op_kind`, call
+///   it. [`ReplayDecision::Retried`] flips the row to `done` with
+///   the handler-supplied post-state; [`ReplayDecision::Skipped`]
+///   flips it to `failed` with the handler-supplied reason.
+/// - A handler that returns `Err` is treated like no handler — the
+///   row falls through to the canonical [`RECOVERY_FAILED_REASON`]
+///   so a buggy handler can't break the safe-by-default contract.
+/// - No handler → mark `failed` with [`RECOVERY_FAILED_REASON`]
+///   (the original [`recover_pending`] behaviour).
+///
+/// # Errors
+///
+/// Returns [`JournalError::Sql`] / [`JournalError::Serde`] if any
+/// SQL or JSON step fails. Handler errors are absorbed and reported
+/// as `failed_count` increments — they don't fail the whole pass,
+/// because daemon startup can't usefully react to a per-handler
+/// crash beyond logging.
+pub async fn recover_pending_with(
+    pool: &SqlitePool,
+    registry: &ReplayRegistry,
+) -> Result<RecoveryReport, JournalError> {
     let batches = pending_batches(pool).await?;
     let mut failed_count = 0usize;
+    let mut retried_count = 0usize;
     let mut recovered: Vec<RecoveredBatch> = Vec::with_capacity(batches.len());
 
     for (batch_id, op_ids) in batches {
         for op_id in &op_ids {
-            mark_failed(pool, *op_id, RECOVERY_FAILED_REASON).await?;
-            failed_count += 1;
+            let entry = get(pool, *op_id).await?;
+            let outcome = match registry.get(&entry.op_kind) {
+                Some(handler) => handler.try_replay(pool, &entry).await,
+                None => Err(JournalError::NotFound(*op_id)),
+            };
+            match outcome {
+                Ok(ReplayDecision::Retried(post_state)) => {
+                    mark_done(pool, *op_id, &post_state).await?;
+                    retried_count += 1;
+                }
+                Ok(ReplayDecision::Skipped(reason)) => {
+                    mark_failed(pool, *op_id, &reason).await?;
+                    failed_count += 1;
+                }
+                Err(_) => {
+                    mark_failed(pool, *op_id, RECOVERY_FAILED_REASON).await?;
+                    failed_count += 1;
+                }
+            }
         }
         recovered.push(RecoveredBatch { batch_id, op_ids });
     }
 
     Ok(RecoveryReport {
         failed_count,
+        retried_count,
         batches: recovered,
     })
+}
+
+// ── Replay handler registry ───────────────────────────────────────
+
+/// Outcome of a single [`Replayer::try_replay`] call.
+#[derive(Debug, Clone, Serialize)]
+pub enum ReplayDecision {
+    /// Handler successfully re-executed the operation. The inner
+    /// JSON becomes the row's `post_state_json` and progress flips
+    /// to `done`.
+    Retried(Value),
+    /// Handler decided the operation should NOT be retried (e.g.
+    /// pre-state has drifted, target row was deleted, non-
+    /// idempotent invariant violated). Row flips to `failed` with
+    /// the supplied reason — preferred over a generic
+    /// [`RECOVERY_FAILED_REASON`] because it tells the operator
+    /// *why* the handler declined.
+    Skipped(String),
+}
+
+/// Per-`op_kind` replay strategy.
+///
+/// A daemon registers one handler per mutating `op_kind` it knows
+/// how to idempotently re-execute (or knowingly refuse to). Op
+/// kinds with no handler fall through to the safe-by-default
+/// failed-reason flush — that's the [`recover_pending`] behaviour.
+#[async_trait]
+pub trait Replayer: Send + Sync {
+    /// Exact `op_kind` this handler claims. Match is exact — no
+    /// globs or prefix matching, because two `op_kind`s with a
+    /// shared prefix may need entirely different replay logic.
+    fn op_kind(&self) -> &'static str;
+
+    /// Re-execute or refuse. `entry` is the full journal row
+    /// including `pre_state`; the handler reads it to check
+    /// whether the world still matches what the operation expected.
+    async fn try_replay(
+        &self,
+        pool: &SqlitePool,
+        entry: &JournalEntry,
+    ) -> Result<ReplayDecision, JournalError>;
+}
+
+/// Cheap-to-clone dispatch table for [`Replayer`]s.
+#[derive(Clone, Default)]
+pub struct ReplayRegistry {
+    handlers: Arc<HashMap<&'static str, Arc<dyn Replayer>>>,
+}
+
+impl ReplayRegistry {
+    /// Build a registry from a flat list. Later entries with the
+    /// same `op_kind` overwrite earlier ones — the daemon's
+    /// registration order decides which wins.
+    #[must_use]
+    pub fn new(handlers: Vec<Arc<dyn Replayer>>) -> Self {
+        let mut m: HashMap<&'static str, Arc<dyn Replayer>> = HashMap::new();
+        for h in handlers {
+            m.insert(h.op_kind(), h);
+        }
+        Self {
+            handlers: Arc::new(m),
+        }
+    }
+
+    /// List the `op_kind`s registered. Stable order is not
+    /// guaranteed; doctor / debug surfaces should sort.
+    #[must_use]
+    pub fn op_kinds(&self) -> Vec<&'static str> {
+        self.handlers.keys().copied().collect()
+    }
+
+    /// Lookup handler by `op_kind`.
+    #[must_use]
+    pub fn get(&self, op_kind: &str) -> Option<Arc<dyn Replayer>> {
+        self.handlers.get(op_kind).cloned()
+    }
+
+    /// True when no handlers are registered.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.handlers.is_empty()
+    }
+}
+
+impl std::fmt::Debug for ReplayRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut kinds = self.op_kinds();
+        kinds.sort_unstable();
+        f.debug_struct("ReplayRegistry")
+            .field("op_kinds", &kinds)
+            .finish()
+    }
 }
 
 // ── Diff renderer ─────────────────────────────────────────────────
@@ -738,6 +887,196 @@ mod tests {
         let (_d, db) = db().await;
         let report = recover_pending(db.pool()).await.expect("recover empty");
         assert_eq!(report.failed_count, 0);
+        assert_eq!(report.retried_count, 0);
         assert!(report.batches.is_empty());
+    }
+
+    // ── ReplayRegistry tests ─────────────────────────────────────
+
+    struct EchoReplayer {
+        op_kind: &'static str,
+    }
+
+    #[async_trait]
+    impl Replayer for EchoReplayer {
+        fn op_kind(&self) -> &'static str {
+            self.op_kind
+        }
+        async fn try_replay(
+            &self,
+            _pool: &SqlitePool,
+            entry: &JournalEntry,
+        ) -> Result<ReplayDecision, JournalError> {
+            // Echo the pre-state as post-state so callers can assert.
+            Ok(ReplayDecision::Retried(entry.pre_state.clone()))
+        }
+    }
+
+    struct SkipReplayer;
+
+    #[async_trait]
+    impl Replayer for SkipReplayer {
+        fn op_kind(&self) -> &'static str {
+            "skip-me"
+        }
+        async fn try_replay(
+            &self,
+            _pool: &SqlitePool,
+            _entry: &JournalEntry,
+        ) -> Result<ReplayDecision, JournalError> {
+            Ok(ReplayDecision::Skipped("post-state drifted".into()))
+        }
+    }
+
+    struct ErrorReplayer;
+
+    #[async_trait]
+    impl Replayer for ErrorReplayer {
+        fn op_kind(&self) -> &'static str {
+            "boom"
+        }
+        async fn try_replay(
+            &self,
+            _pool: &SqlitePool,
+            entry: &JournalEntry,
+        ) -> Result<ReplayDecision, JournalError> {
+            Err(JournalError::NotFound(entry.op_id))
+        }
+    }
+
+    #[tokio::test]
+    async fn replay_registry_routes_handler_match_to_done() {
+        let (_d, db) = db().await;
+        let op_id = record(
+            db.pool(),
+            &NewEntry {
+                op_kind: "retry-me",
+                target: Target {
+                    kind: "book".into(),
+                    id: 1,
+                },
+                pre_state: json!({ "n": 1 }),
+                reversible: true,
+                batch_id: None,
+            },
+        )
+        .await
+        .expect("record");
+        let registry = ReplayRegistry::new(vec![Arc::new(EchoReplayer {
+            op_kind: "retry-me",
+        })]);
+        let report = recover_pending_with(db.pool(), &registry)
+            .await
+            .expect("recover with");
+        assert_eq!(report.retried_count, 1);
+        assert_eq!(report.failed_count, 0);
+        let entry = get(db.pool(), op_id).await.expect("get");
+        assert_eq!(entry.progress, Progress::Done);
+        assert_eq!(entry.post_state, Some(json!({ "n": 1 })));
+    }
+
+    #[tokio::test]
+    async fn replay_registry_skipped_marks_failed_with_reason() {
+        let (_d, db) = db().await;
+        let op_id = record(
+            db.pool(),
+            &NewEntry {
+                op_kind: "skip-me",
+                target: Target {
+                    kind: "book".into(),
+                    id: 1,
+                },
+                pre_state: json!({}),
+                reversible: true,
+                batch_id: None,
+            },
+        )
+        .await
+        .expect("record");
+        let registry = ReplayRegistry::new(vec![Arc::new(SkipReplayer)]);
+        let report = recover_pending_with(db.pool(), &registry)
+            .await
+            .expect("recover with");
+        assert_eq!(report.retried_count, 0);
+        assert_eq!(report.failed_count, 1);
+        let entry = get(db.pool(), op_id).await.expect("get");
+        assert_eq!(entry.progress, Progress::Failed);
+        assert_eq!(entry.failed_reason.as_deref(), Some("post-state drifted"));
+    }
+
+    #[tokio::test]
+    async fn replay_registry_handler_error_falls_through_to_canonical_reason() {
+        let (_d, db) = db().await;
+        let op_id = record(
+            db.pool(),
+            &NewEntry {
+                op_kind: "boom",
+                target: Target {
+                    kind: "book".into(),
+                    id: 1,
+                },
+                pre_state: json!({}),
+                reversible: true,
+                batch_id: None,
+            },
+        )
+        .await
+        .expect("record");
+        let registry = ReplayRegistry::new(vec![Arc::new(ErrorReplayer)]);
+        let report = recover_pending_with(db.pool(), &registry)
+            .await
+            .expect("recover with");
+        assert_eq!(report.failed_count, 1);
+        let entry = get(db.pool(), op_id).await.expect("get");
+        assert_eq!(entry.progress, Progress::Failed);
+        assert_eq!(entry.failed_reason.as_deref(), Some(RECOVERY_FAILED_REASON));
+    }
+
+    #[tokio::test]
+    async fn replay_registry_op_kind_with_no_handler_uses_canonical_reason() {
+        let (_d, db) = db().await;
+        let op_id = record(
+            db.pool(),
+            &NewEntry {
+                op_kind: "unhandled",
+                target: Target {
+                    kind: "book".into(),
+                    id: 1,
+                },
+                pre_state: json!({}),
+                reversible: true,
+                batch_id: None,
+            },
+        )
+        .await
+        .expect("record");
+        // Empty registry → behaves exactly like recover_pending.
+        let report = recover_pending_with(db.pool(), &ReplayRegistry::default())
+            .await
+            .expect("recover with empty");
+        assert_eq!(report.failed_count, 1);
+        let entry = get(db.pool(), op_id).await.expect("get");
+        assert_eq!(entry.progress, Progress::Failed);
+        assert_eq!(entry.failed_reason.as_deref(), Some(RECOVERY_FAILED_REASON));
+    }
+
+    #[test]
+    fn replay_registry_op_kinds_lists_registered_kinds() {
+        let registry = ReplayRegistry::new(vec![
+            Arc::new(EchoReplayer { op_kind: "a" }),
+            Arc::new(EchoReplayer { op_kind: "b" }),
+        ]);
+        let mut kinds = registry.op_kinds();
+        kinds.sort_unstable();
+        assert_eq!(kinds, vec!["a", "b"]);
+        assert!(!registry.is_empty());
+    }
+
+    #[test]
+    fn replay_registry_default_is_empty() {
+        let registry = ReplayRegistry::default();
+        assert!(registry.is_empty());
+        assert!(registry.op_kinds().is_empty());
+        assert!(registry.get("anything").is_none());
     }
 }
