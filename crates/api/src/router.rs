@@ -1300,35 +1300,34 @@ async fn books_patch(
         && req.isbn.is_none()
         && req.abridged.is_none()
         && req.explicit.is_none();
-    let title_journal: Option<(i64, String)> = if let Some(intent) =
-        req.title.as_deref().filter(|_| title_only)
-    {
-        let current: String = sqlx::query_scalar!(
-            r#"SELECT title AS "title!: String" FROM books WHERE book_id = ?"#,
-            book_id,
-        )
-        .fetch_one(pool)
-        .await
-        .map_err(|e| {
-            ApiError::Internal(ab_core::Error::Database(format!(
-                "books_patch title pre-read: {e}"
-            )))
-        })?;
-        let entry = ab_journal::NewEntry {
-            op_kind: OP_KIND_BOOK_TITLE_SET,
-            target: ab_journal::Target {
-                kind: "book".to_owned(),
-                id: book_id,
-            },
-            pre_state: serde_json::json!({ "current": current, "intent": intent }),
-            reversible: true,
-            batch_id: None,
+    let title_journal: Option<(i64, String)> =
+        if let Some(intent) = req.title.as_deref().filter(|_| title_only) {
+            let current: String = sqlx::query_scalar!(
+                r#"SELECT title AS "title!: String" FROM books WHERE book_id = ?"#,
+                book_id,
+            )
+            .fetch_one(pool)
+            .await
+            .map_err(|e| {
+                ApiError::Internal(ab_core::Error::Database(format!(
+                    "books_patch title pre-read: {e}"
+                )))
+            })?;
+            let entry = ab_journal::NewEntry {
+                op_kind: OP_KIND_BOOK_TITLE_SET,
+                target: ab_journal::Target {
+                    kind: "book".to_owned(),
+                    id: book_id,
+                },
+                pre_state: serde_json::json!({ "current": current, "intent": intent }),
+                reversible: true,
+                batch_id: None,
+            };
+            let op_id = crate::journal_capture::record_pending(pool, &entry).await?;
+            Some((op_id, intent.to_owned()))
+        } else {
+            None
         };
-        let op_id = crate::journal_capture::record_pending(pool, &entry).await?;
-        Some((op_id, intent.to_owned()))
-    } else {
-        None
-    };
 
     let mut tx = pool.begin().await.map_err(|e| {
         ApiError::Internal(ab_core::Error::Database(format!("books_patch begin: {e}")))
