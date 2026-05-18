@@ -1188,6 +1188,218 @@ impl DoctorCheck for CoverCacheWritableCheck {
     }
 }
 
+/// Closure shape for the `disk-pressure` check.
+///
+/// Takes a filesystem path and returns `(free_bytes, total_bytes)`.
+/// `(u64::MAX, u64::MAX)` is the documented sentinel for "stat
+/// failed" — the check treats it as "skip this root" rather than
+/// flagging it. Mirrors the closure type the cleanup loop already
+/// uses (`ab_pipeline::cleanup::CleanupLoopCtx::disk_free`), so the
+/// daemon can wire the same `nix::sys::statvfs` shim it uses
+/// there.
+pub type DiskFreeFn = Arc<dyn Fn(&std::path::Path) -> (u64, u64) + Send + Sync>;
+
+/// `disk-pressure` — warn when any active `library_roots.path` has
+/// less free space than the soft budget.
+///
+/// Uses a constructor-injected `disk_free` closure so the
+/// `ab-api` crate stays free of platform-specific FS deps (the
+/// daemon owns the `nix::sys::statvfs` shim). Mirrors the
+/// `PendingWithoutReplayerCheck::new(registry)` pattern.
+///
+/// Aggregate-only — reports per-root percentage in the warning
+/// detail but no other path metadata. `Failure` only when the
+/// underlying `library_roots` query itself errors; a failed
+/// `statvfs` for any individual root surfaces as a `Skipped`
+/// note in the summary, not a failure (one missing volume
+/// shouldn't suppress the rest of the report).
+pub struct DiskPressureCheck {
+    disk_free: DiskFreeFn,
+}
+
+impl DiskPressureCheck {
+    #[must_use]
+    pub fn new(disk_free: DiskFreeFn) -> Self {
+        Self { disk_free }
+    }
+}
+
+/// Free-space percentage below which a library root warns.
+///
+/// 10% leaves headroom for the cleanup-loop pressure ratchet
+/// (which kicks in at lower thresholds) without false-positiving
+/// on a healthy NAS that's been gradually filling up for a year.
+pub const DISK_PRESSURE_FREE_PCT_BUDGET: f64 = 10.0;
+
+struct LibraryRootRow {
+    root_id: i64,
+    path: String,
+    label: Option<String>,
+}
+
+struct PressuredRoot {
+    root_id: i64,
+    path: String,
+    label: Option<String>,
+    pct: f64,
+}
+
+struct SkippedRoot {
+    root_id: i64,
+    path: String,
+    label: Option<String>,
+}
+
+#[async_trait]
+impl DoctorCheck for DiskPressureCheck {
+    fn name(&self) -> &'static str {
+        "disk-pressure"
+    }
+    fn description(&self) -> &'static str {
+        "active library_roots free space vs soft percentage budget"
+    }
+    async fn run(&self, ctx: &CheckCtx) -> CheckReport {
+        let rows = match sqlx::query!(
+            r#"SELECT root_id AS "root_id!: i64", path, label
+                 FROM library_roots
+                WHERE is_active = 1
+                ORDER BY root_id"#,
+        )
+        .fetch_all(ctx.library.pool())
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let mut r = CheckReport::fail("library_roots query failed");
+                r.details.push(CheckFinding {
+                    severity: CheckStatus::Failure,
+                    message: e.to_string(),
+                    remediation: Some(
+                        "Inspect ab-db logs; verify the library DB is reachable.".into(),
+                    ),
+                    doc_url: None,
+                });
+                return r;
+            }
+        };
+        if rows.is_empty() {
+            return CheckReport::ok("no active library roots configured");
+        }
+        let owned: Vec<LibraryRootRow> = rows
+            .into_iter()
+            .map(|r| LibraryRootRow {
+                root_id: r.root_id,
+                path: r.path,
+                label: r.label,
+            })
+            .collect();
+        let (pressured, skipped) = scan_roots(&self.disk_free, &owned);
+        build_disk_pressure_report(owned.len(), &pressured, &skipped)
+    }
+}
+
+fn scan_roots(
+    disk_free: &DiskFreeFn,
+    rows: &[LibraryRootRow],
+) -> (Vec<PressuredRoot>, Vec<SkippedRoot>) {
+    let mut pressured = Vec::new();
+    let mut skipped = Vec::new();
+    for row in rows {
+        let path = std::path::Path::new(&row.path);
+        let (free, total) = (disk_free)(path);
+        if (free, total) == (u64::MAX, u64::MAX) {
+            skipped.push(SkippedRoot {
+                root_id: row.root_id,
+                path: row.path.clone(),
+                label: row.label.clone(),
+            });
+            continue;
+        }
+        if total == 0 {
+            continue;
+        }
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "approximate percentage display; precision loss on petabyte volumes is harmless"
+        )]
+        let pct = (free as f64 / total as f64) * 100.0;
+        if pct < DISK_PRESSURE_FREE_PCT_BUDGET {
+            pressured.push(PressuredRoot {
+                root_id: row.root_id,
+                path: row.path.clone(),
+                label: row.label.clone(),
+                pct,
+            });
+        }
+    }
+    (pressured, skipped)
+}
+
+fn build_disk_pressure_report(
+    total_roots: usize,
+    pressured: &[PressuredRoot],
+    skipped: &[SkippedRoot],
+) -> CheckReport {
+    if pressured.is_empty() {
+        let budget = DISK_PRESSURE_FREE_PCT_BUDGET;
+        let summary = if skipped.is_empty() {
+            format!("{total_roots} library root(s) above {budget}% free")
+        } else {
+            let counted = total_roots - skipped.len();
+            let sk = skipped.len();
+            format!("{counted} root(s) above {budget}% free; {sk} skipped (statvfs failure)")
+        };
+        return CheckReport::ok(summary);
+    }
+    let pressured_n = pressured.len();
+    let budget = DISK_PRESSURE_FREE_PCT_BUDGET;
+    let mut r = CheckReport::warn(format!(
+        "{pressured_n} of {total_roots} library root(s) below {budget}% free"
+    ));
+    for root in pressured {
+        let PressuredRoot {
+            root_id,
+            path,
+            label,
+            pct,
+        } = root;
+        r.details.push(CheckFinding {
+            severity: CheckStatus::Warning,
+            message: format!(
+                "library_roots root_id={root_id} label={label:?} path={path:?} at {pct:.1}% free"
+            ),
+            remediation: Some(
+                "Free space on the volume, move some books to a larger root, or expand the \
+                 underlying storage. The cleanup loop's pressure ratchet will start \
+                 dropping older intermediate state automatically below the per-target \
+                 thresholds."
+                    .into(),
+            ),
+            doc_url: None,
+        });
+    }
+    for root in skipped {
+        let SkippedRoot {
+            root_id,
+            path,
+            label,
+        } = root;
+        r.details.push(CheckFinding {
+            severity: CheckStatus::Warning,
+            message: format!(
+                "library_roots root_id={root_id} label={label:?} path={path:?} statvfs failed (sentinel)"
+            ),
+            remediation: Some(
+                "The volume is likely unmounted or unreachable; `library-roots-reachable` will \
+                 surface the underlying error."
+                    .into(),
+            ),
+            doc_url: None,
+        });
+    }
+    r
+}
+
 // ── HTTP surface ──────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -1918,5 +2130,90 @@ mod tests {
             report.summary
         );
         assert_eq!(report.details.len(), 1);
+    }
+
+    async fn seed_library_root(ctx: &CheckCtx, path: &str, label: &str) {
+        sqlx::query!(
+            "INSERT INTO library_roots (path, label, is_active) VALUES (?, ?, 1)",
+            path,
+            label,
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed library_root");
+    }
+
+    fn fixed_disk_free(free: u64, total: u64) -> DiskFreeFn {
+        Arc::new(move |_: &std::path::Path| (free, total))
+    }
+
+    fn sentinel_disk_free() -> DiskFreeFn {
+        Arc::new(|_: &std::path::Path| (u64::MAX, u64::MAX))
+    }
+
+    #[tokio::test]
+    async fn disk_pressure_ok_when_no_active_roots() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        let check = DiskPressureCheck::new(fixed_disk_free(10, 100));
+        let report = check.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Ok);
+        assert!(
+            report.summary.contains("no active library roots"),
+            "summary: {}",
+            report.summary,
+        );
+    }
+
+    #[tokio::test]
+    async fn disk_pressure_ok_when_all_roots_above_budget() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        seed_library_root(&ctx, "/a", "a").await;
+        seed_library_root(&ctx, "/b", "b").await;
+        // 50% free — well above the 10% budget.
+        let check = DiskPressureCheck::new(fixed_disk_free(50, 100));
+        let report = check.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Ok);
+        assert!(
+            report.summary.contains("2 library root(s) above"),
+            "summary: {}",
+            report.summary,
+        );
+    }
+
+    #[tokio::test]
+    async fn disk_pressure_warns_when_root_below_budget() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        seed_library_root(&ctx, "/full", "Full Volume").await;
+        // 5% free — below the 10% budget.
+        let check = DiskPressureCheck::new(fixed_disk_free(5, 100));
+        let report = check.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Warning);
+        assert!(
+            report.summary.contains("below"),
+            "summary: {}",
+            report.summary,
+        );
+        assert_eq!(report.details.len(), 1);
+        assert!(
+            report.details[0].message.contains("Full Volume"),
+            "detail: {}",
+            report.details[0].message,
+        );
+    }
+
+    #[tokio::test]
+    async fn disk_pressure_skips_sentinel_roots() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        seed_library_root(&ctx, "/unmounted", "NAS").await;
+        let check = DiskPressureCheck::new(sentinel_disk_free());
+        let report = check.run(&ctx).await;
+        // Sentinel = "no pressure detected"; no warning, summary
+        // notes the skip.
+        assert_eq!(report.status, CheckStatus::Ok);
+        assert!(
+            report.summary.contains("skipped"),
+            "summary: {}",
+            report.summary,
+        );
     }
 }

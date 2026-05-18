@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO library_roots (path, label, is_active) VALUES (?, ?, 1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "60e50055348dccd4993a903a2c5411ed40d75d20385fd570ef01976c5e18b2cd"
+}

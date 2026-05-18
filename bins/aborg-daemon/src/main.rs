@@ -507,6 +507,9 @@ async fn main() -> Result<()> {
         )),
         Arc::new(ab_api::doctor::TokensUnusedCheck),
         Arc::new(ab_api::doctor::PairingCodesStaleCheck),
+        Arc::new(ab_api::doctor::DiskPressureCheck::new(
+            disk_usage::disk_free_any(),
+        )),
     ]);
     let api_state = ab_api::ApiState::with_replay_registry(
         library.clone(),
