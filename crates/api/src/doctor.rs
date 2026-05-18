@@ -1474,6 +1474,84 @@ pub async fn doctor_one(
     Ok(Json(report))
 }
 
+/// `provenance-winner-conflict` — `book_field_provenance` integrity tripwire.
+///
+/// Migration 020 enforces "exactly one `is_winner=1` row per
+/// `(book_id, field)`" via a UNIQUE partial index. This check is the
+/// operator-facing tripwire for the rare case where that invariant
+/// is violated: the index was dropped manually, restored from a
+/// backup that pre-dated migration 020, or the DB was edited
+/// outside the daemon. A non-zero count means a future `tag-write`
+/// pass would silently emit inconsistent on-disk tags — surface
+/// immediately.
+pub struct ProvenanceWinnerConflictCheck;
+
+#[async_trait]
+impl DoctorCheck for ProvenanceWinnerConflictCheck {
+    fn name(&self) -> &'static str {
+        "provenance-winner-conflict"
+    }
+    fn description(&self) -> &'static str {
+        "(book_id, field) groups with 2+ is_winner=1 rows (should be 0 — migration 020 enforces)"
+    }
+    async fn run(&self, ctx: &CheckCtx) -> CheckReport {
+        let conflicts: i64 = match sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "n!: i64"
+                 FROM (
+                     SELECT book_id, field
+                       FROM book_field_provenance
+                      WHERE is_winner = 1
+                      GROUP BY book_id, field
+                     HAVING COUNT(*) > 1
+                 )"#,
+        )
+        .fetch_one(ctx.library.pool())
+        .await
+        {
+            Ok(n) => n,
+            Err(e) => {
+                let mut r = CheckReport::fail("provenance winner conflict count failed");
+                r.details.push(CheckFinding {
+                    severity: CheckStatus::Failure,
+                    message: e.to_string(),
+                    remediation: Some(
+                        "Inspect ab-db logs; verify the library DB is reachable.".into(),
+                    ),
+                    doc_url: None,
+                });
+                return r;
+            }
+        };
+        if conflicts == 0 {
+            return CheckReport::ok("no provenance winner conflicts");
+        }
+        let mut r = CheckReport::warn(format!(
+            "{conflicts} (book_id, field) group(s) with multiple is_winner=1 rows"
+        ));
+        r.details.push(CheckFinding {
+            severity: CheckStatus::Warning,
+            message: format!(
+                "{conflicts} (book_id, field) group(s) have 2 or more is_winner=1 \
+                 rows. Migration 020's `ux_book_field_winner` UNIQUE partial \
+                 index enforces single-winner-per-field at INSERT time — a \
+                 non-zero count means the index is missing or was bypassed \
+                 (manual DB edit, restore from a pre-020 backup, or an ATTACH+ \
+                 INSERT path that sidestepped index enforcement)."
+            ),
+            remediation: Some(
+                "Verify the index exists \
+                 (`SELECT sql FROM sqlite_master WHERE name='ux_book_field_winner'`); \
+                 if absent, recreate it per migration 020 and run a dedupe pass \
+                 keeping max(confidence) per group as the surviving winner — \
+                 see migration 020 for the canonical dedupe query shape."
+                    .into(),
+            ),
+            doc_url: None,
+        });
+        r
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
@@ -2214,6 +2292,86 @@ mod tests {
             report.summary.contains("skipped"),
             "summary: {}",
             report.summary,
+        );
+    }
+
+    // ── ProvenanceWinnerConflictCheck tests ────────────────────────
+
+    #[tokio::test]
+    async fn provenance_winner_conflict_ok_when_no_rows() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        let report = ProvenanceWinnerConflictCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Ok);
+        assert!(
+            report.summary.contains("no provenance winner conflicts"),
+            "summary: {}",
+            report.summary,
+        );
+    }
+
+    #[tokio::test]
+    async fn provenance_winner_conflict_ok_when_single_winners() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        sqlx::query("INSERT INTO books (book_id, title) VALUES (1, 't1')")
+            .execute(ctx.library.pool())
+            .await
+            .expect("seed book 1");
+        sqlx::query("INSERT INTO books (book_id, title) VALUES (2, 't2')")
+            .execute(ctx.library.pool())
+            .await
+            .expect("seed book 2");
+        // Three provenance rows; each (book_id, field) pair has
+        // exactly one winner. Migration 020's UNIQUE partial index
+        // would block any second winner per pair.
+        sqlx::query(
+            "INSERT INTO book_field_provenance \
+                (book_id, field, value, source, stage, confidence, is_winner) \
+              VALUES (1, 'title', 't1', 'audnexus', 'enrich-from-audnexus', 0.9, 1), \
+                     (1, 'subtitle', 's1', 'tag', 'read-tags', 0.5, 1), \
+                     (2, 'title', 't2', 'user_edit', 'api-user-edit', 1.0, 1)",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed provenance");
+        let report = ProvenanceWinnerConflictCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Ok);
+    }
+
+    #[tokio::test]
+    async fn provenance_winner_conflict_warns_when_duplicate_winners() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        sqlx::query("INSERT INTO books (book_id, title) VALUES (1, 't')")
+            .execute(ctx.library.pool())
+            .await
+            .expect("seed book");
+        // Drop the partial UNIQUE index that migration 020 created
+        // so we can seed the very state the check tripwires on.
+        // Without this, the second INSERT below would fail with
+        // SQLITE_CONSTRAINT_UNIQUE — exactly the property the
+        // production system relies on.
+        sqlx::query("DROP INDEX ux_book_field_winner")
+            .execute(ctx.library.pool())
+            .await
+            .expect("drop unique index");
+        sqlx::query(
+            "INSERT INTO book_field_provenance \
+                (book_id, field, value, source, stage, confidence, is_winner) \
+              VALUES (1, 'title', 't_a', 'audnexus', 'enrich-from-audnexus', 0.9, 1), \
+                     (1, 'title', 't_b', 'audible',  'search-audible',       0.8, 1)",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed duplicate winners");
+        let report = ProvenanceWinnerConflictCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Warning);
+        assert!(
+            report.summary.contains('1'),
+            "summary should mention 1 conflicting group: {}",
+            report.summary,
+        );
+        assert!(
+            report.details[0].remediation.is_some(),
+            "remediation should be present for conflict warnings",
         );
     }
 }
