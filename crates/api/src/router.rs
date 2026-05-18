@@ -1161,6 +1161,21 @@ async fn books_get(
 
 // ── PATCH /books/{book_id} ───────────────────────────────────────
 
+/// `op_kind` recorded in `operation_journal` for the title field
+/// of [`books_patch`].
+///
+/// Stable string used by [`crate::journal_replayers::TitleReplayer`]
+/// to claim rows from the registry on crash recovery / retry.
+///
+/// `pre_state = { current: <prev_title>, intent: <new_title> }`.
+/// Capture is title-only — multi-field `PATCH`es skip journal write
+/// to keep the per-field replay shape from racing the multi-field
+/// transaction's atomic-rollback semantics. Extending capture to
+/// the other PATCH fields is a follow-up slice that also lifts the
+/// inner per-field branches into a helper so a failure mid-tx can
+/// uniformly `mark_failed` every pending row.
+pub const OP_KIND_BOOK_TITLE_SET: &str = "book-title-set";
+
 /// Body of `PATCH /api/v1/books/{book_id}`.
 ///
 /// Every field is `Option<T>` — `None` (or absent) means "leave
@@ -1233,13 +1248,15 @@ async fn books_patch(
     use crate::user_edits::record_user_edit;
     use ab_core::Field;
 
+    let pool = state.inner.library.pool();
+
     // 0. Verify book exists. Cheap separate query so the 404
     // doesn't get masked by a transaction-rollback chain.
     let exists = sqlx::query!(
         r#"SELECT EXISTS(SELECT 1 FROM books WHERE book_id = ?) AS "exists!: i64""#,
         book_id,
     )
-    .fetch_one(state.inner.library.pool())
+    .fetch_one(pool)
     .await
     .map_err(|e| {
         ApiError::Internal(ab_core::Error::Database(format!("books_patch exists: {e}")))
@@ -1264,7 +1281,56 @@ async fn books_patch(
         ));
     }
 
-    let mut tx = state.inner.library.pool().begin().await.map_err(|e| {
+    // 2. Title-only journal capture (ADR-0039).
+    //
+    // Per-field replay means a `book-title-set` row needs to
+    // succeed or fail atomically with the title's column write.
+    // For a multi-field PATCH, a single rolled-back transaction
+    // can't be partitioned into per-field replay outcomes without
+    // refactoring the inner loop — so capture is restricted to the
+    // title-only case for now. Future slices extend per-field
+    // capture to the other fields, at which point the inner
+    // branches lift into a helper that returns first-error so a
+    // commit failure can `mark_failed` every pending row uniformly.
+    let title_only = req.subtitle.is_none()
+        && req.description.is_none()
+        && req.language.is_none()
+        && req.release_date.is_none()
+        && req.asin.is_none()
+        && req.isbn.is_none()
+        && req.abridged.is_none()
+        && req.explicit.is_none();
+    let title_journal: Option<(i64, String)> = if let Some(intent) =
+        req.title.as_deref().filter(|_| title_only)
+    {
+        let current: String = sqlx::query_scalar!(
+            r#"SELECT title AS "title!: String" FROM books WHERE book_id = ?"#,
+            book_id,
+        )
+        .fetch_one(pool)
+        .await
+        .map_err(|e| {
+            ApiError::Internal(ab_core::Error::Database(format!(
+                "books_patch title pre-read: {e}"
+            )))
+        })?;
+        let entry = ab_journal::NewEntry {
+            op_kind: OP_KIND_BOOK_TITLE_SET,
+            target: ab_journal::Target {
+                kind: "book".to_owned(),
+                id: book_id,
+            },
+            pre_state: serde_json::json!({ "current": current, "intent": intent }),
+            reversible: true,
+            batch_id: None,
+        };
+        let op_id = crate::journal_capture::record_pending(pool, &entry).await?;
+        Some((op_id, intent.to_owned()))
+    } else {
+        None
+    };
+
+    let mut tx = pool.begin().await.map_err(|e| {
         ApiError::Internal(ab_core::Error::Database(format!("books_patch begin: {e}")))
     })?;
 
@@ -1440,7 +1506,32 @@ async fn books_patch(
         updated.push(Field::Explicit.as_str().to_owned());
     }
 
-    tx.commit().await.map_err(|e| {
+    let commit_result = tx.commit().await;
+
+    if let Some((op_id, intent)) = title_journal {
+        match &commit_result {
+            Ok(()) => {
+                crate::journal_capture::mark_done_or_log(
+                    pool,
+                    op_id,
+                    &serde_json::json!({ "title": intent }),
+                    "api.books_patch.title",
+                )
+                .await;
+            }
+            Err(e) => {
+                crate::journal_capture::mark_failed_or_log(
+                    pool,
+                    op_id,
+                    &format!("books_patch commit failed: {e}"),
+                    "api.books_patch.title",
+                )
+                .await;
+            }
+        }
+    }
+
+    commit_result.map_err(|e| {
         ApiError::Internal(ab_core::Error::Database(format!("books_patch commit: {e}")))
     })?;
 

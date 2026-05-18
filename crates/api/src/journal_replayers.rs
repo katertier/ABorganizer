@@ -377,6 +377,94 @@ fn parse_notes(v: &Value) -> ParsedNotes {
         .map_or(ParsedNotes::Malformed, |s| ParsedNotes::Set(s.to_owned()))
 }
 
+/// Re-applies `PATCH /books/{id}` title-set mutations after a
+/// crash or on operator-triggered retry.
+///
+/// Twin of [`StatusReplayer`] — same drift-detection /
+/// already-applied / book-deleted / malformed-`pre_state` decision
+/// tree, applied to a `NOT NULL` string column. Differs from the
+/// status/rating/notes trio because the capture-side handler
+/// ([`crate::router::OP_KIND_BOOK_TITLE_SET`]) batches title with
+/// up to eight other PATCH fields in a single transaction; the
+/// replay path is title-only because the journal row is
+/// title-only.
+///
+/// Re-apply runs the same shape as the original PATCH: a
+/// transaction containing `record_user_edit` on `Field::Title`
+/// (restores the `confidence = 1.0`, `is_winner = 1` provenance
+/// row that the rolled-back tx lost) + `UPDATE books.title`.
+pub struct TitleReplayer;
+
+#[async_trait]
+impl Replayer for TitleReplayer {
+    fn op_kind(&self) -> &'static str {
+        crate::router::OP_KIND_BOOK_TITLE_SET
+    }
+
+    async fn try_replay(
+        &self,
+        pool: &SqlitePool,
+        entry: &JournalEntry,
+    ) -> Result<ReplayDecision, JournalError> {
+        let book_id = entry.target.id;
+        let pre = &entry.pre_state;
+        let Some(intent) = pre.get("intent").and_then(Value::as_str) else {
+            return Ok(ReplayDecision::Skipped(
+                "pre_state missing 'intent' field (or not a string)".to_owned(),
+            ));
+        };
+        let Some(recorded_current) = pre.get("current").and_then(Value::as_str) else {
+            return Ok(ReplayDecision::Skipped(
+                "pre_state missing 'current' field (or not a string)".to_owned(),
+            ));
+        };
+
+        let current: Option<String> = sqlx::query_scalar!(
+            r#"SELECT title AS "title!: String" FROM books WHERE book_id = ?"#,
+            book_id,
+        )
+        .fetch_optional(pool)
+        .await?;
+
+        let Some(current) = current else {
+            return Ok(ReplayDecision::Skipped(format!(
+                "book {book_id} no longer exists"
+            )));
+        };
+
+        if current == intent {
+            return Ok(ReplayDecision::Skipped(format!(
+                "already applied — title is already {intent:?}"
+            )));
+        }
+        if current != recorded_current {
+            return Ok(ReplayDecision::Skipped(format!(
+                "drift detected — current title is {current:?}, \
+                 expected {recorded_current:?} (someone else changed it)"
+            )));
+        }
+
+        let mut tx = pool.begin().await?;
+        crate::user_edits::record_user_edit(&mut tx, book_id, ab_core::Field::Title, Some(intent))
+            .await
+            .map_err(|e| {
+                JournalError::Db(sqlx::Error::Protocol(format!(
+                    "title replay user_edit: {e}"
+                )))
+            })?;
+        sqlx::query!(
+            "UPDATE books SET title = ? WHERE book_id = ?",
+            intent,
+            book_id,
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+
+        Ok(ReplayDecision::Retried(json!({ "title": intent })))
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
@@ -811,6 +899,164 @@ mod tests {
                 assert!(r.contains("not a valid notes value"), "reason: {r}");
             }
             ReplayDecision::Retried(_) => panic!("expected Skipped for malformed intent"),
+        }
+    }
+
+    // ── TitleReplayer tests ──────────────────────────────────────────
+
+    async fn seed_book_with_title(db: &LibraryDb, title: &str) -> i64 {
+        sqlx::query_scalar(
+            "INSERT INTO books (title, duration_ms, raw_duration_ms, reading_status) \
+             VALUES (?, 60000, 60000, 'want_to_read') RETURNING book_id",
+        )
+        .bind(title)
+        .fetch_one(db.pool())
+        .await
+        .expect("insert book")
+    }
+
+    fn title_entry(op_id: i64, book_id: i64, pre: Value) -> JournalEntry {
+        JournalEntry {
+            op_id,
+            op_kind: crate::router::OP_KIND_BOOK_TITLE_SET.to_owned(),
+            target: ab_journal::Target {
+                kind: "book".to_owned(),
+                id: book_id,
+            },
+            pre_state: pre,
+            post_state: None,
+            created_at: 0,
+            reversible: true,
+            batch_id: None,
+            progress: ab_journal::Progress::Pending,
+            failed_reason: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn title_op_kind_matches_capture_constant() {
+        assert_eq!(TitleReplayer.op_kind(), "book-title-set");
+        assert_eq!(
+            TitleReplayer.op_kind(),
+            crate::router::OP_KIND_BOOK_TITLE_SET
+        );
+    }
+
+    #[tokio::test]
+    async fn title_retries_when_no_drift() {
+        let (_d, db) = open_db().await;
+        let book_id = seed_book_with_title(&db, "Old Title").await;
+        let e = title_entry(
+            1,
+            book_id,
+            json!({ "current": "Old Title", "intent": "New Title" }),
+        );
+        let decision = TitleReplayer
+            .try_replay(db.pool(), &e)
+            .await
+            .expect("try_replay");
+        match decision {
+            ReplayDecision::Retried(post) => {
+                assert_eq!(post["title"], "New Title");
+            }
+            ReplayDecision::Skipped(r) => panic!("expected Retried, got Skipped({r})"),
+        }
+        let t: String = sqlx::query_scalar("SELECT title FROM books WHERE book_id = ?")
+            .bind(book_id)
+            .fetch_one(db.pool())
+            .await
+            .expect("read");
+        assert_eq!(t, "New Title");
+
+        // Provenance row landed too — confidence-1.0 user_edit winner.
+        let prov_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM book_field_provenance \
+             WHERE book_id = ? AND field = 'title' AND source = 'user_edit' \
+               AND is_winner = 1 AND confidence = 1.0",
+        )
+        .bind(book_id)
+        .fetch_one(db.pool())
+        .await
+        .expect("count provenance");
+        assert_eq!(prov_count, 1);
+    }
+
+    #[tokio::test]
+    async fn title_skips_when_already_applied() {
+        let (_d, db) = open_db().await;
+        let book_id = seed_book_with_title(&db, "Already New").await;
+        let e = title_entry(
+            1,
+            book_id,
+            json!({ "current": "Old Title", "intent": "Already New" }),
+        );
+        let decision = TitleReplayer
+            .try_replay(db.pool(), &e)
+            .await
+            .expect("try_replay");
+        match decision {
+            ReplayDecision::Skipped(r) => {
+                assert!(r.contains("already applied"), "reason: {r}");
+            }
+            ReplayDecision::Retried(_) => panic!("expected Skipped"),
+        }
+    }
+
+    #[tokio::test]
+    async fn title_skips_on_drift() {
+        let (_d, db) = open_db().await;
+        let book_id = seed_book_with_title(&db, "Drifted Title").await;
+        let e = title_entry(
+            1,
+            book_id,
+            json!({ "current": "Old Title", "intent": "New Title" }),
+        );
+        let decision = TitleReplayer
+            .try_replay(db.pool(), &e)
+            .await
+            .expect("try_replay");
+        match decision {
+            ReplayDecision::Skipped(r) => {
+                assert!(r.contains("drift detected"), "reason: {r}");
+            }
+            ReplayDecision::Retried(_) => panic!("expected Skipped"),
+        }
+    }
+
+    #[tokio::test]
+    async fn title_skips_when_book_deleted() {
+        let (_d, db) = open_db().await;
+        let e = title_entry(
+            1,
+            9999,
+            json!({ "current": "Old Title", "intent": "New Title" }),
+        );
+        let decision = TitleReplayer
+            .try_replay(db.pool(), &e)
+            .await
+            .expect("try_replay");
+        match decision {
+            ReplayDecision::Skipped(r) => {
+                assert!(r.contains("no longer exists"), "reason: {r}");
+            }
+            ReplayDecision::Retried(_) => panic!("expected Skipped"),
+        }
+    }
+
+    #[tokio::test]
+    async fn title_skips_on_malformed_intent() {
+        let (_d, db) = open_db().await;
+        let book_id = seed_book_with_title(&db, "Old Title").await;
+        let e = title_entry(1, book_id, json!({ "current": "Old Title", "intent": 42 }));
+        let decision = TitleReplayer
+            .try_replay(db.pool(), &e)
+            .await
+            .expect("try_replay");
+        match decision {
+            ReplayDecision::Skipped(r) => {
+                assert!(r.contains("intent"), "reason: {r}");
+            }
+            ReplayDecision::Retried(_) => panic!("expected Skipped"),
         }
     }
 }
