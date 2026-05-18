@@ -55,6 +55,15 @@ pub struct OperationJournalQuery {
     pub progress: Option<String>,
     /// Filter to one batch id.
     pub batch_id: Option<String>,
+    /// Filter to entries against one target kind (e.g. `book`,
+    /// `author`, `narrator`). Combine with `target_id` to scope
+    /// to a single row — the natural "what happened to this
+    /// entity?" query.
+    pub target_kind: Option<String>,
+    /// Filter to entries against one target id. Typically paired
+    /// with `target_kind` (an unqualified id alone is rarely
+    /// meaningful, but the filter is honoured independently).
+    pub target_id: Option<i64>,
     /// 1..=200, defaults to 50; clamped per [`crate::pagination`].
     pub limit: Option<i64>,
     /// 0-based offset, clamped to >= 0.
@@ -117,12 +126,16 @@ pub async fn operation_journal_list(
 
     let total: i64 = sqlx::query_scalar!(
         r#"SELECT COUNT(*) AS "count!: i64" FROM operation_journal
-            WHERE (?1 IS NULL OR op_kind   = ?1)
-              AND (?2 IS NULL OR progress  = ?2)
-              AND (?3 IS NULL OR batch_id  = ?3)"#,
+            WHERE (?1 IS NULL OR op_kind     = ?1)
+              AND (?2 IS NULL OR progress    = ?2)
+              AND (?3 IS NULL OR batch_id    = ?3)
+              AND (?4 IS NULL OR target_kind = ?4)
+              AND (?5 IS NULL OR target_id   = ?5)"#,
         query.op_kind,
         query.progress,
         query.batch_id,
+        query.target_kind,
+        query.target_id,
     )
     .fetch_one(state.inner.library.pool())
     .await
@@ -145,14 +158,18 @@ pub async fn operation_journal_list(
                   pre_state_json  AS "pre_state_json!: String",
                   post_state_json AS "post_state_json?: String"
              FROM operation_journal
-            WHERE (?1 IS NULL OR op_kind   = ?1)
-              AND (?2 IS NULL OR progress  = ?2)
-              AND (?3 IS NULL OR batch_id  = ?3)
+            WHERE (?1 IS NULL OR op_kind     = ?1)
+              AND (?2 IS NULL OR progress    = ?2)
+              AND (?3 IS NULL OR batch_id    = ?3)
+              AND (?4 IS NULL OR target_kind = ?4)
+              AND (?5 IS NULL OR target_id   = ?5)
             ORDER BY created_at DESC, op_id DESC
-            LIMIT ?4 OFFSET ?5"#,
+            LIMIT ?6 OFFSET ?7"#,
         query.op_kind,
         query.progress,
         query.batch_id,
+        query.target_kind,
+        query.target_id,
         limit,
         offset,
     )
@@ -419,7 +436,7 @@ mod tests {
         assert!(json.contains("\"failed_reason\":null"));
     }
 
-    mod get_handler {
+    mod handler_fixture {
         use super::*;
         use ab_core::tunables::{DbTunables, SchedulerTunables, SecurityTunables};
         use ab_db::{EphemeralDb, LibraryDb};
@@ -429,7 +446,7 @@ mod tests {
         use tempfile::TempDir;
         use tokio_util::sync::CancellationToken;
 
-        async fn fresh_state() -> (ApiState, TempDir) {
+        pub(super) async fn fresh_state() -> (ApiState, TempDir) {
             let tmp = TempDir::new().expect("tmpdir");
             let library = LibraryDb::open(&tmp.path().join("library.db"), &DbTunables::default())
                 .await
@@ -466,25 +483,44 @@ mod tests {
             (state, tmp)
         }
 
-        async fn seed_done_row(state: &ApiState, op_kind: &str, target_id: i64) -> i64 {
+        pub(super) async fn seed_done_row_book(
+            state: &ApiState,
+            op_kind: &str,
+            target_id: i64,
+        ) -> i64 {
+            seed_done_row(state, op_kind, "book", target_id).await
+        }
+
+        pub(super) async fn seed_done_row(
+            state: &ApiState,
+            op_kind: &str,
+            target_kind: &str,
+            target_id: i64,
+        ) -> i64 {
             sqlx::query_scalar!(
                 r#"INSERT INTO operation_journal
                        (op_kind, target_kind, target_id, pre_state_json,
                         post_state_json, progress, reversible)
-                   VALUES (?, 'book', ?, '{"a":1}', '{"a":2}', 'done', 1)
+                   VALUES (?, ?, ?, '{"a":1}', '{"a":2}', 'done', 1)
                    RETURNING op_id AS "op_id!: i64""#,
                 op_kind,
+                target_kind,
                 target_id,
             )
             .fetch_one(state.inner.library.pool())
             .await
             .expect("seed journal row")
         }
+    }
+
+    mod get_handler {
+        use super::handler_fixture::{fresh_state, seed_done_row_book};
+        use super::*;
 
         #[tokio::test]
         async fn returns_row_when_present() {
             let (state, _tmp) = fresh_state().await;
-            let op_id = seed_done_row(&state, "tag-write-final", 42).await;
+            let op_id = seed_done_row_book(&state, "tag-write-final", 42).await;
             let Json(row) = operation_journal_get(State(state), Path(op_id))
                 .await
                 .expect("handler ok");
@@ -514,15 +550,79 @@ mod tests {
         #[tokio::test]
         async fn picks_correct_row_among_many() {
             let (state, _tmp) = fresh_state().await;
-            let _a = seed_done_row(&state, "kind-a", 1).await;
-            let b = seed_done_row(&state, "kind-b", 2).await;
-            let _c = seed_done_row(&state, "kind-c", 3).await;
+            let _a = seed_done_row_book(&state, "kind-a", 1).await;
+            let b = seed_done_row_book(&state, "kind-b", 2).await;
+            let _c = seed_done_row_book(&state, "kind-c", 3).await;
             let Json(row) = operation_journal_get(State(state), Path(b))
                 .await
                 .expect("handler ok");
             assert_eq!(row.op_id, b);
             assert_eq!(row.op_kind, "kind-b");
             assert_eq!(row.target_id, 2);
+        }
+    }
+
+    mod list_handler {
+        use super::handler_fixture::{fresh_state, seed_done_row};
+        use super::*;
+
+        #[tokio::test]
+        async fn target_kind_filter_scopes_to_matching_kind() {
+            let (state, _tmp) = fresh_state().await;
+            let _b1 = seed_done_row(&state, "book-status-set", "book", 1).await;
+            let _b2 = seed_done_row(&state, "book-status-set", "book", 2).await;
+            let _a1 = seed_done_row(&state, "author-rename", "author", 7).await;
+            let Json(response) = operation_journal_list(
+                State(state),
+                Query(OperationJournalQuery {
+                    target_kind: Some("book".into()),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .expect("list ok");
+            assert_eq!(response.total, 2);
+            assert_eq!(response.rows.len(), 2);
+            assert!(response.rows.iter().all(|r| r.target_kind == "book"));
+        }
+
+        #[tokio::test]
+        async fn target_kind_plus_target_id_scopes_to_one_entity() {
+            let (state, _tmp) = fresh_state().await;
+            let _b1 = seed_done_row(&state, "book-status-set", "book", 1).await;
+            let _b2 = seed_done_row(&state, "book-rating-set", "book", 1).await;
+            let _b3 = seed_done_row(&state, "book-status-set", "book", 2).await;
+            let Json(response) = operation_journal_list(
+                State(state),
+                Query(OperationJournalQuery {
+                    target_kind: Some("book".into()),
+                    target_id: Some(1),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .expect("list ok");
+            assert_eq!(response.total, 2);
+            assert_eq!(response.rows.len(), 2);
+            assert!(response.rows.iter().all(|r| r.target_id == 1));
+        }
+
+        #[tokio::test]
+        async fn empty_when_no_targets_match() {
+            let (state, _tmp) = fresh_state().await;
+            let _b1 = seed_done_row(&state, "book-status-set", "book", 1).await;
+            let Json(response) = operation_journal_list(
+                State(state),
+                Query(OperationJournalQuery {
+                    target_kind: Some("book".into()),
+                    target_id: Some(999),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .expect("list ok");
+            assert_eq!(response.total, 0);
+            assert!(response.rows.is_empty());
         }
     }
 }
