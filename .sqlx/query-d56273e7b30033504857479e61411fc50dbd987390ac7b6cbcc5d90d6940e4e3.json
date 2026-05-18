@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"n!: i64\"\n                 FROM (\n                     SELECT book_id, field\n                       FROM book_field_provenance\n                      WHERE is_winner = 1\n                      GROUP BY book_id, field\n                     HAVING COUNT(*) > 1\n                 )",
+  "describe": {
+    "columns": [
+      {
+        "name": "n!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d56273e7b30033504857479e61411fc50dbd987390ac7b6cbcc5d90d6940e4e3"
+}
