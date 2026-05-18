@@ -30,7 +30,19 @@ use nix::sys::statvfs::statvfs;
 /// gracefully falls back to the baseline age.
 pub(crate) fn disk_free_for(path: &Path) -> Arc<dyn Fn() -> (u64, u64) + Send + Sync> {
     let path: PathBuf = path.to_path_buf();
-    Arc::new(move || match statvfs(&path) {
+    Arc::new(move || statvfs_call(&path))
+}
+
+/// Same shim as [`disk_free_for`] but path-parameterised — used by
+/// `ab_api::doctor::DiskPressureCheck` to stat each `library_roots`
+/// row at check time. Closes over no path; the caller passes one
+/// at each invocation.
+pub(crate) fn disk_free_any() -> ab_api::doctor::DiskFreeFn {
+    Arc::new(statvfs_call)
+}
+
+fn statvfs_call(path: &Path) -> (u64, u64) {
+    match statvfs(path) {
         Ok(stat) => {
             // `blocks_available` is the non-superuser free count;
             // `blocks` is the total. Multiply by `fragment_size` for
@@ -58,7 +70,7 @@ pub(crate) fn disk_free_for(path: &Path) -> Arc<dyn Fn() -> (u64, u64) + Send + 
             );
             (u64::MAX, u64::MAX)
         }
-    })
+    }
 }
 
 #[cfg(test)]
