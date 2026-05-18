@@ -357,8 +357,41 @@ enum LibraryAction {
 
 #[derive(Debug, Subcommand)]
 enum BookAction {
-    /// List books.
-    List,
+    /// List books matching the filter set, ordered per the
+    /// daemon's `GET /books`. All filter flags pass through to the
+    /// matching query-string parameters; omit a flag to leave its
+    /// filter open. With no flags supplied, the call is equivalent
+    /// to the previous fixed `aborg book list` behaviour (first
+    /// 100 active books).
+    ///
+    /// Pairs with the API surface for the natural operator
+    /// workflow: `aborg book list --q "Mistborn"` to find a
+    /// `book_id`, then call any endpoint that targets a book
+    /// (`aborg book show`, `aborg book retry`, the PATCH endpoints
+    /// over curl, etc.).
+    List {
+        /// Substring filter on title (case-insensitive).
+        #[arg(long, short)]
+        q: Option<String>,
+        /// Substring filter on the displayed author name (prime
+        /// alias, consistent with the daemon's list view).
+        #[arg(long)]
+        author: Option<String>,
+        /// Substring filter on the displayed primary-series name.
+        #[arg(long)]
+        series: Option<String>,
+        /// Page size — passed verbatim to the API's `limit` param;
+        /// the daemon caps internally.
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+        /// 0-based page offset.
+        #[arg(long, default_value_t = 0)]
+        offset: u32,
+        /// Include soft-deleted books (those with
+        /// `books.deleted_at IS NOT NULL`). Default `false`.
+        #[arg(long)]
+        include_deleted: bool,
+    },
     /// Show details of one book — core row, files, per-stage
     /// progress, audiologo status, chapter coverage. Diagnostic
     /// surface for "why didn't this book extract X?" questions.
@@ -546,7 +579,28 @@ async fn main() -> Result<()> {
             }
         },
         Command::Book { action } => match action {
-            BookAction::List => books_list(&cli.daemon, cli.output).await?,
+            BookAction::List {
+                q,
+                author,
+                series,
+                limit,
+                offset,
+                include_deleted,
+            } => {
+                books_list(
+                    &cli.daemon,
+                    BooksListFilters {
+                        q,
+                        author,
+                        series,
+                        limit,
+                        offset,
+                        include_deleted,
+                    },
+                    cli.output,
+                )
+                .await?;
+            }
             BookAction::Show { id } => book_show(&cli.daemon, id, cli.output).await?,
             BookAction::Retry { book_id, stage } => {
                 book_retry(&cli.daemon, book_id, &stage, cli.output).await?;
@@ -1495,13 +1549,40 @@ async fn book_restore(
     Ok(())
 }
 
-async fn books_list(daemon: &str, output: OutputFormat) -> Result<()> {
-    let url = format!("{daemon}/api/v1/books");
-    let resp = client()
-        .get(&url)
-        .send()
-        .await
-        .with_context(|| format!("GET {url}"))?;
+/// CLI-side bundle of the filter set for `GET /books`.
+///
+/// Grouped into a struct so [`books_list`] doesn't take seven
+/// positional args and so clippy doesn't trip on
+/// `too_many_arguments`.
+struct BooksListFilters {
+    q: Option<String>,
+    author: Option<String>,
+    series: Option<String>,
+    limit: u32,
+    offset: u32,
+    include_deleted: bool,
+}
+
+async fn books_list(daemon: &str, filters: BooksListFilters, output: OutputFormat) -> Result<()> {
+    let mut req = client().get(format!("{daemon}/api/v1/books"));
+    let mut query: Vec<(&str, String)> = Vec::with_capacity(6);
+    if let Some(q) = filters.q.as_ref() {
+        query.push(("q", q.clone()));
+    }
+    if let Some(a) = filters.author.as_ref() {
+        query.push(("author", a.clone()));
+    }
+    if let Some(s) = filters.series.as_ref() {
+        query.push(("series", s.clone()));
+    }
+    query.push(("limit", filters.limit.to_string()));
+    query.push(("offset", filters.offset.to_string()));
+    if filters.include_deleted {
+        query.push(("include_deleted", "true".to_owned()));
+    }
+    req = req.query(&query);
+
+    let resp = req.send().await.context("GET /books")?;
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
