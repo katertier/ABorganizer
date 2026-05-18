@@ -126,6 +126,15 @@ enum Command {
     },
     /// Show daemon health.
     Health,
+    /// Print local CLI version and the running daemon's version
+    /// side-by-side. Useful diagnostic when the operator just
+    /// upgraded the CLI binary but the daemon is still running an
+    /// older release — version drift between the two surfaces
+    /// breaks subtle assumptions about which features the daemon
+    /// supports. `--version` (clap auto-generated) still prints
+    /// only the local CLI's compile-time semver; this subcommand
+    /// is the one that crosses the wire.
+    Version,
     /// Audible AAX inspector (read-only).
     ///
     /// AAX files are MP4 containers with encrypted audio samples
@@ -682,6 +691,7 @@ async fn main() -> Result<()> {
             clean(&cli.daemon, &category, commit, force, cli.output).await?;
         }
         Command::Health => health(&cli.daemon, cli.output).await?,
+        Command::Version => version_cmd(&cli.daemon, cli.output).await?,
         Command::Aax { action } => match action {
             AaxAction::Info { path } => aax_info(&path, cli.output)?,
             AaxAction::SetBytes => aax_set_bytes(cli.output)?,
@@ -1584,6 +1594,70 @@ async fn library_duplicates(daemon: &str, output: OutputFormat) -> Result<()> {
                     );
                 }
                 tracing::info!(group_count = body.groups.len(), "total groups");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Deserialize, Debug, Serialize)]
+struct DaemonVersionResponse {
+    name: String,
+    version: String,
+    description: String,
+}
+
+/// Combined local + remote version readout. Both fields land in the
+/// JSON branch; the human branch tags drift inline ("⚠ version
+/// mismatch") so the operator sees the issue without parsing two
+/// numbers.
+#[derive(Serialize)]
+struct VersionPair {
+    cli_version: &'static str,
+    daemon: DaemonVersionResponse,
+}
+
+async fn version_cmd(daemon: &str, output: OutputFormat) -> Result<()> {
+    let url = format!("{daemon}/api/v1/version");
+    let resp = client()
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        anyhow::bail!("version fetch failed: HTTP {status}");
+    }
+    let body: DaemonVersionResponse = resp.json().await.context("parse version response")?;
+    let cli_version: &'static str = ab_core::build_info::VERSION;
+    let drift = cli_version != body.version;
+    match output {
+        OutputFormat::Json => {
+            let pair = VersionPair {
+                cli_version,
+                daemon: body,
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&pair).unwrap_or_default()
+            );
+        }
+        OutputFormat::Human => {
+            if drift {
+                tracing::warn!(
+                    cli = %cli_version,
+                    daemon_app = %body.name,
+                    daemon_version = %body.version,
+                    "⚠ version drift: CLI {cli_version} vs daemon {dv}",
+                    dv = body.version,
+                );
+            } else {
+                tracing::info!(
+                    cli = %cli_version,
+                    daemon_app = %body.name,
+                    daemon_version = %body.version,
+                    "CLI and daemon both at {cli_version}",
+                );
             }
         }
     }
