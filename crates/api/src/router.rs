@@ -79,6 +79,14 @@ pub fn build_router(state: ApiState) -> Router {
             get(crate::books_transcript::books_transcript_get),
         )
         .route(
+            "/books/{book_id}/chapters.srt",
+            get(crate::books_chapters_subtitles::books_chapters_srt),
+        )
+        .route(
+            "/books/{book_id}/chapters.vtt",
+            get(crate::books_chapters_subtitles::books_chapters_vtt),
+        )
+        .route(
             "/books/{book_id}/collections",
             get(crate::collections::books_collections),
         )
