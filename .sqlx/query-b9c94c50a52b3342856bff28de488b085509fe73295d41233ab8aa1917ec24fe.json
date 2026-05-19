@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT idx      AS \"idx!: i64\",\n                  title    AS \"title!: String\",\n                  start_ms AS \"start_ms!: i64\",\n                  end_ms   AS \"end_ms!: i64\"\n             FROM chapters\n            WHERE book_id = ? AND is_winner = 1\n            ORDER BY idx",
+  "describe": {
+    "columns": [
+      {
+        "name": "idx!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "title!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "start_ms!: i64",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "end_ms!: i64",
+        "ordinal": 3,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "b9c94c50a52b3342856bff28de488b085509fe73295d41233ab8aa1917ec24fe"
+}

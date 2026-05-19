@@ -76,6 +76,13 @@ pub enum CacheKey {
     /// present and fall back to `transcript_corrected` /
     /// `transcript_full` otherwise.
     TranscriptFmPolished,
+    /// Chapter-aligned marks over the polished transcript
+    /// (ADR-0057 S57.2). Stage `transcript-chapter-marks` reads
+    /// winner chapters from the `chapters` table + the polished
+    /// transcript and emits `{chapters: [{idx, title, start_ms,
+    /// end_ms, start_char, end_char}]}`. Consumed downstream by
+    /// SRT / VTT export (S57.3) + EPUB generation (S57.4).
+    TranscriptChapterMarks,
 }
 
 impl CacheKey {
@@ -96,6 +103,7 @@ impl CacheKey {
             Self::Setting => "setting",
             Self::EpubNameDict => "epub_name_dict",
             Self::TranscriptFmPolished => "transcript_fm_polished",
+            Self::TranscriptChapterMarks => "transcript_chapter_marks",
         }
     }
 
@@ -119,6 +127,7 @@ impl CacheKey {
             "setting" => Some(Self::Setting),
             "epub_name_dict" => Some(Self::EpubNameDict),
             "transcript_fm_polished" => Some(Self::TranscriptFmPolished),
+            "transcript_chapter_marks" => Some(Self::TranscriptChapterMarks),
             _ => None,
         }
     }
@@ -192,7 +201,8 @@ impl std::str::FromStr for CacheKey {
 pub fn cache_keys_for_stage(stage: &str) -> Option<&'static [CacheKey]> {
     use CacheKey::{
         Characters, DnaTags, EpubNameDict, Setting, StoryArc, SummarySpoilerFree,
-        TranscriptFmPolished, TranscriptFull, TranscriptHead, TranscriptSamples, TranscriptTail,
+        TranscriptChapterMarks, TranscriptFmPolished, TranscriptFull, TranscriptHead,
+        TranscriptSamples, TranscriptTail,
     };
     // `&'static` literals so the result is cheap to return.
     const HEAD_TAIL: &[CacheKey] = &[TranscriptHead, TranscriptTail];
@@ -205,6 +215,7 @@ pub fn cache_keys_for_stage(stage: &str) -> Option<&'static [CacheKey]> {
     const SETTING: &[CacheKey] = &[Setting];
     const EPUB_NAME_DICT: &[CacheKey] = &[EpubNameDict];
     const FM_POLISHED: &[CacheKey] = &[TranscriptFmPolished];
+    const CHAPTER_MARKS: &[CacheKey] = &[TranscriptChapterMarks];
     const NONE: &[CacheKey] = &[];
 
     Some(match stage {
@@ -218,6 +229,7 @@ pub fn cache_keys_for_stage(stage: &str) -> Option<&'static [CacheKey]> {
         "extract-setting" => SETTING,
         "extract-epub-name-dict" => EPUB_NAME_DICT,
         "transcript-fm-polish" => FM_POLISHED,
+        "transcript-chapter-marks" => CHAPTER_MARKS,
         // Stages without ai_cache output. They still have
         // pipeline_progress rows the retry endpoint clears,
         // but no cache-side cleanup.
@@ -369,6 +381,7 @@ mod tests {
             CacheKey::Setting,
             CacheKey::EpubNameDict,
             CacheKey::TranscriptFmPolished,
+            CacheKey::TranscriptChapterMarks,
         ] {
             let s = key.as_str();
             assert_eq!(CacheKey::parse(s), Some(key), "round-trip {s}");
@@ -402,6 +415,7 @@ mod tests {
             CacheKey::Setting,
             CacheKey::EpubNameDict,
             CacheKey::TranscriptFmPolished,
+            CacheKey::TranscriptChapterMarks,
         ] {
             let parsed: CacheKey = key.as_str().parse().expect("from_str round trip");
             assert_eq!(parsed, key);
@@ -435,6 +449,10 @@ mod tests {
             (
                 "transcript-fm-polish",
                 &[CacheKey::TranscriptFmPolished][..],
+            ),
+            (
+                "transcript-chapter-marks",
+                &[CacheKey::TranscriptChapterMarks][..],
             ),
         ] {
             assert_eq!(
