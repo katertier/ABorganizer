@@ -50,9 +50,18 @@
 
 pub(crate) mod abridged;
 pub mod cleanup;
+pub mod collection;
+pub mod collection_stage;
 pub mod stage;
 pub mod winners;
 pub mod write;
+
+/// iTunes reverse-DNS namespace for freeform MP4 atoms. Shared by
+/// every format-specific writer that needs to land an iTunes
+/// custom atom — single source of truth so capitalization can't
+/// drift across writers (`com.apple.iTunes` vs `Com.Apple.Itunes`
+/// would each create distinct on-disk atoms).
+pub(crate) const ITUNES_MEAN: &str = "com.apple.iTunes";
 
 pub use cleanup::MassEditHistoryRetentionTarget;
 // Cover surface lives in `ab-covers` (ADR-0030 / slice B.15).
@@ -92,6 +101,7 @@ pub fn skip_for_final_pass(winner_source: &str) -> bool {
     winner_source == USER_EDIT_SOURCE
 }
 
+pub use collection_stage::{WRITE_TAGS_COLLECTION_STAGE_ID, WriteTagsCollectionStage};
 pub use stage::{
     TAG_WRITE_EARLY_STAGE_ID, TAG_WRITE_FINAL_STAGE_ID, TagWriteEarlyStage, TagWriteFinalStage,
 };

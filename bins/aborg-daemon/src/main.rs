@@ -64,6 +64,10 @@ struct Args {
 /// `iter_topo()`. Actual run-time ordering is enforced by each
 /// stage's `requires()` declaration; the order here is just for
 /// human readability when reading the boot log.
+#[allow(
+    clippy::too_many_lines,
+    reason = "linear pipeline registration: one stage per ~3-line block plus an inline comment. Splitting into per-stage helpers obscures the order which is the function's whole point. Threshold cap is 100; we sit at ~110 after slot 3."
+)]
 fn build_pipeline_stages(tunables: &Tunables) -> Vec<Arc<dyn Stage>> {
     let audnexus_client = ab_catalog::AudnexusClient::new(&tunables.http_client);
     let audible_client = ab_catalog::AudibleClient::new(&tunables.http_client);
@@ -322,6 +326,14 @@ fn build_pipeline_stages(tunables: &Tunables) -> Vec<Arc<dyn Stage>> {
     } else {
         info!("daemon.pipeline.tag_write_final_disabled");
     }
+
+    // `write-tags-collection` — always-on. Cheap probe + no-op
+    // skip when the book has no `book_collection_members` row, so
+    // there's no per-pass cost for the dominant case (a typical
+    // library has only a small fraction of books in collections).
+    // No cover/HTTP plumbing required; writes a `TXXX` /
+    // freeform-atom pair only.
+    stages.push(Arc::new(ab_tag_write::WriteTagsCollectionStage::new()));
 
     stages
 }
