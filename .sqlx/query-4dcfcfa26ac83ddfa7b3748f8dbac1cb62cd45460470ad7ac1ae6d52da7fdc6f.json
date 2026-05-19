@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO book_collections (name, kind)\n           VALUES (?, 'box_set')\n           RETURNING collection_id AS \"collection_id!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "collection_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "4dcfcfa26ac83ddfa7b3748f8dbac1cb62cd45460470ad7ac1ae6d52da7fdc6f"
+}
