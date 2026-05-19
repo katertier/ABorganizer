@@ -50,6 +50,7 @@ pub mod dna_stage;
 pub mod series_summary_stage;
 pub mod setting_stage;
 pub mod summary_stage;
+pub mod transcript_fm_polish_stage;
 
 pub use arc_stage::{
     ARC_SCHEMA_JSON, ArcBeat, ExtractStoryArcStage, STAGE_NAME as EXTRACT_STORY_ARC_STAGE,
@@ -74,4 +75,7 @@ pub use setting_stage::{
 pub use summary_stage::{
     ExtractSummaryStage, STAGE_NAME as EXTRACT_SUMMARY_STAGE, SUMMARY_SCHEMA_JSON,
     build_prompt as build_summary_prompt,
+};
+pub use transcript_fm_polish_stage::{
+    STAGE_NAME as TRANSCRIPT_FM_POLISH_STAGE, TranscriptFmPolishStage,
 };

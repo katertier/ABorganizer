@@ -182,6 +182,15 @@ fn build_pipeline_stages(tunables: &Tunables) -> Vec<Arc<dyn Stage>> {
         // policy — library_locale is reserved for genre
         // vocabulary).
         Arc::new(ab_llm_extractors::ExtractSummaryStage::new(&tunables.llm)),
+        // `transcript-fm-polish` (ADR-0057 S57.1a scaffold) —
+        // Apple-FM transcript polish. This scaffold lands every
+        // skip-condition branch; the FM call itself wires in
+        // S57.1b. Daemon-wired so operators can see the stage in
+        // the doctor + retry surfaces even while it returns Skipped
+        // on the would-call-FM branch.
+        Arc::new(ab_llm_extractors::TranscriptFmPolishStage::new(
+            &tunables.llm,
+        )),
         // `extract-story-arc` (slice 3K.5) — Apple-Intelligence
         // pass producing a 5-7 beat narrative arc into
         // `books.story_arc_json`. Depends on transcribe-full
