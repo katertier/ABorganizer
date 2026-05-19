@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE book_collections SET kind = ? WHERE collection_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "356bfd762d028e8e5020de31c52aae3ca6e78884549240c1787c0331209c66eb"
+}

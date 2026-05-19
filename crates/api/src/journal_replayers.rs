@@ -590,6 +590,92 @@ impl Replayer for CollectionCreateReplayer {
     }
 }
 
+/// Re-applies `PATCH /collections/{id}` rename mutations after a
+/// crash or operator-triggered retry.
+///
+/// Mirrors [`TitleReplayer`]: reads `pre_state.intent` (target
+/// name) + `pre_state.current` (recorded prior name); skips on
+/// drift, no-op on already-applied, otherwise `UPDATE
+/// book_collections SET name = intent`. Target row deletion is
+/// treated as drift, not auto-resurrection (the
+/// `CollectionCreateReplayer` handles re-creation for the create
+/// `op_kind`; rename is reversible-edit-only).
+pub struct CollectionRenameReplayer;
+
+#[async_trait]
+impl Replayer for CollectionRenameReplayer {
+    fn op_kind(&self) -> &'static str {
+        crate::collections::OP_KIND_COLLECTION_NAME_SET
+    }
+
+    async fn try_replay(
+        &self,
+        pool: &SqlitePool,
+        entry: &JournalEntry,
+    ) -> Result<ReplayDecision, JournalError> {
+        let collection_id = entry.target.id;
+        let pre = &entry.pre_state;
+        let Some(intent) = pre.get("intent").and_then(Value::as_str) else {
+            return Ok(ReplayDecision::Skipped(
+                "pre_state missing 'intent' field".to_owned(),
+            ));
+        };
+        let Some(recorded_current) = pre.get("current").and_then(Value::as_str) else {
+            return Ok(ReplayDecision::Skipped(
+                "pre_state missing 'current' field".to_owned(),
+            ));
+        };
+
+        let current: Option<String> = sqlx::query_scalar!(
+            r#"SELECT name AS "name!: String" FROM book_collections WHERE collection_id = ?"#,
+            collection_id,
+        )
+        .fetch_optional(pool)
+        .await?;
+        let Some(current) = current else {
+            return Ok(ReplayDecision::Skipped(format!(
+                "collection {collection_id} no longer exists"
+            )));
+        };
+        if current == intent {
+            return Ok(ReplayDecision::Skipped(format!(
+                "already applied — name is already {intent:?}"
+            )));
+        }
+        if current != recorded_current {
+            return Ok(ReplayDecision::Skipped(format!(
+                "drift detected — current name is {current:?}, \
+                 expected {recorded_current:?} (someone else changed it)"
+            )));
+        }
+        // Bail on name collisions — re-running UPDATE would trip
+        // the UNIQUE constraint and surface as a hard failure.
+        let collision = sqlx::query_scalar!(
+            r#"SELECT collection_id AS "id!: i64"
+                 FROM book_collections WHERE name = ? AND collection_id != ?"#,
+            intent,
+            collection_id,
+        )
+        .fetch_optional(pool)
+        .await?;
+        if let Some(other_id) = collision {
+            return Ok(ReplayDecision::Skipped(format!(
+                "name collision — {intent:?} now belongs to collection {other_id}"
+            )));
+        }
+
+        sqlx::query!(
+            "UPDATE book_collections SET name = ?, updated_at = strftime('%s','now') \
+             WHERE collection_id = ?",
+            intent,
+            collection_id,
+        )
+        .execute(pool)
+        .await?;
+        Ok(ReplayDecision::Retried(json!({ "name": intent })))
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
