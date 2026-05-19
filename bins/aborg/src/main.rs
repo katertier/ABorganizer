@@ -199,6 +199,31 @@ enum JournalAction {
         /// The `op_id` from the journal (use `list` to find one).
         op_id: i64,
     },
+    /// Re-fire one pending journal row through its registered
+    /// `Replayer`. Operator-triggered analog of the daemon's
+    /// startup recovery sweep. Wraps `POST /operation_journal/
+    /// {op_id}/retry` (ADR-0039).
+    ///
+    /// Prompts for confirmation by default — the underlying op may
+    /// have side effects (DB mutation, on-disk write). `--yes`
+    /// suppresses the prompt for scripted use (`for op_id in
+    /// $(...); do aborg journal retry $op_id --yes; done`).
+    ///
+    /// Exit codes mirror the API outcomes:
+    /// - `0` on `retried` or `skipped` (the row's terminal state
+    ///   was updated either way; "skipped" means the Replayer
+    ///   declined for documented reasons).
+    /// - non-zero on `404` (no row, or no Replayer for that
+    ///   `op_kind`) and `409` (row is already in a terminal
+    ///   `progress`).
+    Retry {
+        /// The `op_id` from the journal (use `list` to find one).
+        op_id: i64,
+        /// Skip the "are you sure?" prompt — required for any
+        /// non-interactive invocation (script, cron, `xargs`).
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -830,6 +855,9 @@ async fn main() -> Result<()> {
             }
             JournalAction::Show { op_id } => {
                 journal_show(&cli.daemon, op_id, cli.output).await?;
+            }
+            JournalAction::Retry { op_id, yes } => {
+                journal_retry(&cli.daemon, op_id, yes, cli.output).await?;
             }
         },
     }
@@ -2937,6 +2965,75 @@ async fn journal_show(daemon: &str, op_id: i64, output: OutputFormat) -> Result<
             if let Some(post) = body.post_state_json.as_deref() {
                 println!("post_state: {post}");
             }
+        }
+    }
+    Ok(())
+}
+
+/// JSON-mirror of `ab_api::operation_journal::OperationJournalRetryResponse`.
+#[derive(Debug, Deserialize, Serialize)]
+struct JournalRetryResp {
+    op_id: i64,
+    op_kind: String,
+    outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+async fn journal_retry(daemon: &str, op_id: i64, yes: bool, output: OutputFormat) -> Result<()> {
+    if !yes {
+        // Confirmation prompt. Mutating op; the Replayer may write
+        // to disk / DB. `--yes` bypasses for scripted callers.
+        use std::io::{BufRead, Write};
+        let stdout = std::io::stdout();
+        let mut h = stdout.lock();
+        write!(h, "Retry op_id {op_id}? [y/N] ").context("write prompt")?;
+        h.flush().context("flush prompt")?;
+        let stdin = std::io::stdin();
+        let mut line = String::new();
+        stdin
+            .lock()
+            .read_line(&mut line)
+            .context("read confirmation")?;
+        let trimmed = line.trim();
+        if !matches!(trimmed, "y" | "Y" | "yes" | "YES") {
+            anyhow::bail!("aborted by operator");
+        }
+    }
+
+    let url = format!("{daemon}/api/v1/operation_journal/{op_id}/retry");
+    let resp = client()
+        .post(&url)
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    let status = resp.status();
+    if status.as_u16() == 404 {
+        anyhow::bail!("op_id {op_id} not found, or no Replayer registered for that op_kind");
+    }
+    if status.as_u16() == 409 {
+        anyhow::bail!(
+            "op_id {op_id} is already in a terminal progress state (idempotent against re-fire)"
+        );
+    }
+    if !status.is_success() {
+        anyhow::bail!("journal retry failed: HTTP {status}");
+    }
+    let body: JournalRetryResp = resp.json().await.context("parse retry response")?;
+
+    match output {
+        OutputFormat::Json => {
+            let s = serde_json::to_string_pretty(&body).context("encode")?;
+            println!("{s}");
+        }
+        OutputFormat::Human => {
+            tracing::info!(
+                op_id = body.op_id,
+                op_kind = %body.op_kind,
+                outcome = %body.outcome,
+                reason = body.reason.as_deref().unwrap_or("-"),
+                "journal.retry.done",
+            );
         }
     }
     Ok(())
