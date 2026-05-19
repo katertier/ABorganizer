@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT chapter_id AS \"chapter_id!: i64\",\n                  title      AS \"title?: String\",\n                  source     AS \"source!: String\"\n             FROM chapters\n            WHERE book_id = ? AND is_winner = 1\n            ORDER BY idx",
+  "describe": {
+    "columns": [
+      {
+        "name": "chapter_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "title?: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "source!: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "cbacb95d2d730395f3fd3eb9a3cb92c909b681bba5fb7bf6cc1e3d66879cd607"
+}
