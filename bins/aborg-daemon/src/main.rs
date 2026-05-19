@@ -121,6 +121,11 @@ fn build_pipeline_stages(tunables: &Tunables) -> Vec<Arc<dyn Stage>> {
         // `pick-chapter-winner` flips `is_winner` so exactly one
         // chapter source per book is surfaced to the player.
         Arc::new(ab_catalog::ChapterWinnerStage::new()),
+        // `enrich-chapter-titles-from-epub` propagates EPUB nav-doc
+        // titles onto the winner rows when the winner carries
+        // placeholder titles (`Chapter 1`, numeric-only, NULL) and
+        // the EPUB chapter count matches.
+        Arc::new(ab_catalog::EpubTitleFallbackStage::new()),
         // `transcribe-head-tail` (slice 3A.4) runs the on-device
         // Speech engine over the first 6 min + last 30 s of the
         // book, stores both transcripts in `ai_cache` keyed by

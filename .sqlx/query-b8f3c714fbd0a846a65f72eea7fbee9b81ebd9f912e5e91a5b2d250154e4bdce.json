@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT title AS \"title?: String\"\n             FROM chapters\n            WHERE book_id = ? AND source = 'epub'\n            ORDER BY idx",
+  "describe": {
+    "columns": [
+      {
+        "name": "title?: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b8f3c714fbd0a846a65f72eea7fbee9b81ebd9f912e5e91a5b2d250154e4bdce"
+}
