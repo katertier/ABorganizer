@@ -105,7 +105,7 @@ pub fn build_router(state: ApiState) -> Router {
         )
         .route(
             "/collections/{collection_id}",
-            get(crate::collections::collections_get),
+            get(crate::collections::collections_get).patch(crate::collections::collections_patch),
         )
         .route(
             "/collections/{collection_id}/books",
