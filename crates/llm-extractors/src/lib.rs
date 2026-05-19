@@ -77,5 +77,6 @@ pub use summary_stage::{
     build_prompt as build_summary_prompt,
 };
 pub use transcript_fm_polish_stage::{
-    STAGE_NAME as TRANSCRIPT_FM_POLISH_STAGE, TranscriptFmPolishStage,
+    POLISH_SCHEMA_JSON, STAGE_NAME as TRANSCRIPT_FM_POLISH_STAGE, TranscriptFmPolishStage,
+    build_prompt as build_polish_prompt,
 };

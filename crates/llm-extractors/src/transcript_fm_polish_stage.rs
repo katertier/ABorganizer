@@ -1,9 +1,13 @@
-//! ADR-0057 S57.1 — `transcript-fm-polish` stage **scaffold**.
+//! ADR-0057 S57.1b — `transcript-fm-polish` stage, single-shot.
 //!
-//! Apple-FM per-book transcript polish. This slice (S57.1a) lands
-//! the pipeline-level wiring + every skip-condition branch, but
-//! returns `Skipped` on the would-call-FM path. The FM call itself
-//! lands in S57.1b; per-chapter slicing layers on in S57.1c.
+//! Apple-FM per-book transcript polish. S57.1a landed the scaffold +
+//! every skip-condition branch; this slice (S57.1b) wires the actual
+//! `complete_structured` call on the would-call-FM branch. The
+//! output is the input transcript with on-device-LLM corrections
+//! (re-casing, sentence-boundary repair, mid-sentence-noise removal)
+//! cached at `ai_cache.cache_type = 'transcript_fm_polished'`. The
+//! input is taken **whole**; per-chapter slicing for long
+//! transcripts is deferred to S57.1c.
 //!
 //! ## Source-of-truth for the input transcript
 //!
@@ -14,7 +18,7 @@
 //!    `transcribe-full`. Fallback when C.5 didn't fire (no EPUB
 //!    companion, language mismatch, or `books.abridged = true`).
 //!
-//! ## Skip conditions (every one tested)
+//! ## Skip conditions (every one tested at the unit level)
 //!
 //! * `books.abridged = 1` — the FM polish prompt assumes the
 //!   transcript reflects the full text. Abridged readings produce
@@ -25,28 +29,39 @@
 //! * Input text under [`MIN_TRANSCRIPT_BYTES`] — too short for FM
 //!   to do meaningful work; matches the sanity floors in the DNA /
 //!   summary / setting stages.
+//! * `books.language` is NULL — without it we can't tell the model
+//!   what locale to polish in. The `transcribe-head-tail` stage
+//!   seeds this column; missing language means the pipeline
+//!   isn't ready yet.
 //! * Idempotency hit: an `ai_cache` row already exists at
 //!   `cache_type = 'transcript_fm_polished'` for the current
 //!   `extractor_version`. Bump
 //!   [`LlmTunables::extractor_version`] to force a re-run
 //!   library-wide.
+//! * Locale mismatch on the FM response: the model returned a
+//!   `polished_lang` whose primary subtag doesn't match
+//!   `books.language`. The cache row still lands (so re-runs at
+//!   the same `extractor_version` are no-ops) but the result is
+//!   not exposed as a "polished" transcript.
 //!
-//! ## What this scaffold does NOT do (yet)
+//! ## What this slice still does NOT do
 //!
-//! * No FM call. Once every skip-condition branch returns
-//!   `Skipped`, the stage logs `fm.polish.fm_call_pending` at
-//!   `tracing::info` and returns `Skipped` instead of polishing.
-//!   S57.1b replaces that branch with the real call.
-//! * No per-chapter slicing — the per-chapter loop lands in S57.1c
-//!   once the single-shot path is verified.
+//! * No per-chapter slicing — long transcripts get
+//!   [`build_prompt`]'s 30k-char defensive truncation; the
+//!   per-chapter loop lands in S57.1c.
+//! * No promotion to a `books.transcript_polished` column. The
+//!   polished text is consumed downstream from the cache row
+//!   (matches the `epub_name_dict` posture).
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 use ab_core::tunables::LlmTunables;
 use ab_core::{BookId, CacheKey, Error, Result};
 use ab_db::LibraryDb;
+use ab_foundation_models::{BridgeError, GenerationOptions, complete_structured};
 use ab_pipeline::{Stage, StageContext, StageId, StageOutcome};
 
 /// Typed identifier for this stage.
@@ -62,6 +77,21 @@ pub const STAGE_NAME: &str = STAGE_ID.as_str();
 /// extremely-quiet recordings end up here. Same posture as the
 /// summary / DNA / setting stages' sanity floors.
 pub const MIN_TRANSCRIPT_BYTES: usize = 200;
+
+/// JSON Schema passed to `complete_structured`.
+///
+/// Constrains the model's output at decode time. Maps to a
+/// `DynamicGenerationSchema` on the Swift side and matches the
+/// [`PolishResponse`] Rust shape one-to-one so any drift surfaces
+/// as a parse failure in the schema-parity test.
+pub const POLISH_SCHEMA_JSON: &str = r#"{
+    "type": "object",
+    "properties": {
+        "polished_text": {"type": "string"},
+        "polished_lang": {"type": "string"}
+    },
+    "required": ["polished_text", "polished_lang"]
+}"#;
 
 /// Apple-FM transcript polish stage.
 ///
@@ -123,16 +153,98 @@ impl Stage for TranscriptFmPolishStage {
             return Ok(StageOutcome::Skipped);
         }
 
-        // 4. FM call deferred to S57.1b. Until then, log the
-        //    "would-have-called" signal so operators can see the
-        //    stage is wired but inert.
+        // 4. Resolve the book's language (output locale). NULL →
+        //    pipeline isn't ready; the transcribe-head-tail stage
+        //    seeds this column.
+        let Some(book_lang) = load_book_language(&ctx.library, book_id).await? else {
+            tracing::debug!(book_id = book_id.0, "fm.polish.skip_no_language");
+            return Ok(StageOutcome::Skipped);
+        };
+
+        // 5. Build prompt + call the bridge.
+        let prompt = build_prompt(&transcript, &book_lang);
+        let opts = GenerationOptions::new(self.tunables.polish_max_tokens);
+        let raw = match complete_structured(&prompt, POLISH_SCHEMA_JSON, &opts).await {
+            Ok(s) => s,
+            Err(BridgeError::PromptEmpty) => return Ok(StageOutcome::Skipped),
+            Err(e) => return Err(bridge_to_stage_error(&e)),
+        };
+
+        // 6. Parse JSON.
+        let parsed: PolishResponse = match serde_json::from_str(&raw) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(
+                    book_id = book_id.0,
+                    error = %e,
+                    raw_len = raw.len(),
+                    "fm.polish.parse_failed"
+                );
+                return Err(Error::stage(STAGE_NAME, format!("model JSON parse: {e}")));
+            }
+        };
+
+        // 7. Locale self-check. The schema constrains output shape,
+        //    not semantics — the model can still emit
+        //    `polished_lang = "en"` when we asked for German.
+        //    Cache the raw response either way (so re-runs are
+        //    no-ops) but only return Done when the locale matches.
+        let polished_trimmed = parsed.polished_text.trim();
+        let locale_ok = parsed.polished_lang.eq_ignore_ascii_case(&book_lang)
+            || primary_subtag(&parsed.polished_lang) == primary_subtag(&book_lang);
+        if !locale_ok {
+            tracing::warn!(
+                book_id = book_id.0,
+                expected = %book_lang,
+                got = %parsed.polished_lang,
+                "fm.polish.locale_mismatch"
+            );
+            write_cache(
+                &ctx.library,
+                book_id,
+                &raw,
+                &book_lang,
+                &self.tunables.extractor_version,
+            )
+            .await?;
+            return Ok(StageOutcome::Skipped);
+        }
+
+        if polished_trimmed.is_empty() {
+            tracing::warn!(book_id = book_id.0, "fm.polish.empty_output");
+            return Err(Error::stage(STAGE_NAME, "model returned empty polish"));
+        }
+
+        // 8. Write the polished cache row. No `books` column gets
+        //    promoted — downstream stages read from `ai_cache`
+        //    directly (same posture as `epub_name_dict`).
+        write_cache(
+            &ctx.library,
+            book_id,
+            &raw,
+            &book_lang,
+            &self.tunables.extractor_version,
+        )
+        .await?;
+
         tracing::info!(
             book_id = book_id.0,
-            transcript_bytes = transcript.trim().len(),
-            "fm.polish.fm_call_pending"
+            lang = %book_lang,
+            input_bytes = transcript.trim().len(),
+            output_bytes = polished_trimmed.len(),
+            "fm.polish.done"
         );
-        Ok(StageOutcome::Skipped)
+        Ok(StageOutcome::Done)
     }
+}
+
+/// JSON shape produced by the LLM. `polished_lang` is a self-check
+/// — the prompt asks for the book's BCP-47 tag and the locale-
+/// mismatch path rejects bad outputs.
+#[derive(Debug, Deserialize)]
+struct PolishResponse {
+    polished_text: String,
+    polished_lang: String,
 }
 
 /// True when an `ai_cache` row exists at the current
@@ -238,6 +350,122 @@ struct CachedTranscript {
 #[derive(Debug, serde::Deserialize)]
 struct Segment {
     text: String,
+}
+
+/// Read the book's native language (BCP-47). NULL → not ready —
+/// the `transcribe-head-tail` stage seeds this column from the
+/// detected speech locale, falling back to tag metadata.
+async fn load_book_language(library: &LibraryDb, book_id: BookId) -> Result<Option<String>> {
+    let id = book_id.0;
+    let row = sqlx::query!("SELECT language FROM books WHERE book_id = ?", id)
+        .fetch_optional(library.pool())
+        .await
+        .map_err(|e| Error::Database(format!("fm_polish load lang: {e}")))?;
+    let Some(row) = row else { return Ok(None) };
+    let trimmed = row
+        .language
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    Ok(trimmed.map(str::to_owned))
+}
+
+#[derive(Debug, Serialize)]
+struct CachePayload<'a> {
+    raw: &'a str,
+}
+
+/// Write the polished cache row. `INSERT OR REPLACE` so re-runs
+/// at a bumped `extractor_version` overwrite the previous attempt;
+/// the freshness check in `fm_polish_cache_fresh` keys on the
+/// version string.
+async fn write_cache(
+    library: &LibraryDb,
+    book_id: BookId,
+    raw: &str,
+    locale: &str,
+    extractor_version: &str,
+) -> Result<()> {
+    let id = book_id.0;
+    let payload = CachePayload { raw };
+    let bytes = serde_json::to_vec(&payload)
+        .map_err(|e| Error::stage(STAGE_NAME, format!("encode cache: {e}")))?;
+    let polish_cache = CacheKey::TranscriptFmPolished.as_str();
+    sqlx::query!(
+        "INSERT OR REPLACE INTO ai_cache \
+         (book_id, cache_type, content, compressed, extractor_version, locale) \
+         VALUES (?, ?, ?, 0, ?, ?)",
+        id,
+        polish_cache,
+        bytes,
+        extractor_version,
+        locale,
+    )
+    .execute(library.pool())
+    .await
+    .map_err(|e| Error::Database(format!("fm_polish cache write: {e}")))?;
+    Ok(())
+}
+
+/// Build the prompt sent to the LLM. Public for unit-testing the
+/// content (locale instruction, no-rewrite rules, single-shot
+/// truncation).
+///
+/// `transcript` is the concatenated full-or-corrected transcript;
+/// truncated defensively at 30k chars (matches the summary stage's
+/// budget — past that the on-device model's context cost outpaces
+/// the marginal signal). Per-chapter slicing lands in S57.1c and
+/// will replace this truncation with structured chunks.
+#[must_use]
+pub fn build_prompt(transcript: &str, book_locale: &str) -> String {
+    const TRANSCRIPT_LIMIT: usize = 30_000;
+    let excerpt = if transcript.len() > TRANSCRIPT_LIMIT {
+        let mut end = TRANSCRIPT_LIMIT;
+        while end > 0 && !transcript.is_char_boundary(end) {
+            end -= 1;
+        }
+        &transcript[..end]
+    } else {
+        transcript
+    };
+    // The schema shape (`polished_text`, `polished_lang`) is conveyed
+    // to the model by complete_structured with includeSchemaInPrompt:
+    // true; we don't restate it here. What stays in the prompt:
+    // semantics the schema can't express (preserve content,
+    // re-case, fix sentence boundaries, drop mid-sentence ASR
+    // noise, do NOT rewrite content).
+    format!(
+        "You are polishing a raw speech-to-text transcript of an audiobook \
+for downstream consumption (subtitle export, EPUB generation, mid-book search).\n\
+\n\
+Rules:\n\
+1. Preserve the speaker's words and meaning. Do NOT paraphrase, summarise, \
+condense, or rewrite. The polish is mechanical: re-casing, punctuation, \
+sentence boundary repair, removal of mid-sentence ASR noise (\"uh\", \"um\", \
+\"--\" stutter markers).\n\
+2. Output language is `{book_locale}` (BCP-47). Set `polished_lang` to \
+`{book_locale}` to confirm. Do not translate.\n\
+3. Preserve named-entity casing (people, places, proper nouns) when context \
+makes them obvious; leave them lowercase otherwise — do NOT guess.\n\
+4. Do not invent dialogue tags, narrator interjections, or chapter headers \
+that aren't in the input.\n\
+5. Whitespace normalisation: collapse runs of spaces, drop spaces before \
+punctuation, preserve paragraph breaks (double-newline).\n\
+\n\
+TRANSCRIPT (locale={book_locale}):\n\
+{excerpt}"
+    )
+}
+
+/// BCP-47 primary subtag: `en-US` → `en`, `zh-Hans-CN` → `zh`.
+/// Used to permit `en` ↔ `en-US` matches in the locale self-check.
+fn primary_subtag(tag: &str) -> &str {
+    tag.split('-').next().unwrap_or(tag)
+}
+
+/// Map a bridge error into a Stage error.
+fn bridge_to_stage_error(err: &BridgeError) -> Error {
+    Error::stage(STAGE_NAME, format!("Foundation Models: {err}"))
 }
 
 #[cfg(test)]
@@ -370,29 +598,110 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn falls_back_to_transcript_full_when_corrected_blank() {
-        let tmp = TempDir::new().expect("tmp");
-        let ctx = fresh_ctx(tmp.path()).await;
-        let id = seed_book(&ctx, None).await;
-        // transcript_corrected stays NULL; only transcript_full has text.
-        seed_transcript_full(&ctx, id, &long_transcript(1000)).await;
-        // Until S57.1b lands the FM call, the would-call branch
-        // returns Skipped after logging fm.polish.fm_call_pending.
-        let outcome = stage().run(&ctx, BookId(id)).await.expect("run");
-        assert_eq!(outcome, StageOutcome::Skipped);
-    }
-
-    #[tokio::test]
-    async fn would_call_fm_returns_skipped_until_57_1b() {
+    async fn skips_when_book_language_missing() {
+        // Otherwise-eligible book — no abridged flag, fresh
+        // transcript_corrected, no prior polish cache — but no
+        // language seed. The pre-FM language check is the last
+        // skip gate; it must short-circuit before we try to call
+        // the FM bridge (which would fail catastrophically in CI).
         let tmp = TempDir::new().expect("tmp");
         let ctx = fresh_ctx(tmp.path()).await;
         let id = seed_book(&ctx, None).await;
         seed_transcript_corrected(&ctx, id, &long_transcript(1000)).await;
         let outcome = stage().run(&ctx, BookId(id)).await.expect("run");
-        assert_eq!(
-            outcome,
-            StageOutcome::Skipped,
-            "S57.1a scaffold returns Skipped on would-call-FM path; S57.1b wires the call"
+        assert_eq!(outcome, StageOutcome::Skipped);
+    }
+
+    #[tokio::test]
+    async fn load_input_transcript_prefers_corrected_over_full() {
+        let tmp = TempDir::new().expect("tmp");
+        let ctx = fresh_ctx(tmp.path()).await;
+        let id = seed_book(&ctx, None).await;
+        seed_transcript_corrected(&ctx, id, "corrected wins").await;
+        seed_transcript_full(&ctx, id, "full should be ignored").await;
+        let got = load_input_transcript(&ctx.library, BookId(id))
+            .await
+            .expect("load")
+            .expect("some");
+        assert_eq!(got, "corrected wins");
+    }
+
+    #[tokio::test]
+    async fn load_input_transcript_falls_back_to_full_when_corrected_blank() {
+        let tmp = TempDir::new().expect("tmp");
+        let ctx = fresh_ctx(tmp.path()).await;
+        let id = seed_book(&ctx, None).await;
+        // transcript_corrected stays NULL.
+        seed_transcript_full(&ctx, id, "full text").await;
+        let got = load_input_transcript(&ctx.library, BookId(id))
+            .await
+            .expect("load")
+            .expect("some");
+        assert_eq!(got, "full text");
+    }
+
+    #[test]
+    fn build_prompt_includes_locale_and_truncates() {
+        let p = build_prompt("Once upon a time…", "de");
+        assert!(p.contains("`de`"), "BCP-47 tag must appear in the prompt");
+        assert!(p.contains("locale=de"));
+        assert!(p.contains("Once upon a time"));
+        assert!(
+            p.contains("Do NOT paraphrase"),
+            "preserve-content rule must appear"
         );
+
+        let long = "x".repeat(40_000);
+        let truncated = build_prompt(&long, "en");
+        assert!(
+            truncated.len() < 32_000,
+            "prompt was {} chars (input was 40k)",
+            truncated.len()
+        );
+    }
+
+    #[test]
+    fn primary_subtag_normalises_bcp47() {
+        assert_eq!(primary_subtag("en"), "en");
+        assert_eq!(primary_subtag("en-US"), "en");
+        assert_eq!(primary_subtag("zh-Hans-CN"), "zh");
+        assert_eq!(primary_subtag(""), "");
+    }
+
+    #[test]
+    fn parse_polish_response() {
+        let json = r#"{"polished_text":"Hello.","polished_lang":"en"}"#;
+        let r: PolishResponse = serde_json::from_str(json).expect("parse");
+        assert_eq!(r.polished_text, "Hello.");
+        assert_eq!(r.polished_lang, "en");
+    }
+
+    /// Verifies [`POLISH_SCHEMA_JSON`] parses as JSON and names the
+    /// exact fields the [`PolishResponse`] deserialiser reads.
+    /// Catches drift between the schema and the Rust shape.
+    #[test]
+    fn schema_parses_and_matches_response_shape() {
+        let v: serde_json::Value = serde_json::from_str(POLISH_SCHEMA_JSON).expect("schema parses");
+        assert_eq!(v["type"], "object");
+        let props = v["properties"]
+            .as_object()
+            .expect("properties is an object");
+        for field in ["polished_text", "polished_lang"] {
+            let entry = props
+                .get(field)
+                .unwrap_or_else(|| panic!("schema missing field {field}"));
+            assert_eq!(
+                entry["type"], "string",
+                "{field} must be `type: string` in schema",
+            );
+        }
+        let required = v["required"]
+            .as_array()
+            .expect("required is an array")
+            .iter()
+            .map(|x| x.as_str().expect("required entry is string").to_owned())
+            .collect::<Vec<_>>();
+        assert!(required.contains(&"polished_text".to_owned()));
+        assert!(required.contains(&"polished_lang".to_owned()));
     }
 }
