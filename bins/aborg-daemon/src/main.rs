@@ -521,6 +521,7 @@ async fn main() -> Result<()> {
             dag.known_stage_names(),
         )),
         Arc::new(ab_api::doctor::EmptyCollectionsCheck),
+        Arc::new(ab_api::doctor::OrphanCollectionMembersCheck),
     ]);
     let api_state = ab_api::ApiState::with_replay_registry(
         library.clone(),

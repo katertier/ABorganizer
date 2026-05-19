@@ -1756,6 +1756,78 @@ impl DoctorCheck for EmptyCollectionsCheck {
     }
 }
 
+/// `orphan-collection-members` — flag member rows whose book is
+/// soft-deleted (`books.deleted_at IS NOT NULL`).
+///
+/// Hard deletes CASCADE through `book_collection_members.book_id`
+/// (migration 043's `ON DELETE CASCADE`); soft deletes set
+/// `books.deleted_at` but leave the FK intact. That's by design —
+/// the operator may un-delete; preserving membership avoids losing
+/// curation. But it does mean the collection's member-count
+/// counter (`book_count` in the API responses) over-reports vs
+/// what the user sees when they browse a collection (which filters
+/// `deleted_at IS NULL` client-side).
+pub struct OrphanCollectionMembersCheck;
+
+#[async_trait]
+impl DoctorCheck for OrphanCollectionMembersCheck {
+    fn name(&self) -> &'static str {
+        "orphan-collection-members"
+    }
+    fn description(&self) -> &'static str {
+        "book_collection_members rows whose book is soft-deleted"
+    }
+    async fn run(&self, ctx: &CheckCtx) -> CheckReport {
+        let count: i64 = match sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "n!: i64"
+                 FROM book_collection_members m
+                 JOIN books b ON b.book_id = m.book_id
+                WHERE b.deleted_at IS NOT NULL"#,
+        )
+        .fetch_one(ctx.library.pool())
+        .await
+        {
+            Ok(n) => n,
+            Err(e) => {
+                let mut r = CheckReport::fail("orphan-collection-members count failed");
+                r.details.push(CheckFinding {
+                    severity: CheckStatus::Failure,
+                    message: e.to_string(),
+                    remediation: Some(
+                        "Inspect ab-db logs; verify the library DB is reachable.".into(),
+                    ),
+                    doc_url: None,
+                });
+                return r;
+            }
+        };
+
+        if count == 0 {
+            return CheckReport::ok("no orphaned collection-member rows");
+        }
+
+        let mut r = CheckReport::warn(format!(
+            "{count} collection-member row(s) reference soft-deleted books"
+        ));
+        r.details.push(CheckFinding {
+            severity: CheckStatus::Warning,
+            message: format!(
+                "{count} member row(s) point at books with deleted_at IS NOT NULL. \
+                 `book_count` in the /collections detail and list responses \
+                 over-reports vs the books a user can actually see."
+            ),
+            remediation: Some(
+                "Either un-delete the books (clears the over-count) or purge the \
+                 orphan rows: `DELETE FROM book_collection_members WHERE book_id IN \
+                 (SELECT book_id FROM books WHERE deleted_at IS NOT NULL)`."
+                    .into(),
+            ),
+            doc_url: None,
+        });
+        r
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
@@ -2726,5 +2798,63 @@ mod tests {
         // Only the empty stub should be flagged.
         assert_eq!(report.details.len(), 1);
         assert!(report.details[0].message.contains("Stub"));
+    }
+
+    #[tokio::test]
+    async fn orphan_collection_members_ok_when_empty() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        let report = OrphanCollectionMembersCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Ok);
+    }
+
+    #[tokio::test]
+    async fn orphan_collection_members_ok_when_all_books_live() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        sqlx::query("INSERT INTO books (book_id, title) VALUES (1, 'A')")
+            .execute(ctx.library.pool())
+            .await
+            .expect("seed book");
+        sqlx::query("INSERT INTO book_collections (collection_id, name) VALUES (30, 'C')")
+            .execute(ctx.library.pool())
+            .await
+            .expect("seed collection");
+        sqlx::query("INSERT INTO book_collection_members (collection_id, book_id) VALUES (30, 1)")
+            .execute(ctx.library.pool())
+            .await
+            .expect("seed member");
+        let report = OrphanCollectionMembersCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Ok);
+    }
+
+    #[tokio::test]
+    async fn orphan_collection_members_warns_when_soft_deleted() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        sqlx::query(
+            "INSERT INTO books (book_id, title, deleted_at) \
+              VALUES (1, 'Live',    NULL), \
+                     (2, 'Deleted', 1_700_000_000)",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed books");
+        sqlx::query("INSERT INTO book_collections (collection_id, name) VALUES (40, 'Mixed')")
+            .execute(ctx.library.pool())
+            .await
+            .expect("seed collection");
+        sqlx::query(
+            "INSERT INTO book_collection_members (collection_id, book_id) \
+              VALUES (40, 1), (40, 2)",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed members");
+        let report = OrphanCollectionMembersCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Warning);
+        assert!(
+            report.summary.contains('1'),
+            "headline should mention 1 orphan: {}",
+            report.summary
+        );
+        assert!(report.details[0].remediation.is_some());
     }
 }

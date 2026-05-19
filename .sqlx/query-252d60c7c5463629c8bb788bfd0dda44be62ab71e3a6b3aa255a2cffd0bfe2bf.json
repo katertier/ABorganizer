@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"n!: i64\"\n                 FROM book_collection_members m\n                 JOIN books b ON b.book_id = m.book_id\n                WHERE b.deleted_at IS NOT NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "n!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "252d60c7c5463629c8bb788bfd0dda44be62ab71e3a6b3aa255a2cffd0bfe2bf"
+}
