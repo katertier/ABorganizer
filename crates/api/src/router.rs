@@ -1296,53 +1296,51 @@ async fn books_patch(
         ));
     }
 
-    // 2. Title-only journal capture (ADR-0039).
+    // 2. Per-field journal capture (ADR-0039) — multi-field safe.
     //
-    // Per-field replay means a `book-title-set` row needs to
-    // succeed or fail atomically with the title's column write.
-    // For a multi-field PATCH, a single rolled-back transaction
-    // can't be partitioned into per-field replay outcomes without
-    // refactoring the inner loop — so capture is restricted to the
-    // title-only case for now. Future slices extend per-field
-    // capture to the other fields, at which point the inner
-    // branches lift into a helper that returns first-error so a
-    // commit failure can `mark_failed` every pending row uniformly.
-    let title_only = req.subtitle.is_none()
-        && req.description.is_none()
-        && req.language.is_none()
-        && req.release_date.is_none()
-        && req.asin.is_none()
-        && req.isbn.is_none()
-        && req.abridged.is_none()
-        && req.explicit.is_none();
-    let title_journal: Option<(i64, String)> =
-        if let Some(intent) = req.title.as_deref().filter(|_| title_only) {
-            let current: String = sqlx::query_scalar!(
-                r#"SELECT title AS "title!: String" FROM books WHERE book_id = ?"#,
-                book_id,
-            )
-            .fetch_one(pool)
-            .await
-            .map_err(|e| {
-                ApiError::Internal(ab_core::Error::Database(format!(
-                    "books_patch title pre-read: {e}"
-                )))
-            })?;
-            let entry = ab_journal::NewEntry {
-                op_kind: OP_KIND_BOOK_TITLE_SET,
-                target: ab_journal::Target {
-                    kind: "book".to_owned(),
-                    id: book_id,
-                },
-                pre_state: serde_json::json!({ "current": current, "intent": intent }),
-                reversible: true,
-                batch_id: None,
-            };
-            let op_id = crate::journal_capture::record_pending(pool, &entry).await?;
-            Some((op_id, intent.to_owned()))
-        } else {
-            None
+    // Each journal-eligible field that's present in the request
+    // pre-reads its current value, records a `pending` row, and
+    // stashes the (op_id, intent) into `journals`. The per-field
+    // tx branches below run unchanged. After commit-or-rollback,
+    // a single uniform pass below marks every pending row
+    // `done` (on commit) or `failed` (on rollback) — atomic across
+    // all captured fields.
+    //
+    // Currently only the title field is wired (TitleReplayer is
+    // the only registered Replayer for these op_kinds). Follow-up
+    // slices register the remaining 8 fields' Replayers and add
+    // their captures here without touching the finalize loop.
+    let mut journals: Vec<PendingJournal> = Vec::new();
+    if let Some(intent) = req.title.as_deref() {
+        let current: String = sqlx::query_scalar!(
+            r#"SELECT title AS "title!: String" FROM books WHERE book_id = ?"#,
+            book_id,
+        )
+        .fetch_one(pool)
+        .await
+        .map_err(|e| {
+            ApiError::Internal(ab_core::Error::Database(format!(
+                "books_patch title pre-read: {e}"
+            )))
+        })?;
+        let entry = ab_journal::NewEntry {
+            op_kind: OP_KIND_BOOK_TITLE_SET,
+            target: ab_journal::Target {
+                kind: "book".to_owned(),
+                id: book_id,
+            },
+            pre_state: serde_json::json!({ "current": current, "intent": intent }),
+            reversible: true,
+            batch_id: None,
         };
+        let op_id = crate::journal_capture::record_pending(pool, &entry).await?;
+        journals.push(PendingJournal {
+            op_id,
+            field_name: "title",
+            intent: serde_json::Value::String(intent.to_owned()),
+            context: "api.books_patch.title",
+        });
+    }
 
     let mut tx = pool.begin().await.map_err(|e| {
         ApiError::Internal(ab_core::Error::Database(format!("books_patch begin: {e}")))
@@ -1522,34 +1520,69 @@ async fn books_patch(
 
     let commit_result = tx.commit().await;
 
-    if let Some((op_id, intent)) = title_journal {
-        match &commit_result {
-            Ok(()) => {
-                crate::journal_capture::mark_done_or_log(
-                    pool,
-                    op_id,
-                    &serde_json::json!({ "title": intent }),
-                    "api.books_patch.title",
-                )
-                .await;
-            }
-            Err(e) => {
-                crate::journal_capture::mark_failed_or_log(
-                    pool,
-                    op_id,
-                    &format!("books_patch commit failed: {e}"),
-                    "api.books_patch.title",
-                )
-                .await;
-            }
-        }
-    }
+    finalize_pending_journals(pool, journals, &commit_result).await;
 
     commit_result.map_err(|e| {
         ApiError::Internal(ab_core::Error::Database(format!("books_patch commit: {e}")))
     })?;
 
     Ok(Json(BooksPatchResponse { book_id, updated }))
+}
+
+/// One pending `operation_journal` row captured by [`books_patch`]
+/// during the pre-tx phase, waiting on the tx outcome to flip to
+/// `done` or `failed`. Aggregated into a `Vec` so a single uniform
+/// pass after `tx.commit()` finalizes every captured field
+/// atomically — no partial-state where some fields' journal rows
+/// land `done` and others stay `pending`.
+struct PendingJournal {
+    op_id: i64,
+    /// Column name (`"title"`, `"subtitle"`, …). Used as the
+    /// `post_state` JSON key on success so the rendered row reads
+    /// `{ <field>: <intent> }`.
+    field_name: &'static str,
+    /// The intent value as recorded in `pre_state.intent`. Lifted
+    /// into `post_state` on commit; surfaced in the
+    /// `mark_failed` reason otherwise.
+    intent: serde_json::Value,
+    /// Tracing context string for `mark_done_or_log` /
+    /// `mark_failed_or_log` (`"api.books_patch.title"`, etc.).
+    context: &'static str,
+}
+
+/// Flip every captured pending journal row to `done` (on commit)
+/// or `failed` (on rollback). Best-effort per
+/// [`crate::journal_capture`] semantics — a row left `pending`
+/// here gets reaped by the next daemon-startup recovery pass.
+async fn finalize_pending_journals(
+    pool: &sqlx::SqlitePool,
+    journals: Vec<PendingJournal>,
+    commit_result: &Result<(), sqlx::Error>,
+) {
+    for j in journals {
+        match commit_result {
+            Ok(()) => {
+                let mut post = serde_json::Map::new();
+                post.insert(j.field_name.to_owned(), j.intent);
+                crate::journal_capture::mark_done_or_log(
+                    pool,
+                    j.op_id,
+                    &serde_json::Value::Object(post),
+                    j.context,
+                )
+                .await;
+            }
+            Err(e) => {
+                crate::journal_capture::mark_failed_or_log(
+                    pool,
+                    j.op_id,
+                    &format!("books_patch commit failed: {e}"),
+                    j.context,
+                )
+                .await;
+            }
+        }
+    }
 }
 
 // ── DELETE /books/{book_id} ──────────────────────────────────────
