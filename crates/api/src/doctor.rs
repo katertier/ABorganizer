@@ -1663,6 +1663,99 @@ impl DoctorCheck for ProvenanceStaleStagesCheck {
     }
 }
 
+/// Cap on per-row detail entries emitted by [`EmptyCollectionsCheck`].
+/// The headline summary always reports the full count.
+const EMPTY_COLLECTIONS_MAX_DETAILS: usize = 20;
+
+/// `empty-collections` — flag `book_collections` rows with zero members.
+///
+/// Scanner-detected collections that lost all their members (book deletes,
+/// soft-deletes, scanner rerun reshuffling), operator-curated stubs
+/// where the operator created the collection but never added books, and
+/// drift cases where a CASCADE didn't fire (manual DB edit) all surface
+/// here. The remediation is operator-decision: delete the collection,
+/// or populate it.
+///
+/// Threshold defaults to flagging anything with `book_count = 0` — there's
+/// no grace period because collections with no members are observably
+/// non-functional in the UI. A future tunable could add a "ignore
+/// collections younger than N minutes" guard if scanner-write races
+/// surface; today's scanner ships nothing yet so the race window doesn't
+/// exist.
+pub struct EmptyCollectionsCheck;
+
+#[async_trait]
+impl DoctorCheck for EmptyCollectionsCheck {
+    fn name(&self) -> &'static str {
+        "empty-collections"
+    }
+    fn description(&self) -> &'static str {
+        "book_collections rows with zero members"
+    }
+    async fn run(&self, ctx: &CheckCtx) -> CheckReport {
+        let rows: Vec<(i64, String)> = match sqlx::query_as::<_, (i64, String)>(
+            "SELECT c.collection_id, c.name \
+               FROM book_collections c \
+              WHERE NOT EXISTS ( \
+                  SELECT 1 FROM book_collection_members m \
+                   WHERE m.collection_id = c.collection_id \
+              ) \
+              ORDER BY c.collection_id",
+        )
+        .fetch_all(ctx.library.pool())
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let mut r = CheckReport::fail("empty-collections lookup failed");
+                r.details.push(CheckFinding {
+                    severity: CheckStatus::Failure,
+                    message: e.to_string(),
+                    remediation: Some(
+                        "Inspect ab-db logs; verify the library DB is reachable.".into(),
+                    ),
+                    doc_url: None,
+                });
+                return r;
+            }
+        };
+
+        if rows.is_empty() {
+            return CheckReport::ok("no empty collections");
+        }
+
+        // Cap the per-row detail count so the doctor output stays
+        // readable on libraries with many empty stubs. Anything past
+        // the cap is summarised in the headline.
+        let total = rows.len();
+        let mut findings: Vec<CheckFinding> =
+            Vec::with_capacity(rows.len().min(EMPTY_COLLECTIONS_MAX_DETAILS));
+        for (collection_id, name) in rows.into_iter().take(EMPTY_COLLECTIONS_MAX_DETAILS) {
+            findings.push(CheckFinding {
+                severity: CheckStatus::Warning,
+                message: format!("collection {collection_id} ({name:?}) has no members"),
+                remediation: Some(format!(
+                    "Decide per collection: delete \
+                     (`DELETE FROM book_collections WHERE collection_id = {collection_id}`) \
+                     or populate it via the curated workflow."
+                )),
+                doc_url: None,
+            });
+        }
+        let summary = if total > EMPTY_COLLECTIONS_MAX_DETAILS {
+            format!(
+                "{total} empty collection(s) (first {EMPTY_COLLECTIONS_MAX_DETAILS} listed; \
+                 query book_collections directly for the full list)"
+            )
+        } else {
+            format!("{total} empty collection(s)")
+        };
+        let mut r = CheckReport::warn(summary);
+        r.details = findings;
+        r
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
@@ -2554,5 +2647,84 @@ mod tests {
         let check = ProvenanceStaleStagesCheck::new(vec!["read-tags"]);
         let report = check.run(&ctx).await;
         assert_eq!(report.status, CheckStatus::Ok);
+    }
+
+    #[tokio::test]
+    async fn empty_collections_check_ok_when_table_empty() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        let report = EmptyCollectionsCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Ok);
+    }
+
+    #[tokio::test]
+    async fn empty_collections_check_ok_when_all_populated() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        sqlx::query("INSERT INTO books (book_id, title) VALUES (1, 'A'), (2, 'B')")
+            .execute(ctx.library.pool())
+            .await
+            .expect("seed books");
+        sqlx::query(
+            "INSERT INTO book_collections (collection_id, name) \
+              VALUES (10, 'Populated')",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed collection");
+        sqlx::query(
+            "INSERT INTO book_collection_members (collection_id, book_id) \
+              VALUES (10, 1), (10, 2)",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed members");
+        let report = EmptyCollectionsCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Ok);
+    }
+
+    #[tokio::test]
+    async fn empty_collections_check_warns_for_empty_rows() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        sqlx::query(
+            "INSERT INTO book_collections (collection_id, name) \
+              VALUES (11, 'Stub A'), (12, 'Stub B')",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed empty collections");
+        let report = EmptyCollectionsCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Warning);
+        assert!(report.summary.contains('2'));
+        assert_eq!(report.details.len(), 2);
+        for finding in &report.details {
+            assert!(finding.remediation.is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_collections_check_warns_when_mixed() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        sqlx::query("INSERT INTO books (book_id, title) VALUES (1, 'A')")
+            .execute(ctx.library.pool())
+            .await
+            .expect("seed book");
+        sqlx::query(
+            "INSERT INTO book_collections (collection_id, name) \
+              VALUES (20, 'Populated'), (21, 'Stub')",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed collections");
+        sqlx::query(
+            "INSERT INTO book_collection_members (collection_id, book_id) \
+              VALUES (20, 1)",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed member");
+        let report = EmptyCollectionsCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Warning);
+        // Only the empty stub should be flagged.
+        assert_eq!(report.details.len(), 1);
+        assert!(report.details[0].message.contains("Stub"));
     }
 }
