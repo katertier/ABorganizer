@@ -350,6 +350,16 @@ async fn collections_list_protected() {
 }
 
 #[tokio::test]
+async fn collections_create_protected() {
+    assert_protected("POST", "/collections").await;
+}
+
+#[tokio::test]
+async fn collections_patch_protected() {
+    assert_protected("PATCH", "/collections/1").await;
+}
+
+#[tokio::test]
 async fn collections_get_protected() {
     assert_protected("GET", "/collections/1").await;
 }

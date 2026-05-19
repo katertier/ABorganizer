@@ -980,6 +980,15 @@ pub struct LlmTunables {
     /// the prompt restates the cap and the runtime truncates
     /// defensively.
     pub setting_max_tags: usize,
+    /// Token budget for the single-shot transcript-FM-polish call
+    /// (ADR-0057 S57.1b). The polish output is the *entire*
+    /// re-cased / re-punctuated / mid-sentence-noise-stripped
+    /// transcript, so the budget scales with input length, not
+    /// the JSON envelope. `4_000` covers transcripts up to roughly
+    /// 30k chars (the same prompt-input cap the summary stage
+    /// uses). Single-shot polish on longer transcripts is
+    /// deferred to S57.1c's per-chapter slicing.
+    pub polish_max_tokens: usize,
 }
 
 impl Default for LlmTunables {
@@ -1002,6 +1011,7 @@ impl Default for LlmTunables {
             setting_target_words_low: 30,
             setting_target_words_high: 60,
             setting_max_tags: 25,
+            polish_max_tokens: 4_000,
         }
     }
 }

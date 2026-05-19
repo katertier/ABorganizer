@@ -407,6 +407,8 @@ async fn main() -> Result<()> {
         Arc::new(ab_api::journal_replayers::RatingReplayer),
         Arc::new(ab_api::journal_replayers::NotesReplayer),
         Arc::new(ab_api::journal_replayers::TitleReplayer),
+        Arc::new(ab_api::journal_replayers::CollectionCreateReplayer),
+        Arc::new(ab_api::journal_replayers::CollectionRenameReplayer),
     ]);
     match ab_journal::recover_pending_with(library.pool(), &replay_registry).await {
         Ok(report) if report.failed_count == 0 && report.retried_count == 0 => {
