@@ -117,6 +117,11 @@ pub struct ScanReport {
     pub non_audio_count: u64,
     /// File paths walked total (audio + non-audio).
     pub total_walked: u64,
+    /// Box-set collections newly persisted by the directory-layout
+    /// heuristic (BACKLOG cycle 37 S5). Pre-existing collections
+    /// with the same name are not touched (manual curation
+    /// survives re-scans).
+    pub box_sets_created: u64,
 }
 
 /// Walk `root` recursively and persist audio files as books.
@@ -173,15 +178,178 @@ pub async fn scan_with_excludes(
         }
     }
 
+    // Phase 3: directory-layout box-set heuristic (BACKLOG cycle 37
+    // S5). Non-fatal — a detection-pass failure logs warn but
+    // doesn't roll back the books that already landed in phase 2.
+    if let Err(e) = detect_and_persist_box_sets(&canonical_root, db, &mut report).await {
+        tracing::warn!(error = %e, "scan.box_set_detection_failed");
+    }
+
     tracing::info!(
         new = report.new_book_ids.len(),
         moved = report.moved_book_ids.len(),
         skipped = report.skipped_paths.len(),
         non_audio = report.non_audio_count,
         total = report.total_walked,
+        box_sets = report.box_sets_created,
         "scan.complete"
     );
     Ok(report)
+}
+
+/// Directory-layout box-set heuristic (BACKLOG cycle 37 S5, pass 1).
+///
+/// A directory `D` is a box-set root when:
+///
+/// * `D` is NOT the scan root itself (creating a collection named
+///   after the scan root is rarely what the operator wants).
+/// * At least two distinct books live in immediate children of `D`
+///   (each child is either a single audio file = single-file book,
+///   or a directory holding the audio files of one book).
+/// * No book under `D` lives at a depth other than "immediate
+///   child" — i.e. the layout has no nested
+///   `D/x/y/audio.m4b`-style sub-trees.
+///
+/// Persistence is idempotent and respectful of operator curation:
+/// if a `book_collections` row already exists with the candidate
+/// name, the heuristic SKIPS — manual rows (or earlier scanner
+/// rows) survive re-scans without being trampled. A fresh
+/// candidate writes one `book_collections` row (`kind='box_set'`)
+/// plus N `book_collection_members` rows (`source='scanner'`).
+///
+/// # Errors
+///
+/// Returns [`Error::Database`] on SQL failures during the
+/// member-listing query. Per-collection persistence failures are
+/// logged at `warn` but don't bubble up — the rest of the pass
+/// still runs.
+async fn detect_and_persist_box_sets(
+    root: &Path,
+    db: &LibraryDb,
+    report: &mut ScanReport,
+) -> Result<()> {
+    let root_str = root.to_string_lossy();
+    let root_pattern = format!("{}/%", root_str.trim_end_matches('/'));
+    let rows = sqlx::query!(
+        r#"SELECT b.book_id   AS "book_id!: i64",
+                  bf.file_path AS "file_path!: String"
+             FROM books b
+             JOIN book_files bf ON bf.book_id = b.book_id
+            WHERE b.deleted_at IS NULL
+              AND bf.file_path LIKE ?
+            GROUP BY b.book_id"#,
+        root_pattern,
+    )
+    .fetch_all(db.pool())
+    .await
+    .map_err(|e| Error::Database(format!("box_set scan: {e}")))?;
+
+    // Map: book_id → one sample parent dir for that book's files.
+    let mut book_dir_of: BTreeMap<i64, PathBuf> = BTreeMap::new();
+    for r in rows {
+        let file = PathBuf::from(&r.file_path);
+        if let Some(parent) = file.parent() {
+            book_dir_of
+                .entry(r.book_id)
+                .or_insert_with(|| parent.to_path_buf());
+        }
+    }
+
+    // Group book-dirs by their parent (= the box-set candidate root).
+    let mut candidates: BTreeMap<PathBuf, Vec<i64>> = BTreeMap::new();
+    for (book_id, book_dir) in &book_dir_of {
+        if let Some(grand) = book_dir.parent() {
+            candidates
+                .entry(grand.to_path_buf())
+                .or_default()
+                .push(*book_id);
+        }
+    }
+
+    for (grand, mut book_ids) in candidates {
+        if book_ids.len() < 2 {
+            continue;
+        }
+        if grand == root {
+            // Skip the scan root — a collection named after the
+            // library root is almost never what the operator
+            // wants.
+            continue;
+        }
+        // Nested-layout check: any book lives deeper under `grand`
+        // than an immediate child?
+        let has_nested = book_dir_of.values().any(|bd| {
+            bd.starts_with(&grand) && bd != &grand && bd.parent() != Some(grand.as_path())
+        });
+        if has_nested {
+            continue;
+        }
+        let Some(name) = grand.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if name.is_empty() {
+            continue;
+        }
+        book_ids.sort_unstable();
+        match persist_box_set(db, name, &book_ids).await {
+            Ok(true) => report.box_sets_created += 1,
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(name = %name, error = %e, "scan.box_set_persist_failed");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Insert a box-set collection + its scanner-sourced members.
+///
+/// Returns `Ok(true)` when a new collection was created;
+/// `Ok(false)` when a collection of that name already existed
+/// (operator-curated or older scanner row — either way the
+/// heuristic doesn't trample it).
+async fn persist_box_set(db: &LibraryDb, name: &str, book_ids: &[i64]) -> Result<bool> {
+    let pool = db.pool();
+    let existing: Option<i64> = sqlx::query_scalar!(
+        r#"SELECT collection_id AS "id!: i64"
+             FROM book_collections WHERE name = ?"#,
+        name,
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| Error::Database(format!("box_set lookup: {e}")))?;
+    if existing.is_some() {
+        return Ok(false);
+    }
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| Error::Database(format!("box_set begin: {e}")))?;
+    let collection_id: i64 = sqlx::query_scalar!(
+        r#"INSERT INTO book_collections (name, kind)
+           VALUES (?, 'box_set')
+           RETURNING collection_id AS "collection_id!: i64""#,
+        name,
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| Error::Database(format!("box_set insert: {e}")))?;
+    for book_id in book_ids {
+        sqlx::query!(
+            "INSERT OR IGNORE INTO book_collection_members \
+               (collection_id, book_id, source) VALUES (?, ?, 'scanner')",
+            collection_id,
+            book_id,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| Error::Database(format!("box_set member insert: {e}")))?;
+    }
+    tx.commit()
+        .await
+        .map_err(|e| Error::Database(format!("box_set commit: {e}")))?;
+    Ok(true)
 }
 
 /// Walk `root` and return audio files grouped by their parent
@@ -722,5 +890,168 @@ mod tests {
         );
         // total_walked excludes the skipped files entirely.
         assert_eq!(report.total_walked, 1);
+    }
+
+    // ---- Cycle 37 S5 — directory-layout box-set heuristic ----
+
+    /// Two book-dirs (each a directory containing one audiobook
+    /// file) as immediate children of a parent → one `box_set`
+    /// collection with both books as members.
+    ///
+    /// Note: two same-extension files in the SAME directory get
+    /// collapsed into a single multi-file book by phase 2's
+    /// multi-file detection rule — that's why the fixture has
+    /// each book in its own sub-directory.
+    #[tokio::test]
+    async fn box_set_detected_for_two_sibling_books_under_parent() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let db = fresh_db(tmp.path()).await;
+        let root = tmp.path().join("lib");
+        let box_dir = root.join("Cosmere Box Set");
+        let warbreaker = box_dir.join("Warbreaker");
+        let mistborn = box_dir.join("Mistborn");
+        fs::create_dir_all(&warbreaker).expect("mkdir warbreaker");
+        fs::create_dir_all(&mistborn).expect("mkdir mistborn");
+        touch(&warbreaker, "audio.m4b", b"book-one");
+        touch(&mistborn, "audio.m4b", b"book-two");
+
+        let r = scan(&root, &db).await.expect("scan");
+        assert_eq!(r.new_book_ids.len(), 2);
+        assert_eq!(r.box_sets_created, 1);
+
+        let name: Option<String> =
+            sqlx::query_scalar("SELECT name FROM book_collections WHERE kind = 'box_set'")
+                .fetch_optional(db.pool())
+                .await
+                .expect("query");
+        assert_eq!(name.as_deref(), Some("Cosmere Box Set"));
+
+        let members: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM book_collection_members WHERE source = 'scanner'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("count members");
+        assert_eq!(members, 2);
+    }
+
+    /// A single book under the parent → no box-set (count < 2).
+    #[tokio::test]
+    async fn box_set_skipped_when_only_one_child_book() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let db = fresh_db(tmp.path()).await;
+        let root = tmp.path().join("lib");
+        let single = root.join("Singleton");
+        fs::create_dir_all(&single).expect("mkdir");
+        touch(&single, "only.m4b", b"alone");
+
+        let r = scan(&root, &db).await.expect("scan");
+        assert_eq!(r.new_book_ids.len(), 1);
+        assert_eq!(r.box_sets_created, 0);
+    }
+
+    /// Nested layout: `cluster/` has two book-dirs at depth 1 AND
+    /// one book buried deeper. The "no nested layouts" rule
+    /// disqualifies `cluster` as a box-set root because some
+    /// audio lives below the immediate-child depth.
+    #[tokio::test]
+    async fn box_set_skipped_when_layout_has_nested_subtree() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let db = fresh_db(tmp.path()).await;
+        let root = tmp.path().join("lib");
+        let cluster = root.join("cluster");
+        let book1 = cluster.join("book1");
+        let book2 = cluster.join("book2");
+        let deep = cluster.join("deep").join("sub");
+        fs::create_dir_all(&book1).expect("mkdir book1");
+        fs::create_dir_all(&book2).expect("mkdir book2");
+        fs::create_dir_all(&deep).expect("mkdir deep");
+        touch(&book1, "audio.m4b", b"book-one");
+        touch(&book2, "audio.m4b", b"book-two");
+        touch(&deep, "audio.m4b", b"nested-book");
+
+        let r = scan(&root, &db).await.expect("scan");
+        assert_eq!(r.new_book_ids.len(), 3);
+        assert_eq!(
+            r.box_sets_created, 0,
+            "nested layout disqualifies the cluster dir"
+        );
+    }
+
+    /// A pre-existing `book_collections` row with the candidate
+    /// name is left intact — the scanner doesn't trample manual
+    /// curation.
+    #[tokio::test]
+    async fn box_set_skipped_when_collection_with_same_name_exists() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let db = fresh_db(tmp.path()).await;
+        let root = tmp.path().join("lib");
+        let trilogy = root.join("Trilogy");
+        let book_a = trilogy.join("book-a");
+        let book_b = trilogy.join("book-b");
+        fs::create_dir_all(&book_a).expect("mkdir a");
+        fs::create_dir_all(&book_b).expect("mkdir b");
+        touch(&book_a, "audio.m4b", b"book-one");
+        touch(&book_b, "audio.m4b", b"book-two");
+
+        // Pre-existing operator-curated collection with no members.
+        sqlx::query("INSERT INTO book_collections (name, kind) VALUES ('Trilogy', 'curated')")
+            .execute(db.pool())
+            .await
+            .expect("seed collection");
+
+        let r = scan(&root, &db).await.expect("scan");
+        assert_eq!(r.new_book_ids.len(), 2);
+        assert_eq!(r.box_sets_created, 0, "manual row survives");
+
+        // Verify the kind is still 'curated' (not overwritten to 'box_set').
+        let kind: Option<String> =
+            sqlx::query_scalar("SELECT kind FROM book_collections WHERE name = 'Trilogy'")
+                .fetch_one(db.pool())
+                .await
+                .expect("kind");
+        assert_eq!(kind.as_deref(), Some("curated"));
+        // No scanner members either.
+        let members: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM book_collection_members WHERE source = 'scanner'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("count");
+        assert_eq!(members, 0);
+    }
+
+    /// Re-running the scan on an unchanged layout doesn't create a
+    /// second collection or duplicate members.
+    #[tokio::test]
+    async fn box_set_detection_is_idempotent_across_rescans() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let db = fresh_db(tmp.path()).await;
+        let root = tmp.path().join("lib");
+        let resc = root.join("Rescannable");
+        let a = resc.join("a");
+        let b = resc.join("b");
+        fs::create_dir_all(&a).expect("mkdir a");
+        fs::create_dir_all(&b).expect("mkdir b");
+        touch(&a, "audio.m4b", b"a");
+        touch(&b, "audio.m4b", b"b");
+
+        let r1 = scan(&root, &db).await.expect("scan 1");
+        assert_eq!(r1.new_book_ids.len(), 2);
+        assert_eq!(r1.box_sets_created, 1);
+
+        let r2 = scan(&root, &db).await.expect("scan 2");
+        assert_eq!(r2.box_sets_created, 0, "second scan is a no-op");
+
+        let collections: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM book_collections")
+            .fetch_one(db.pool())
+            .await
+            .expect("count");
+        assert_eq!(collections, 1);
+        let members: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM book_collection_members")
+            .fetch_one(db.pool())
+            .await
+            .expect("count");
+        assert_eq!(members, 2);
     }
 }
