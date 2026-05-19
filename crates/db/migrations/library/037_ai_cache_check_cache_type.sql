@@ -26,6 +26,7 @@ CREATE TABLE ai_cache_new (
         'transcript_samples',
         'transcript_full',
         'transcript_fm_polished',
+        'transcript_chapter_marks',
         'dna_tags',
         'summary_spoiler_free',
         'story_arc',

@@ -191,6 +191,13 @@ fn build_pipeline_stages(tunables: &Tunables) -> Vec<Arc<dyn Stage>> {
         Arc::new(ab_llm_extractors::TranscriptFmPolishStage::new(
             &tunables.llm,
         )),
+        // `transcript-chapter-marks` (ADR-0057 S57.2) — pure
+        // compute stage that aligns winner chapters to byte
+        // offsets in the polished (or raw) transcript. Consumed
+        // by S57.3 SRT/VTT export + S57.4 EPUB generation.
+        Arc::new(ab_transcript::TranscriptChapterMarksStage::new(
+            &tunables.llm,
+        )),
         // `extract-story-arc` (slice 3K.5) — Apple-Intelligence
         // pass producing a 5-7 beat narrative arc into
         // `books.story_arc_json`. Depends on transcribe-full

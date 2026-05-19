@@ -38,7 +38,7 @@ pub use audible::AudibleClient;
 pub use audible_search::AudibleSearchStage;
 pub use audnexus::AudnexusClient;
 pub use canonical_author::CanonicalAuthorEnrichStage;
-pub use chapter_winner::ChapterWinnerStage;
+pub use chapter_winner::{ChapterWinnerStage, STAGE_ID as CHAPTER_WINNER_STAGE_ID};
 pub use chapters::AudnexusChaptersStage;
 pub use consensus::ConsensusStage;
 pub use cue_chapters::CueSidecarChaptersStage;
