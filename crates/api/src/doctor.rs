@@ -1828,6 +1828,83 @@ impl DoctorCheck for OrphanCollectionMembersCheck {
     }
 }
 
+/// `collections-duplicate-audible-id` — UNIQUE-index tripwire.
+///
+/// Flags two-or-more `book_collections` rows that share the same
+/// non-NULL `audible_id`. Migration 043's
+/// `ux_book_collections_audible_id` partial UNIQUE index enforces
+/// single-row-per-id at INSERT time; a non-zero count here means
+/// the index is missing or got bypassed (manual DB edit, restore
+/// from a pre-043 backup, or an ATTACH+INSERT path that sidestepped
+/// index enforcement). Pattern mirrors `provenance-winner-conflict`.
+pub struct CollectionsDuplicateAudibleIdCheck;
+
+#[async_trait]
+impl DoctorCheck for CollectionsDuplicateAudibleIdCheck {
+    fn name(&self) -> &'static str {
+        "collections-duplicate-audible-id"
+    }
+    fn description(&self) -> &'static str {
+        "book_collections rows with the same audible_id (UNIQUE index tripwire)"
+    }
+    async fn run(&self, ctx: &CheckCtx) -> CheckReport {
+        let groups: i64 = match sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "n!: i64"
+                 FROM (
+                     SELECT audible_id
+                       FROM book_collections
+                      WHERE audible_id IS NOT NULL
+                      GROUP BY audible_id
+                     HAVING COUNT(*) > 1
+                 )"#,
+        )
+        .fetch_one(ctx.library.pool())
+        .await
+        {
+            Ok(n) => n,
+            Err(e) => {
+                let mut r = CheckReport::fail("duplicate-audible-id lookup failed");
+                r.details.push(CheckFinding {
+                    severity: CheckStatus::Failure,
+                    message: e.to_string(),
+                    remediation: Some(
+                        "Inspect ab-db logs; verify the library DB is reachable.".into(),
+                    ),
+                    doc_url: None,
+                });
+                return r;
+            }
+        };
+
+        if groups == 0 {
+            return CheckReport::ok("no duplicate audible_id across collections");
+        }
+
+        let mut r = CheckReport::warn(format!(
+            "{groups} audible_id value(s) shared across multiple collections"
+        ));
+        r.details.push(CheckFinding {
+            severity: CheckStatus::Warning,
+            message: format!(
+                "{groups} audible_id group(s) have 2 or more book_collections \
+                 rows. Migration 043's ux_book_collections_audible_id partial \
+                 UNIQUE index enforces single-row-per-id at INSERT time — a \
+                 non-zero count means the index is missing or was bypassed."
+            ),
+            remediation: Some(
+                "Verify the index exists \
+                 (`SELECT sql FROM sqlite_master WHERE name='ux_book_collections_audible_id'`); \
+                 if absent, recreate it per migration 043 and dedupe by keeping \
+                 the row with the highest book_count (or oldest created_at as \
+                 tiebreaker) per audible_id."
+                    .into(),
+            ),
+            doc_url: None,
+        });
+        r
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
@@ -2853,6 +2930,57 @@ mod tests {
         assert!(
             report.summary.contains('1'),
             "headline should mention 1 orphan: {}",
+            report.summary
+        );
+        assert!(report.details[0].remediation.is_some());
+    }
+
+    #[tokio::test]
+    async fn collections_duplicate_audible_id_ok_when_empty() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        let report = CollectionsDuplicateAudibleIdCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Ok);
+    }
+
+    #[tokio::test]
+    async fn collections_duplicate_audible_id_ok_when_distinct() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        sqlx::query(
+            "INSERT INTO book_collections (collection_id, name, audible_id) \
+              VALUES (51, 'A', 'B0AAAA'), \
+                     (52, 'B', 'B0BBBB'), \
+                     (53, 'C', NULL)",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed collections");
+        let report = CollectionsDuplicateAudibleIdCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Ok);
+    }
+
+    #[tokio::test]
+    async fn collections_duplicate_audible_id_warns_when_duplicated() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        // Drop the unique index so we can seed the very state the
+        // check tripwires on. Same posture as the
+        // provenance-winner-conflict test.
+        sqlx::query("DROP INDEX ux_book_collections_audible_id")
+            .execute(ctx.library.pool())
+            .await
+            .expect("drop unique index");
+        sqlx::query(
+            "INSERT INTO book_collections (collection_id, name, audible_id) \
+              VALUES (61, 'X', 'B0DUP'), \
+                     (62, 'Y', 'B0DUP')",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed duplicates");
+        let report = CollectionsDuplicateAudibleIdCheck.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Warning);
+        assert!(
+            report.summary.contains('1'),
+            "summary should mention 1 conflict group: {}",
             report.summary
         );
         assert!(report.details[0].remediation.is_some());
