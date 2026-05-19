@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT stage AS \"stage!: String\"\n                 FROM book_field_provenance\n                ORDER BY stage",
+  "describe": {
+    "columns": [
+      {
+        "name": "stage!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5b454e2b27b4d0a712211db89f6bc63e79e54997c572d34bf9d167215dc9d9b2"
+}
