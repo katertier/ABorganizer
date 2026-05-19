@@ -28,6 +28,7 @@ pub mod books_playlist;
 pub mod books_transcript;
 pub mod cleanup_targets;
 pub mod doctor;
+pub mod entity_books;
 pub mod error;
 pub mod journal_capture;
 pub mod journal_replayers;

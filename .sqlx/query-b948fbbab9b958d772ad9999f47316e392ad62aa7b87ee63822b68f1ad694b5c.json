@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT book_id          AS \"book_id!: i64\",\n                  title            AS \"title!: String\",\n                  release_date     AS \"release_date?: String\",\n                  duration_ms      AS \"duration_ms?: i64\",\n                  reading_status   AS \"reading_status!: String\"\n             FROM books\n            WHERE publisher_id = ?\n            ORDER BY release_date IS NULL,\n                     release_date DESC,\n                     title COLLATE NOCASE\n            LIMIT ? OFFSET ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "book_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "title!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "release_date?: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "duration_ms?: i64",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "reading_status!: String",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      true,
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "b948fbbab9b958d772ad9999f47316e392ad62aa7b87ee63822b68f1ad694b5c"
+}
