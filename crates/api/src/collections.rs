@@ -681,6 +681,286 @@ pub async fn collections_create(
         .into_response())
 }
 
+/// `op_kind` recorded in `operation_journal` for the `name` field
+/// of `PATCH /collections/{id}` (ADR-0039).
+///
+/// Pre-state: `{ current: <prev_name>, intent: <new_name> }`.
+/// Capture is name-only for now; the other four fields
+/// (`canonical_name`, `audible_id`, `description`, `kind`) get
+/// their own replayers in a follow-up slice — exactly the same
+/// staging pattern PATCH /books used in cycle 33 S1 (title-only,
+/// other fields later).
+pub const OP_KIND_COLLECTION_NAME_SET: &str = "collection-name-set";
+
+/// Body of `PATCH /api/v1/collections/{collection_id}`.
+///
+/// Every field is `Option<String>` — `None` (or absent) means
+/// "leave untouched"; `Some(value)` means "update this field". An
+/// empty body is rejected with `400 Bad Request`.
+///
+/// Empty-string values clear the corresponding nullable column
+/// (`canonical_name`, `audible_id`, `description`, `kind`).
+/// `name` is required to be non-empty after trim — passing empty
+/// rejects with 400.
+#[derive(Debug, Deserialize)]
+pub struct CollectionPatchRequest {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub canonical_name: Option<String>,
+    #[serde(default)]
+    pub audible_id: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+/// Response from `PATCH /api/v1/collections/{collection_id}`.
+#[derive(Debug, Serialize)]
+pub struct CollectionPatchResponse {
+    pub collection_id: i64,
+    /// Stable-order list of columns the request actually changed.
+    pub updated: Vec<String>,
+}
+
+/// `PATCH /api/v1/collections/{collection_id}` — operator-curated
+/// edit.
+///
+/// Body: [`CollectionPatchRequest`]. Returns `200 OK` with
+/// [`CollectionPatchResponse`]. `404 Not Found` when no row at
+/// that id; `400 Bad Request` for empty body OR an empty `name`;
+/// `409 Conflict` when the UNIQUE constraint on `(name)` (or the
+/// partial UNIQUE on `audible_id`) fires.
+///
+/// Journal capture: only the `name` field is wired in this slice
+/// (`op_kind` `collection-name-set`). Other field replayers ship as
+/// follow-ups — mirrors the cycle 33 S1 PATCH /books pattern.
+///
+/// # Errors
+///
+/// Database access failures surface as [`ApiError::Internal`].
+#[allow(clippy::missing_panics_doc, clippy::too_many_lines)] // panic-free; per-field update flow inline for top-to-bottom readability
+pub async fn collections_patch(
+    State(state): State<ApiState>,
+    Path(collection_id): Path<i64>,
+    Json(req): Json<CollectionPatchRequest>,
+) -> Result<Response, ApiError> {
+    let pool = state.inner.library.pool();
+
+    // 0. Existence check (clean 404, not a transaction-rolled chain).
+    let exists = sqlx::query_scalar!(
+        r#"SELECT 1 AS "n!: i64" FROM book_collections WHERE collection_id = ?"#,
+        collection_id,
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        ApiError::Internal(ab_core::Error::Database(format!(
+            "collections_patch exists: {e}"
+        )))
+    })?
+    .is_some();
+    if !exists {
+        return Err(ApiError::NotFound(format!("collection {collection_id}")));
+    }
+
+    // 1. Refuse empty body. Same posture as books_patch.
+    let any_update = req.name.is_some()
+        || req.canonical_name.is_some()
+        || req.audible_id.is_some()
+        || req.description.is_some()
+        || req.kind.is_some();
+    if !any_update {
+        return Err(ApiError::BadRequest(
+            "no fields to update; supply at least one field".to_owned(),
+        ));
+    }
+
+    // 2. Validate the name (if present): trim, reject empty.
+    let new_name: Option<String> = match req.name {
+        Some(ref n) => {
+            let trimmed = n.trim();
+            if trimmed.is_empty() {
+                return Err(ApiError::BadRequest("name cannot be empty".to_owned()));
+            }
+            Some(trimmed.to_owned())
+        }
+        None => None,
+    };
+
+    // 3. Journal capture (ADR-0039): name only. Pre-read current
+    //    before the UPDATE so drift detection works on replay.
+    let journal_op: Option<(i64, String)> = match new_name.as_deref() {
+        Some(intent) => {
+            let current: String = sqlx::query_scalar!(
+                r#"SELECT name AS "name!: String" FROM book_collections WHERE collection_id = ?"#,
+                collection_id,
+            )
+            .fetch_one(pool)
+            .await
+            .map_err(|e| {
+                ApiError::Internal(ab_core::Error::Database(format!(
+                    "collections_patch name pre-read: {e}"
+                )))
+            })?;
+            let entry = ab_journal::NewEntry {
+                op_kind: OP_KIND_COLLECTION_NAME_SET,
+                target: ab_journal::Target {
+                    kind: "collection".to_owned(),
+                    id: collection_id,
+                },
+                pre_state: serde_json::json!({ "current": current, "intent": intent }),
+                reversible: true,
+                batch_id: None,
+            };
+            let op_id = crate::journal_capture::record_pending(pool, &entry).await?;
+            Some((op_id, intent.to_owned()))
+        }
+        None => None,
+    };
+
+    // 4. Apply the updates in a transaction.
+    let mut updated: Vec<String> = Vec::new();
+    let tx_result: Result<(), sqlx::Error> = async {
+        let mut tx = pool.begin().await?;
+        if let Some(v) = new_name.as_deref() {
+            sqlx::query!(
+                "UPDATE book_collections SET name = ? WHERE collection_id = ?",
+                v,
+                collection_id
+            )
+            .execute(&mut *tx)
+            .await?;
+            updated.push("name".to_owned());
+        }
+        if let Some(v) = req.canonical_name.as_deref() {
+            let store = collapse_blank_to_none(v);
+            sqlx::query!(
+                "UPDATE book_collections SET canonical_name = ? WHERE collection_id = ?",
+                store,
+                collection_id
+            )
+            .execute(&mut *tx)
+            .await?;
+            updated.push("canonical_name".to_owned());
+        }
+        if let Some(v) = req.audible_id.as_deref() {
+            let store = collapse_blank_to_none(v);
+            sqlx::query!(
+                "UPDATE book_collections SET audible_id = ? WHERE collection_id = ?",
+                store,
+                collection_id
+            )
+            .execute(&mut *tx)
+            .await?;
+            updated.push("audible_id".to_owned());
+        }
+        if let Some(v) = req.description.as_deref() {
+            let store = collapse_blank_to_none(v);
+            sqlx::query!(
+                "UPDATE book_collections SET description = ? WHERE collection_id = ?",
+                store,
+                collection_id
+            )
+            .execute(&mut *tx)
+            .await?;
+            updated.push("description".to_owned());
+        }
+        if let Some(v) = req.kind.as_deref() {
+            let store = collapse_blank_to_none(v);
+            sqlx::query!(
+                "UPDATE book_collections SET kind = ? WHERE collection_id = ?",
+                store,
+                collection_id
+            )
+            .execute(&mut *tx)
+            .await?;
+            updated.push("kind".to_owned());
+        }
+        // Stamp updated_at on every successful patch — no Option
+        // branch needed because we've already proven at least one
+        // field is being touched.
+        sqlx::query!(
+            "UPDATE book_collections SET updated_at = strftime('%s','now') \
+             WHERE collection_id = ?",
+            collection_id
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+    .await;
+
+    // 5. Finalize the captured journal row (best-effort) and map
+    //    UNIQUE-conflict failures to 409.
+    if let Some((op_id, intent)) = journal_op {
+        match &tx_result {
+            Ok(()) => {
+                crate::journal_capture::mark_done_or_log(
+                    pool,
+                    op_id,
+                    &serde_json::json!({ "name": intent }),
+                    "api.collections_patch.name",
+                )
+                .await;
+            }
+            Err(e) => {
+                crate::journal_capture::mark_failed_or_log(
+                    pool,
+                    op_id,
+                    &format!("collections_patch commit failed: {e}"),
+                    "api.collections_patch.name",
+                )
+                .await;
+            }
+        }
+    }
+
+    match tx_result {
+        Ok(()) => Ok((
+            StatusCode::OK,
+            Json(CollectionPatchResponse {
+                collection_id,
+                updated,
+            }),
+        )
+            .into_response()),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("UNIQUE constraint failed") {
+                let column = if msg.contains("book_collections.name") {
+                    "name"
+                } else if msg.contains("book_collections.audible_id") {
+                    "audible_id"
+                } else {
+                    "unique"
+                };
+                return Err(ApiError::Conflict(format!(
+                    "collection {column} already exists"
+                )));
+            }
+            Err(ApiError::Internal(ab_core::Error::Database(format!(
+                "collections_patch tx: {e}"
+            ))))
+        }
+    }
+}
+
+/// Trim + treat empty string as NULL for the nullable string
+/// columns. The non-nullable `name` column has its own validation
+/// path; this helper only applies to `canonical_name`, `audible_id`,
+/// `description`, `kind`.
+fn collapse_blank_to_none(v: &str) -> Option<String> {
+    let t = v.trim();
+    if t.is_empty() {
+        None
+    } else {
+        Some(t.to_owned())
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
