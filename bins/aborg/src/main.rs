@@ -1110,6 +1110,13 @@ struct BookRow {
 #[derive(Deserialize, Debug, Serialize)]
 struct BooksResponse {
     books: Vec<BookRow>,
+    /// Total matching rows on the daemon side, NOT clamped by the
+    /// page-`limit`. `#[serde(default)]` keeps the CLI parsing
+    /// older daemons that haven't shipped the field yet (they
+    /// surface as `total = 0`; `aborg version` flags the drift
+    /// before the operator hits any meaningful divergence).
+    #[serde(default)]
+    total: i64,
 }
 
 /// Wire form of `stages`. Untagged so the operator can pass
@@ -1700,7 +1707,11 @@ async fn books_list(daemon: &str, filters: BooksListFilters, output: OutputForma
                         "book"
                     );
                 }
-                tracing::info!(count = body.books.len(), "total");
+                tracing::info!(
+                    shown = body.books.len(),
+                    total = body.total,
+                    "books.list.done",
+                );
             }
         }
     }

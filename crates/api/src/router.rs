@@ -660,6 +660,12 @@ struct BookRow {
 #[derive(Serialize)]
 struct BooksResponse {
     books: Vec<BookRow>,
+    /// Total matching rows, NOT clamped by `limit`. Lets clients
+    /// render "showing N of M" without a second call. Sister
+    /// entity-list endpoints (`/authors`, `/narrators`, `/series`,
+    /// `/operation_journal`) already echo `total`; this brings
+    /// `GET /books` in line.
+    total: i64,
 }
 
 /// One group of books with matching fingerprints (same recording).
@@ -884,9 +890,18 @@ async fn books_list(
         include_deleted: q.include_deleted,
         ..Default::default()
     };
-    let rows = ab_query::execute(state.inner.library.pool(), &filter)
+    let pool = state.inner.library.pool();
+    let rows = ab_query::execute(pool, &filter)
         .await
         .map_err(|e| ab_core::Error::Database(format!("books list: {e}")))?;
+    let total_u64 = ab_query::count(pool, &filter)
+        .await
+        .map_err(|e| ab_core::Error::Database(format!("books count: {e}")))?;
+    // u64 → i64: row counts cap at a few million in any sane
+    // library; well inside i64. Stays consistent with the other
+    // entity-list endpoints, which all use i64 for `total`.
+    #[allow(clippy::cast_possible_wrap)]
+    let total = total_u64 as i64;
 
     let books = rows
         .into_iter()
@@ -899,7 +914,7 @@ async fn books_list(
             series: r.series,
         })
         .collect();
-    Ok(Json(BooksResponse { books }))
+    Ok(Json(BooksResponse { books, total }))
 }
 
 // ── GET /books/{book_id} ─────────────────────────────────────────

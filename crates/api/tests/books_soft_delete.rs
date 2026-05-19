@@ -279,6 +279,13 @@ async fn list_hides_soft_deleted_by_default() {
         !ids.contains(&soft),
         "soft-deleted book {soft} should be hidden by default, got {ids:?}"
     );
+    // total mirrors the soft-delete predicate — exactly one
+    // active book seeded, the soft one is excluded.
+    let total = json["total"].as_i64().expect("total is i64");
+    assert_eq!(
+        total, 1,
+        "default list total should exclude soft-deleted book; got {total}",
+    );
     cancel.cancel();
 }
 
@@ -308,6 +315,11 @@ async fn list_includes_soft_deleted_with_query_param() {
     assert!(
         ids.contains(&soft),
         "soft-deleted book must appear with include_deleted=true"
+    );
+    let total = json["total"].as_i64().expect("total is i64");
+    assert_eq!(
+        total, 2,
+        "include_deleted=true total should count active + soft; got {total}",
     );
     cancel.cancel();
 }
