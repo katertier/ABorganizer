@@ -14,6 +14,7 @@ use axum::{Json, response::Response};
 use serde::{Deserialize, Serialize};
 
 use crate::ApiError;
+use crate::entity_books::{EntityBookSummary, EntityBooksQuery, EntityBooksResponse};
 use crate::pagination::{clamp_limit, clamp_offset};
 use crate::state::ApiState;
 
@@ -232,6 +233,108 @@ pub async fn publishers_list(
         StatusCode::OK,
         Json(PublishersListResponse {
             publishers,
+            total,
+            limit,
+            offset,
+        }),
+    )
+        .into_response())
+}
+
+/// `GET /api/v1/publishers/{publisher_id}/books[?limit=&offset=]`
+///
+/// Returns `200 OK` with [`EntityBooksResponse`] JSON listing the
+/// books whose `publisher_id` FK points at this publisher. `404
+/// Not Found` when the publisher doesn't exist. Empty `books`
+/// array when the publisher exists but has no books yet.
+///
+/// Single-FK predicate like `authors_books` — `books.publisher_id`
+/// is a nullable single-FK column, not a junction. Multi-publisher
+/// editions (rare; co-publishing deals) are not modelled.
+///
+/// Sort: `release_date DESC NULLS LAST`, then `books.title COLLATE
+/// NOCASE`. Soft-deleted books stay in the result (operators can
+/// dim them client-side).
+///
+/// # Errors
+///
+/// Database access failures surface as [`ApiError::Internal`].
+#[allow(clippy::missing_panics_doc)] // panic-free
+pub async fn publishers_books(
+    State(state): State<ApiState>,
+    Path(publisher_id): Path<i64>,
+    Query(params): Query<EntityBooksQuery>,
+) -> Result<Response, ApiError> {
+    let pool = state.inner.library.pool();
+    let limit = clamp_limit(params.limit);
+    let offset = clamp_offset(params.offset);
+
+    let publisher_exists = sqlx::query_scalar!(
+        r#"SELECT 1 AS "n!: i64" FROM publishers WHERE publisher_id = ?"#,
+        publisher_id,
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        ApiError::Internal(ab_core::Error::Database(format!(
+            "publisher existence check: {e}"
+        )))
+    })?
+    .is_some();
+
+    if !publisher_exists {
+        return Err(ApiError::NotFound(format!("publisher {publisher_id}")));
+    }
+
+    let total: i64 = sqlx::query_scalar!(
+        r#"SELECT COUNT(*) AS "n!: i64"
+             FROM books
+            WHERE publisher_id = ?"#,
+        publisher_id,
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| {
+        ApiError::Internal(ab_core::Error::Database(format!(
+            "publisher books count: {e}"
+        )))
+    })?;
+
+    let rows = sqlx::query!(
+        r#"SELECT book_id          AS "book_id!: i64",
+                  title            AS "title!: String",
+                  release_date     AS "release_date?: String",
+                  duration_ms      AS "duration_ms?: i64",
+                  reading_status   AS "reading_status!: String"
+             FROM books
+            WHERE publisher_id = ?
+            ORDER BY release_date IS NULL,
+                     release_date DESC,
+                     title COLLATE NOCASE
+            LIMIT ? OFFSET ?"#,
+        publisher_id,
+        limit,
+        offset,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| ApiError::Internal(ab_core::Error::Database(format!("publisher books: {e}"))))?;
+
+    let books: Vec<EntityBookSummary> = rows
+        .into_iter()
+        .map(|r| EntityBookSummary {
+            book_id: r.book_id,
+            title: r.title,
+            release_date: r.release_date,
+            duration_ms: r.duration_ms,
+            reading_status: r.reading_status,
+        })
+        .collect();
+
+    Ok((
+        StatusCode::OK,
+        Json(EntityBooksResponse {
+            books,
             total,
             limit,
             offset,

@@ -14,6 +14,7 @@ use axum::{Json, response::Response};
 use serde::{Deserialize, Serialize};
 
 use crate::ApiError;
+use crate::entity_books::{EntityBookSummary, EntityBooksQuery, EntityBooksResponse};
 use crate::pagination::{clamp_limit, clamp_offset};
 use crate::state::ApiState;
 
@@ -329,41 +330,9 @@ pub async fn narrators_list(
         .into_response())
 }
 
-/// One row in [`NarratorBooksResponse`].
-///
-/// Slim by design — same trade-off as [`NarratorListItem`]: enough
-/// for a narrator-detail page to render the book strip without
-/// re-fetching `/books/{id}` for each row.
-#[derive(Debug, Serialize)]
-pub struct NarratorBookEntry {
-    pub book_id: i64,
-    pub title: String,
-    pub release_date: Option<String>,
-    pub duration_ms: Option<i64>,
-    pub reading_status: String,
-}
-
-/// Response body for `GET /api/v1/narrators/{narrator_id}/books`.
-#[derive(Debug, Serialize)]
-pub struct NarratorBooksResponse {
-    pub books: Vec<NarratorBookEntry>,
-    pub total: i64,
-    pub limit: i64,
-    pub offset: i64,
-}
-
-/// Query-string params for [`narrators_books`].
-#[derive(Debug, Deserialize, Default)]
-pub struct NarratorBooksQuery {
-    #[serde(default)]
-    pub limit: Option<i64>,
-    #[serde(default)]
-    pub offset: Option<i64>,
-}
-
 /// `GET /api/v1/narrators/{narrator_id}/books[?limit=&offset=]`
 ///
-/// Returns `200 OK` with [`NarratorBooksResponse`] JSON listing
+/// Returns `200 OK` with [`EntityBooksResponse`] JSON listing
 /// the books linked via the `book_narrator` junction (multi-narrator
 /// model — a full-cast recording lands a row per (book, narrator)
 /// pair, so a 3-cast book is visible in 3 narrator detail pages).
@@ -387,7 +356,7 @@ pub struct NarratorBooksQuery {
 pub async fn narrators_books(
     State(state): State<ApiState>,
     Path(narrator_id): Path<i64>,
-    Query(params): Query<NarratorBooksQuery>,
+    Query(params): Query<EntityBooksQuery>,
 ) -> Result<Response, ApiError> {
     let pool = state.inner.library.pool();
     let limit = clamp_limit(params.limit);
@@ -446,9 +415,9 @@ pub async fn narrators_books(
     .await
     .map_err(|e| ApiError::Internal(ab_core::Error::Database(format!("narrator books: {e}"))))?;
 
-    let books: Vec<NarratorBookEntry> = rows
+    let books: Vec<EntityBookSummary> = rows
         .into_iter()
-        .map(|r| NarratorBookEntry {
+        .map(|r| EntityBookSummary {
             book_id: r.book_id,
             title: r.title,
             release_date: r.release_date,
@@ -459,7 +428,7 @@ pub async fn narrators_books(
 
     Ok((
         StatusCode::OK,
-        Json(NarratorBooksResponse {
+        Json(EntityBooksResponse {
             books,
             total,
             limit,
@@ -586,50 +555,7 @@ mod tests {
         assert!(items[0].get("aliases").is_none(), "list row omits aliases");
     }
 
-    #[test]
-    fn narrator_book_entry_serializes_with_expected_keys() {
-        let e = NarratorBookEntry {
-            book_id: 7,
-            title: "Mistborn: The Final Empire".into(),
-            release_date: Some("2006-07-17".into()),
-            duration_ms: Some(89_400_000),
-            reading_status: "reading".into(),
-        };
-        let json = serde_json::to_value(&e).unwrap();
-        assert_eq!(json["book_id"], 7);
-        assert_eq!(json["title"], "Mistborn: The Final Empire");
-        assert_eq!(json["release_date"], "2006-07-17");
-        assert_eq!(json["duration_ms"], 89_400_000);
-        assert_eq!(json["reading_status"], "reading");
-    }
-
-    #[test]
-    fn narrator_book_entry_preserves_null_optional_fields() {
-        let e = NarratorBookEntry {
-            book_id: 1,
-            title: "Untitled".into(),
-            release_date: None,
-            duration_ms: None,
-            reading_status: "want_to_read".into(),
-        };
-        let json = serde_json::to_value(&e).unwrap();
-        assert!(json.get("release_date").is_some());
-        assert!(json["release_date"].is_null());
-        assert!(json["duration_ms"].is_null());
-    }
-
-    #[test]
-    fn narrator_books_response_serializes_with_pagination_keys() {
-        let r = NarratorBooksResponse {
-            books: vec![],
-            total: 0,
-            limit: 50,
-            offset: 0,
-        };
-        let json = serde_json::to_string(&r).unwrap();
-        assert!(json.contains("\"books\""));
-        assert!(json.contains("\"total\""));
-        assert!(json.contains("\"limit\""));
-        assert!(json.contains("\"offset\""));
-    }
+    // Serialisation coverage for `EntityBookSummary` lives in
+    // `crate::entity_books` after the cycle-35 third-occurrence
+    // extraction — no need to duplicate here.
 }

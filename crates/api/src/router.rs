@@ -100,6 +100,10 @@ pub fn build_router(state: ApiState) -> Router {
             "/publishers/{publisher_id}",
             get(crate::publishers::publishers_get),
         )
+        .route(
+            "/publishers/{publisher_id}/books",
+            get(crate::publishers::publishers_books),
+        )
         .route("/search", get(crate::search::search))
         .route(
             "/operation_journal",

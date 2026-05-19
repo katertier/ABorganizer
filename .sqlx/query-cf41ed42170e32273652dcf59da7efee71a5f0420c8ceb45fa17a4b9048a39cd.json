@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT 1 AS \"n!: i64\" FROM publishers WHERE publisher_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "n!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "cf41ed42170e32273652dcf59da7efee71a5f0420c8ceb45fa17a4b9048a39cd"
+}
