@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"n!: i64\"\n             FROM book_collections\n            WHERE (?1 IS NULL OR name LIKE ?1 COLLATE NOCASE)\n              AND (?2 IS NULL OR kind = ?2)",
+  "describe": {
+    "columns": [
+      {
+        "name": "n!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d471e71566d7997aacf1ea7bbd872ba9137ed31bad6cd70d819c127cfc2fa29c"
+}

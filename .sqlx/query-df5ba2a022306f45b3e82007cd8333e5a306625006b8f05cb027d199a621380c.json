@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT c.collection_id  AS \"collection_id!: i64\",\n                      c.name           AS \"name!: String\",\n                      c.canonical_name AS \"canonical_name?: String\",\n                      c.audible_id     AS \"audible_id?: String\",\n                      c.kind           AS \"kind?: String\",\n                      (SELECT COUNT(*) FROM book_collection_members\n                        WHERE collection_id = c.collection_id)\n                          AS \"book_count!: i64\"\n                 FROM book_collections c\n                WHERE (?1 IS NULL OR c.name LIKE ?1 COLLATE NOCASE)\n                  AND (?2 IS NULL OR c.kind = ?2)\n                ORDER BY (SELECT COUNT(*) FROM book_collection_members\n                           WHERE collection_id = c.collection_id) DESC,\n                         c.name COLLATE NOCASE\n                LIMIT ?3 OFFSET ?4",
+  "describe": {
+    "columns": [
+      {
+        "name": "collection_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "name!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "canonical_name?: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "audible_id?: String",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "kind?: String",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "book_count!: i64",
+        "ordinal": 5,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "df5ba2a022306f45b3e82007cd8333e5a306625006b8f05cb027d199a621380c"
+}
