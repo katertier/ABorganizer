@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO book_collection_members (collection_id, book_id, source) VALUES (?, ?, 'scanner')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "db245d4284ea846ceff0ee48620e503c7d132205f41fa2c684beda1687112a39"
+}

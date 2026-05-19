@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT b.book_id   AS \"book_id!: i64\",\n                  bf.file_path AS \"file_path!: String\"\n             FROM books b\n             JOIN book_files bf ON bf.book_id = b.book_id\n            WHERE b.deleted_at IS NULL\n              AND bf.file_path LIKE ?\n            GROUP BY b.book_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "book_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "file_path!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "5d6f4b48dd9250071270101b48d6e96934ca26b82476d371d61eb0042b7b6480"
+}
