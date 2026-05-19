@@ -27,6 +27,7 @@ pub mod background;
 pub mod books_playlist;
 pub mod books_transcript;
 pub mod cleanup_targets;
+pub mod collections;
 pub mod doctor;
 pub mod entity_books;
 pub mod error;
