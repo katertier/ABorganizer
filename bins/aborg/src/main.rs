@@ -147,6 +147,58 @@ enum Command {
         #[command(subcommand)]
         action: AaxAction,
     },
+    /// Operation-journal inspector — list or show individual
+    /// `operation_journal` rows recorded by mutating endpoints
+    /// (ADR-0039). The journal feeds the daemon-startup recovery
+    /// pass; this surface is the operator-facing read API for
+    /// auditing what's been changed and replaying / forgiving
+    /// pending rows.
+    Journal {
+        #[command(subcommand)]
+        action: JournalAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum JournalAction {
+    /// List recent journal rows, newest first. All filter flags
+    /// pass through verbatim to the corresponding query params on
+    /// `GET /operation_journal`; omit a flag to leave its filter
+    /// open. Limit clamps at the API boundary (default 50, max 200).
+    List {
+        /// Filter to one `op_kind` (e.g. `book-status-set`,
+        /// `book-title-set`).
+        #[arg(long)]
+        kind: Option<String>,
+        /// Filter to one progress state: `pending` / `done` /
+        /// `failed` / `reversed`. Unknown values return empty.
+        #[arg(long)]
+        progress: Option<String>,
+        /// Filter to one batch id (multi-op transactional group).
+        #[arg(long = "batch")]
+        batch_id: Option<String>,
+        /// Filter to entries against one target kind (e.g. `book`).
+        /// Combine with `--target-id` to answer "what happened to
+        /// this entity?"
+        #[arg(long)]
+        target_kind: Option<String>,
+        /// Filter to entries against one target id. Typically
+        /// paired with `--target-kind`.
+        #[arg(long)]
+        target_id: Option<i64>,
+        /// Page size (1..=200, default 50).
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+        /// 0-based offset.
+        #[arg(long, default_value_t = 0)]
+        offset: i64,
+    },
+    /// Show one journal row by `op_id`. Returns 404 + non-zero
+    /// exit when the row doesn't exist.
+    Show {
+        /// The `op_id` from the journal (use `list` to find one).
+        op_id: i64,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -696,6 +748,35 @@ async fn main() -> Result<()> {
             AaxAction::Info { path } => aax_info(&path, cli.output)?,
             AaxAction::SetBytes => aax_set_bytes(cli.output)?,
             AaxAction::ForgetBytes => aax_forget_bytes(cli.output)?,
+        },
+        Command::Journal { action } => match action {
+            JournalAction::List {
+                kind,
+                progress,
+                batch_id,
+                target_kind,
+                target_id,
+                limit,
+                offset,
+            } => {
+                journal_list(
+                    &cli.daemon,
+                    JournalListFilters {
+                        kind,
+                        progress,
+                        batch_id,
+                        target_kind,
+                        target_id,
+                        limit,
+                        offset,
+                    },
+                    cli.output,
+                )
+                .await?;
+            }
+            JournalAction::Show { op_id } => {
+                journal_show(&cli.daemon, op_id, cli.output).await?;
+            }
         },
     }
     Ok(())
@@ -2608,6 +2689,162 @@ async fn audiologos_reject(
         }
         OutputFormat::Human => {
             tracing::info!(row_id = body.row_id, "audiologos.reject.done");
+        }
+    }
+    Ok(())
+}
+
+// ── Operation-journal inspector ──────────────────────────────────────
+
+/// JSON-mirror of `ab_api::operation_journal::OperationJournalRow`.
+///
+/// Defined here rather than depending on `ab-api` so the CLI stays
+/// light on transitive deps (the daemon binary already pulls in
+/// the full API surface; the CLI talks to it over HTTP). Field
+/// names are kept identical so `serde_json::to_string_pretty` of
+/// this struct is wire-equivalent to the daemon's serialised row.
+#[derive(Debug, Deserialize, Serialize)]
+struct JournalRowResp {
+    op_id: i64,
+    op_kind: String,
+    target_kind: String,
+    target_id: i64,
+    progress: String,
+    batch_id: Option<String>,
+    created_at: i64,
+    reversible: bool,
+    failed_reason: Option<String>,
+    pre_state_json: String,
+    post_state_json: Option<String>,
+}
+
+/// JSON-mirror of `ab_api::operation_journal::OperationJournalListResponse`.
+#[derive(Debug, Deserialize, Serialize)]
+struct JournalListResp {
+    rows: Vec<JournalRowResp>,
+    total: i64,
+    limit: i64,
+    offset: i64,
+}
+
+/// CLI-side bundle of the filters passed to `GET /operation_journal`.
+///
+/// Grouped into a struct so [`journal_list`] doesn't take eight
+/// positional args and so clippy doesn't trip on `too_many_arguments`.
+struct JournalListFilters {
+    kind: Option<String>,
+    progress: Option<String>,
+    batch_id: Option<String>,
+    target_kind: Option<String>,
+    target_id: Option<i64>,
+    limit: i64,
+    offset: i64,
+}
+
+async fn journal_list(
+    daemon: &str,
+    filters: JournalListFilters,
+    output: OutputFormat,
+) -> Result<()> {
+    let mut req = client().get(format!("{daemon}/api/v1/operation_journal"));
+    let mut query: Vec<(&str, String)> = Vec::with_capacity(7);
+    if let Some(k) = filters.kind.as_ref() {
+        query.push(("op_kind", k.clone()));
+    }
+    if let Some(p) = filters.progress.as_ref() {
+        query.push(("progress", p.clone()));
+    }
+    if let Some(b) = filters.batch_id.as_ref() {
+        query.push(("batch_id", b.clone()));
+    }
+    if let Some(t) = filters.target_kind.as_ref() {
+        query.push(("target_kind", t.clone()));
+    }
+    if let Some(id) = filters.target_id {
+        query.push(("target_id", id.to_string()));
+    }
+    query.push(("limit", filters.limit.to_string()));
+    query.push(("offset", filters.offset.to_string()));
+    req = req.query(&query);
+
+    let resp = req.send().await.context("GET /operation_journal")?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        anyhow::bail!("journal list failed: HTTP {status}");
+    }
+    let body: JournalListResp = resp.json().await.context("parse journal list response")?;
+
+    match output {
+        OutputFormat::Json => {
+            let s = serde_json::to_string_pretty(&body).context("encode")?;
+            println!("{s}");
+        }
+        OutputFormat::Human => {
+            // Compact table. println! deliberately bypasses tracing
+            // so the table renders as a single visual block instead
+            // of one-prefix-per-row.
+            println!(
+                "{:>8}  {:<24}  {:<10}  {:<10}  {:>10}  created_at",
+                "op_id", "op_kind", "progress", "target", "id",
+            );
+            for r in &body.rows {
+                println!(
+                    "{:>8}  {:<24}  {:<10}  {:<10}  {:>10}  {}",
+                    r.op_id, r.op_kind, r.progress, r.target_kind, r.target_id, r.created_at,
+                );
+            }
+            tracing::info!(
+                total = body.total,
+                shown = body.rows.len(),
+                limit = body.limit,
+                offset = body.offset,
+                "journal.list.done",
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn journal_show(daemon: &str, op_id: i64, output: OutputFormat) -> Result<()> {
+    let url = format!("{daemon}/api/v1/operation_journal/{op_id}");
+    let resp = client()
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    if resp.status().as_u16() == 404 {
+        anyhow::bail!("op_id {op_id} not found");
+    }
+    if !resp.status().is_success() {
+        let status = resp.status();
+        anyhow::bail!("journal show failed: HTTP {status}");
+    }
+    let body: JournalRowResp = resp.json().await.context("parse journal row response")?;
+
+    match output {
+        OutputFormat::Json => {
+            let s = serde_json::to_string_pretty(&body).context("encode")?;
+            println!("{s}");
+        }
+        OutputFormat::Human => {
+            tracing::info!(
+                op_id = body.op_id,
+                op_kind = %body.op_kind,
+                progress = %body.progress,
+                target_kind = %body.target_kind,
+                target_id = body.target_id,
+                reversible = body.reversible,
+                created_at = body.created_at,
+                batch_id = body.batch_id.as_deref().unwrap_or("-"),
+                failed_reason = body.failed_reason.as_deref().unwrap_or("-"),
+                "journal.show.done",
+            );
+            // Multi-line JSON blocks go to stdout, not tracing, so
+            // they pipe cleanly to `jq` / a pager / a file.
+            println!("pre_state:  {}", body.pre_state_json);
+            if let Some(post) = body.post_state_json.as_deref() {
+                println!("post_state: {post}");
+            }
         }
     }
     Ok(())
