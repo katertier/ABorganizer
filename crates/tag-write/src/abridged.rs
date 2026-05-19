@@ -51,6 +51,7 @@ use lofty::mp4::{Atom, AtomData, AtomIdent, Ilst, Mp4File};
 use lofty::mpeg::MpegFile;
 use lofty::probe::Probe;
 
+use crate::ITUNES_MEAN;
 use crate::write::FieldWriteOutcome;
 
 /// User-defined text frame description (`ID3v2`) / freeform name
@@ -58,13 +59,6 @@ use crate::write::FieldWriteOutcome;
 /// branches can't drift on capitalization (`ABRIDGED` vs
 /// `Abridged` would each create a different on-disk tag).
 const ABRIDGED_TAG_NAME: &str = "ABRIDGED";
-
-/// iTunes' reverse-DNS namespace for freeform atoms. Matches
-/// `com.apple.iTunes` exactly — used by every iTunes/Music
-/// custom MP4 atom (`SUBTITLE`, `BOOK`, `CDID`, etc.). Other
-/// reverse-DNS namespaces exist in the wild but iTunes is the
-/// audiobook-ecosystem convention.
-const ITUNES_MEAN: &str = "com.apple.iTunes";
 
 /// Write the `Abridged` field as a format-specific custom tag.
 ///
