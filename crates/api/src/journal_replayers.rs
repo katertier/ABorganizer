@@ -676,6 +676,342 @@ impl Replayer for CollectionRenameReplayer {
     }
 }
 
+// ── PATCH /collections/{id} per-nullable-field replayers ────────────
+//
+// Each replayer handles ONE nullable-string column on
+// `book_collections` (`canonical_name`, `audible_id`, `description`,
+// `kind`). They share the same drift-detection shape as
+// [`CollectionRenameReplayer`] but with `Option<String>` semantics
+// — `pre_state.current` and `pre_state.intent` are each either a
+// JSON string or `null`. A common helper [`parse_optional_string`]
+// shoves the JSON value into an `Option<String>` for comparison.
+
+/// Parse a `pre_state.{current,intent}` JSON value into an
+/// `Option<String>`. Returns `Err(())` for any non-string,
+/// non-null type so the replayer can surface a `Skipped` reason.
+fn parse_optional_string(v: &Value) -> Result<Option<String>, ()> {
+    match v {
+        Value::String(s) => Ok(Some(s.clone())),
+        Value::Null => Ok(None),
+        _ => Err(()),
+    }
+}
+
+/// Re-applies `PATCH /collections/{id}` `canonical_name` mutations.
+///
+/// Same drift-detection shape as [`CollectionRenameReplayer`] but
+/// over nullable-string semantics.
+pub struct CollectionCanonicalNameReplayer;
+
+#[async_trait]
+impl Replayer for CollectionCanonicalNameReplayer {
+    fn op_kind(&self) -> &'static str {
+        crate::collections::OP_KIND_COLLECTION_CANONICAL_NAME_SET
+    }
+
+    async fn try_replay(
+        &self,
+        pool: &SqlitePool,
+        entry: &JournalEntry,
+    ) -> Result<ReplayDecision, JournalError> {
+        let collection_id = entry.target.id;
+        let pre = &entry.pre_state;
+        let Some(intent_v) = pre.get("intent") else {
+            return Ok(ReplayDecision::Skipped(
+                "pre_state missing 'intent' field".to_owned(),
+            ));
+        };
+        let Some(recorded_current_v) = pre.get("current") else {
+            return Ok(ReplayDecision::Skipped(
+                "pre_state missing 'current' field".to_owned(),
+            ));
+        };
+        let Ok(intent) = parse_optional_string(intent_v) else {
+            return Ok(ReplayDecision::Skipped(format!(
+                "pre_state.intent={intent_v} is not a string or null"
+            )));
+        };
+        let Ok(recorded_current) = parse_optional_string(recorded_current_v) else {
+            return Ok(ReplayDecision::Skipped(format!(
+                "pre_state.current={recorded_current_v} is not a string or null"
+            )));
+        };
+
+        let current: Option<Option<String>> = sqlx::query_scalar!(
+            r#"SELECT canonical_name AS "canonical_name?: String"
+                 FROM book_collections WHERE collection_id = ?"#,
+            collection_id,
+        )
+        .fetch_optional(pool)
+        .await?;
+        let Some(current) = current else {
+            return Ok(ReplayDecision::Skipped(format!(
+                "collection {collection_id} no longer exists"
+            )));
+        };
+        if current == intent {
+            return Ok(ReplayDecision::Skipped(format!(
+                "already applied — canonical_name is already {intent:?}"
+            )));
+        }
+        if current != recorded_current {
+            return Ok(ReplayDecision::Skipped(format!(
+                "drift detected — current canonical_name is {current:?}, \
+                 expected {recorded_current:?} (someone else changed it)"
+            )));
+        }
+        sqlx::query!(
+            "UPDATE book_collections SET canonical_name = ?, \
+             updated_at = strftime('%s','now') WHERE collection_id = ?",
+            intent,
+            collection_id,
+        )
+        .execute(pool)
+        .await?;
+        Ok(ReplayDecision::Retried(json!({ "canonical_name": intent })))
+    }
+}
+
+/// Re-applies `PATCH /collections/{id}` `audible_id` mutations.
+///
+/// Partial UNIQUE on `audible_id` means a replayer may hit
+/// constraint failure if a different collection now owns the
+/// target ASIN — that surfaces as a 409 on the original PATCH
+/// path, and as a drift-`Skipped` decision here (the pre-check
+/// catches the collision case before the UPDATE).
+pub struct CollectionAudibleIdReplayer;
+
+#[async_trait]
+impl Replayer for CollectionAudibleIdReplayer {
+    fn op_kind(&self) -> &'static str {
+        crate::collections::OP_KIND_COLLECTION_AUDIBLE_ID_SET
+    }
+
+    async fn try_replay(
+        &self,
+        pool: &SqlitePool,
+        entry: &JournalEntry,
+    ) -> Result<ReplayDecision, JournalError> {
+        let collection_id = entry.target.id;
+        let pre = &entry.pre_state;
+        let Some(intent_v) = pre.get("intent") else {
+            return Ok(ReplayDecision::Skipped(
+                "pre_state missing 'intent' field".to_owned(),
+            ));
+        };
+        let Some(recorded_current_v) = pre.get("current") else {
+            return Ok(ReplayDecision::Skipped(
+                "pre_state missing 'current' field".to_owned(),
+            ));
+        };
+        let Ok(intent) = parse_optional_string(intent_v) else {
+            return Ok(ReplayDecision::Skipped(format!(
+                "pre_state.intent={intent_v} is not a string or null"
+            )));
+        };
+        let Ok(recorded_current) = parse_optional_string(recorded_current_v) else {
+            return Ok(ReplayDecision::Skipped(format!(
+                "pre_state.current={recorded_current_v} is not a string or null"
+            )));
+        };
+
+        let current: Option<Option<String>> = sqlx::query_scalar!(
+            r#"SELECT audible_id AS "audible_id?: String"
+                 FROM book_collections WHERE collection_id = ?"#,
+            collection_id,
+        )
+        .fetch_optional(pool)
+        .await?;
+        let Some(current) = current else {
+            return Ok(ReplayDecision::Skipped(format!(
+                "collection {collection_id} no longer exists"
+            )));
+        };
+        if current == intent {
+            return Ok(ReplayDecision::Skipped(format!(
+                "already applied — audible_id is already {intent:?}"
+            )));
+        }
+        if current != recorded_current {
+            return Ok(ReplayDecision::Skipped(format!(
+                "drift detected — current audible_id is {current:?}, \
+                 expected {recorded_current:?}"
+            )));
+        }
+        // Pre-check UNIQUE collision so we surface as Skipped, not
+        // as a JournalError::Db on the UPDATE.
+        if let Some(ref intent_str) = intent {
+            let collision: Option<i64> = sqlx::query_scalar!(
+                r#"SELECT collection_id AS "id!: i64"
+                     FROM book_collections
+                    WHERE audible_id = ? AND collection_id != ?"#,
+                intent_str,
+                collection_id,
+            )
+            .fetch_optional(pool)
+            .await?;
+            if let Some(other_id) = collision {
+                return Ok(ReplayDecision::Skipped(format!(
+                    "audible_id collision — {intent_str:?} now belongs to collection {other_id}"
+                )));
+            }
+        }
+        sqlx::query!(
+            "UPDATE book_collections SET audible_id = ?, \
+             updated_at = strftime('%s','now') WHERE collection_id = ?",
+            intent,
+            collection_id,
+        )
+        .execute(pool)
+        .await?;
+        Ok(ReplayDecision::Retried(json!({ "audible_id": intent })))
+    }
+}
+
+/// Re-applies `PATCH /collections/{id}` `description` mutations.
+pub struct CollectionDescriptionReplayer;
+
+#[async_trait]
+impl Replayer for CollectionDescriptionReplayer {
+    fn op_kind(&self) -> &'static str {
+        crate::collections::OP_KIND_COLLECTION_DESCRIPTION_SET
+    }
+
+    async fn try_replay(
+        &self,
+        pool: &SqlitePool,
+        entry: &JournalEntry,
+    ) -> Result<ReplayDecision, JournalError> {
+        let collection_id = entry.target.id;
+        let pre = &entry.pre_state;
+        let Some(intent_v) = pre.get("intent") else {
+            return Ok(ReplayDecision::Skipped(
+                "pre_state missing 'intent' field".to_owned(),
+            ));
+        };
+        let Some(recorded_current_v) = pre.get("current") else {
+            return Ok(ReplayDecision::Skipped(
+                "pre_state missing 'current' field".to_owned(),
+            ));
+        };
+        let Ok(intent) = parse_optional_string(intent_v) else {
+            return Ok(ReplayDecision::Skipped(format!(
+                "pre_state.intent={intent_v} is not a string or null"
+            )));
+        };
+        let Ok(recorded_current) = parse_optional_string(recorded_current_v) else {
+            return Ok(ReplayDecision::Skipped(format!(
+                "pre_state.current={recorded_current_v} is not a string or null"
+            )));
+        };
+
+        let current: Option<Option<String>> = sqlx::query_scalar!(
+            r#"SELECT description AS "description?: String"
+                 FROM book_collections WHERE collection_id = ?"#,
+            collection_id,
+        )
+        .fetch_optional(pool)
+        .await?;
+        let Some(current) = current else {
+            return Ok(ReplayDecision::Skipped(format!(
+                "collection {collection_id} no longer exists"
+            )));
+        };
+        if current == intent {
+            return Ok(ReplayDecision::Skipped(format!(
+                "already applied — description is already {intent:?}"
+            )));
+        }
+        if current != recorded_current {
+            return Ok(ReplayDecision::Skipped(format!(
+                "drift detected — current description is {current:?}, \
+                 expected {recorded_current:?}"
+            )));
+        }
+        sqlx::query!(
+            "UPDATE book_collections SET description = ?, \
+             updated_at = strftime('%s','now') WHERE collection_id = ?",
+            intent,
+            collection_id,
+        )
+        .execute(pool)
+        .await?;
+        Ok(ReplayDecision::Retried(json!({ "description": intent })))
+    }
+}
+
+/// Re-applies `PATCH /collections/{id}` `kind` mutations.
+pub struct CollectionKindReplayer;
+
+#[async_trait]
+impl Replayer for CollectionKindReplayer {
+    fn op_kind(&self) -> &'static str {
+        crate::collections::OP_KIND_COLLECTION_KIND_SET
+    }
+
+    async fn try_replay(
+        &self,
+        pool: &SqlitePool,
+        entry: &JournalEntry,
+    ) -> Result<ReplayDecision, JournalError> {
+        let collection_id = entry.target.id;
+        let pre = &entry.pre_state;
+        let Some(intent_v) = pre.get("intent") else {
+            return Ok(ReplayDecision::Skipped(
+                "pre_state missing 'intent' field".to_owned(),
+            ));
+        };
+        let Some(recorded_current_v) = pre.get("current") else {
+            return Ok(ReplayDecision::Skipped(
+                "pre_state missing 'current' field".to_owned(),
+            ));
+        };
+        let Ok(intent) = parse_optional_string(intent_v) else {
+            return Ok(ReplayDecision::Skipped(format!(
+                "pre_state.intent={intent_v} is not a string or null"
+            )));
+        };
+        let Ok(recorded_current) = parse_optional_string(recorded_current_v) else {
+            return Ok(ReplayDecision::Skipped(format!(
+                "pre_state.current={recorded_current_v} is not a string or null"
+            )));
+        };
+
+        let current: Option<Option<String>> = sqlx::query_scalar!(
+            r#"SELECT kind AS "kind?: String"
+                 FROM book_collections WHERE collection_id = ?"#,
+            collection_id,
+        )
+        .fetch_optional(pool)
+        .await?;
+        let Some(current) = current else {
+            return Ok(ReplayDecision::Skipped(format!(
+                "collection {collection_id} no longer exists"
+            )));
+        };
+        if current == intent {
+            return Ok(ReplayDecision::Skipped(format!(
+                "already applied — kind is already {intent:?}"
+            )));
+        }
+        if current != recorded_current {
+            return Ok(ReplayDecision::Skipped(format!(
+                "drift detected — current kind is {current:?}, \
+                 expected {recorded_current:?}"
+            )));
+        }
+        sqlx::query!(
+            "UPDATE book_collections SET kind = ?, \
+             updated_at = strftime('%s','now') WHERE collection_id = ?",
+            intent,
+            collection_id,
+        )
+        .execute(pool)
+        .await?;
+        Ok(ReplayDecision::Retried(json!({ "kind": intent })))
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {

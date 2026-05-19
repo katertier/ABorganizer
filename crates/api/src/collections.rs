@@ -685,12 +685,32 @@ pub async fn collections_create(
 /// of `PATCH /collections/{id}` (ADR-0039).
 ///
 /// Pre-state: `{ current: <prev_name>, intent: <new_name> }`.
-/// Capture is name-only for now; the other four fields
-/// (`canonical_name`, `audible_id`, `description`, `kind`) get
-/// their own replayers in a follow-up slice — exactly the same
-/// staging pattern PATCH /books used in cycle 33 S1 (title-only,
-/// other fields later).
+/// The `name` field is `NOT NULL` so both sides are always
+/// strings. Other field replayers (`canonical_name`, `audible_id`,
+/// `description`, `kind`) carry `Option<String>` semantics — see
+/// the per-field `OP_KIND_COLLECTION_*_SET` constants below.
 pub const OP_KIND_COLLECTION_NAME_SET: &str = "collection-name-set";
+
+/// `op_kind` for the `canonical_name` field of `PATCH /collections/{id}`.
+/// Pre-state: `{ current: <prev|null>, intent: <new|null> }`.
+pub const OP_KIND_COLLECTION_CANONICAL_NAME_SET: &str = "collection-canonical-name-set";
+
+/// `op_kind` for the `audible_id` field of `PATCH /collections/{id}`.
+///
+/// Pre-state: `{ current: <prev|null>, intent: <new|null> }`. Note:
+/// the partial UNIQUE index on `audible_id` means a replayer can
+/// still fail with 409 if a different collection now claims the
+/// target ASIN; the replayer reports `Skipped` in that case.
+pub const OP_KIND_COLLECTION_AUDIBLE_ID_SET: &str = "collection-audible-id-set";
+
+/// `op_kind` for the `description` field of `PATCH /collections/{id}`.
+/// Pre-state: `{ current: <prev|null>, intent: <new|null> }`.
+pub const OP_KIND_COLLECTION_DESCRIPTION_SET: &str = "collection-description-set";
+
+/// `op_kind` for the `kind` field of `PATCH /collections/{id}`.
+/// Pre-state: `{ current: <prev|null>, intent: <new|null> }`. Free
+/// text today; pin to an enum once scanner + GUI usage settles.
+pub const OP_KIND_COLLECTION_KIND_SET: &str = "collection-kind-set";
 
 /// Body of `PATCH /api/v1/collections/{collection_id}`.
 ///
@@ -733,9 +753,15 @@ pub struct CollectionPatchResponse {
 /// `409 Conflict` when the UNIQUE constraint on `(name)` (or the
 /// partial UNIQUE on `audible_id`) fires.
 ///
-/// Journal capture: only the `name` field is wired in this slice
-/// (`op_kind` `collection-name-set`). Other field replayers ship as
-/// follow-ups — mirrors the cycle 33 S1 PATCH /books pattern.
+/// Journal capture: every present field gets its own
+/// `operation_journal` row with a per-field `op_kind`
+/// (`collection-name-set`, `collection-canonical-name-set`,
+/// `collection-audible-id-set`, `collection-description-set`,
+/// `collection-kind-set`). Each has a matching `Replayer`
+/// registered in the daemon (`CollectionRenameReplayer`,
+/// `CollectionCanonicalNameReplayer`, …). A multi-field PATCH
+/// captures multiple journal rows that finalize together on tx
+/// commit/rollback.
 ///
 /// # Errors
 ///
@@ -789,36 +815,171 @@ pub async fn collections_patch(
         None => None,
     };
 
-    // 3. Journal capture (ADR-0039): name only. Pre-read current
-    //    before the UPDATE so drift detection works on replay.
-    let journal_op: Option<(i64, String)> = match new_name.as_deref() {
-        Some(intent) => {
-            let current: String = sqlx::query_scalar!(
-                r#"SELECT name AS "name!: String" FROM book_collections WHERE collection_id = ?"#,
-                collection_id,
-            )
-            .fetch_one(pool)
-            .await
-            .map_err(|e| {
-                ApiError::Internal(ab_core::Error::Database(format!(
-                    "collections_patch name pre-read: {e}"
-                )))
-            })?;
-            let entry = ab_journal::NewEntry {
-                op_kind: OP_KIND_COLLECTION_NAME_SET,
-                target: ab_journal::Target {
-                    kind: "collection".to_owned(),
-                    id: collection_id,
-                },
-                pre_state: serde_json::json!({ "current": current, "intent": intent }),
-                reversible: true,
-                batch_id: None,
-            };
-            let op_id = crate::journal_capture::record_pending(pool, &entry).await?;
-            Some((op_id, intent.to_owned()))
-        }
-        None => None,
-    };
+    // 3. Per-field journal capture (ADR-0039). Each field that's
+    //    present in the request gets pre-read + a `pending` journal
+    //    row before the tx; the uniform finalize loop after the tx
+    //    flips every captured row to `done` or `failed` atomically.
+    //    Mirrors the books_patch shape.
+    //
+    //    Nullable fields (canonical_name / audible_id / description
+    //    / kind) record their `current` + `intent` as either a JSON
+    //    string OR `null` so a replayer can round-trip the
+    //    Option<String> semantics losslessly.
+    let mut journals: Vec<PendingJournal> = Vec::new();
+    if let Some(intent) = new_name.as_deref() {
+        let current: String = sqlx::query_scalar!(
+            r#"SELECT name AS "name!: String" FROM book_collections WHERE collection_id = ?"#,
+            collection_id,
+        )
+        .fetch_one(pool)
+        .await
+        .map_err(|e| {
+            ApiError::Internal(ab_core::Error::Database(format!(
+                "collections_patch name pre-read: {e}"
+            )))
+        })?;
+        let entry = ab_journal::NewEntry {
+            op_kind: OP_KIND_COLLECTION_NAME_SET,
+            target: ab_journal::Target {
+                kind: "collection".to_owned(),
+                id: collection_id,
+            },
+            pre_state: serde_json::json!({ "current": current, "intent": intent }),
+            reversible: true,
+            batch_id: None,
+        };
+        let op_id = crate::journal_capture::record_pending(pool, &entry).await?;
+        journals.push(PendingJournal {
+            op_id,
+            field_name: "name",
+            intent: serde_json::Value::String(intent.to_owned()),
+            context: "api.collections_patch.name",
+        });
+    }
+    if let Some(raw) = req.canonical_name.as_deref() {
+        let intent_opt = collapse_blank_to_none(raw);
+        let current: Option<String> = sqlx::query_scalar!(
+            r#"SELECT canonical_name AS "canonical_name?: String" FROM book_collections WHERE collection_id = ?"#,
+            collection_id,
+        )
+        .fetch_one(pool)
+        .await
+        .map_err(|e| {
+            ApiError::Internal(ab_core::Error::Database(format!(
+                "collections_patch canonical_name pre-read: {e}"
+            )))
+        })?;
+        let entry = ab_journal::NewEntry {
+            op_kind: OP_KIND_COLLECTION_CANONICAL_NAME_SET,
+            target: ab_journal::Target {
+                kind: "collection".to_owned(),
+                id: collection_id,
+            },
+            pre_state: serde_json::json!({ "current": current, "intent": intent_opt }),
+            reversible: true,
+            batch_id: None,
+        };
+        let op_id = crate::journal_capture::record_pending(pool, &entry).await?;
+        journals.push(PendingJournal {
+            op_id,
+            field_name: "canonical_name",
+            intent: optional_string_value(intent_opt.as_deref()),
+            context: "api.collections_patch.canonical_name",
+        });
+    }
+    if let Some(raw) = req.audible_id.as_deref() {
+        let intent_opt = collapse_blank_to_none(raw);
+        let current: Option<String> = sqlx::query_scalar!(
+            r#"SELECT audible_id AS "audible_id?: String" FROM book_collections WHERE collection_id = ?"#,
+            collection_id,
+        )
+        .fetch_one(pool)
+        .await
+        .map_err(|e| {
+            ApiError::Internal(ab_core::Error::Database(format!(
+                "collections_patch audible_id pre-read: {e}"
+            )))
+        })?;
+        let entry = ab_journal::NewEntry {
+            op_kind: OP_KIND_COLLECTION_AUDIBLE_ID_SET,
+            target: ab_journal::Target {
+                kind: "collection".to_owned(),
+                id: collection_id,
+            },
+            pre_state: serde_json::json!({ "current": current, "intent": intent_opt }),
+            reversible: true,
+            batch_id: None,
+        };
+        let op_id = crate::journal_capture::record_pending(pool, &entry).await?;
+        journals.push(PendingJournal {
+            op_id,
+            field_name: "audible_id",
+            intent: optional_string_value(intent_opt.as_deref()),
+            context: "api.collections_patch.audible_id",
+        });
+    }
+    if let Some(raw) = req.description.as_deref() {
+        let intent_opt = collapse_blank_to_none(raw);
+        let current: Option<String> = sqlx::query_scalar!(
+            r#"SELECT description AS "description?: String" FROM book_collections WHERE collection_id = ?"#,
+            collection_id,
+        )
+        .fetch_one(pool)
+        .await
+        .map_err(|e| {
+            ApiError::Internal(ab_core::Error::Database(format!(
+                "collections_patch description pre-read: {e}"
+            )))
+        })?;
+        let entry = ab_journal::NewEntry {
+            op_kind: OP_KIND_COLLECTION_DESCRIPTION_SET,
+            target: ab_journal::Target {
+                kind: "collection".to_owned(),
+                id: collection_id,
+            },
+            pre_state: serde_json::json!({ "current": current, "intent": intent_opt }),
+            reversible: true,
+            batch_id: None,
+        };
+        let op_id = crate::journal_capture::record_pending(pool, &entry).await?;
+        journals.push(PendingJournal {
+            op_id,
+            field_name: "description",
+            intent: optional_string_value(intent_opt.as_deref()),
+            context: "api.collections_patch.description",
+        });
+    }
+    if let Some(raw) = req.kind.as_deref() {
+        let intent_opt = collapse_blank_to_none(raw);
+        let current: Option<String> = sqlx::query_scalar!(
+            r#"SELECT kind AS "kind?: String" FROM book_collections WHERE collection_id = ?"#,
+            collection_id,
+        )
+        .fetch_one(pool)
+        .await
+        .map_err(|e| {
+            ApiError::Internal(ab_core::Error::Database(format!(
+                "collections_patch kind pre-read: {e}"
+            )))
+        })?;
+        let entry = ab_journal::NewEntry {
+            op_kind: OP_KIND_COLLECTION_KIND_SET,
+            target: ab_journal::Target {
+                kind: "collection".to_owned(),
+                id: collection_id,
+            },
+            pre_state: serde_json::json!({ "current": current, "intent": intent_opt }),
+            reversible: true,
+            batch_id: None,
+        };
+        let op_id = crate::journal_capture::record_pending(pool, &entry).await?;
+        journals.push(PendingJournal {
+            op_id,
+            field_name: "kind",
+            intent: optional_string_value(intent_opt.as_deref()),
+            context: "api.collections_patch.kind",
+        });
+    }
 
     // 4. Apply the updates in a transaction.
     let mut updated: Vec<String> = Vec::new();
@@ -893,30 +1054,9 @@ pub async fn collections_patch(
     }
     .await;
 
-    // 5. Finalize the captured journal row (best-effort) and map
+    // 5. Finalize each captured journal row (best-effort) and map
     //    UNIQUE-conflict failures to 409.
-    if let Some((op_id, intent)) = journal_op {
-        match &tx_result {
-            Ok(()) => {
-                crate::journal_capture::mark_done_or_log(
-                    pool,
-                    op_id,
-                    &serde_json::json!({ "name": intent }),
-                    "api.collections_patch.name",
-                )
-                .await;
-            }
-            Err(e) => {
-                crate::journal_capture::mark_failed_or_log(
-                    pool,
-                    op_id,
-                    &format!("collections_patch commit failed: {e}"),
-                    "api.collections_patch.name",
-                )
-                .await;
-            }
-        }
-    }
+    finalize_pending_journals(pool, journals, &tx_result).await;
 
     match tx_result {
         Ok(()) => Ok((
@@ -944,6 +1084,72 @@ pub async fn collections_patch(
             Err(ApiError::Internal(ab_core::Error::Database(format!(
                 "collections_patch tx: {e}"
             ))))
+        }
+    }
+}
+
+/// Map an `Option<&str>` into the JSON value the journal stores
+/// for nullable-string intent / post-state fields. `Some(s)` →
+/// JSON string; `None` → JSON null.
+fn optional_string_value(v: Option<&str>) -> serde_json::Value {
+    v.map_or(serde_json::Value::Null, |s| {
+        serde_json::Value::String(s.to_owned())
+    })
+}
+
+/// One pending `operation_journal` row captured by
+/// [`collections_patch`] before the tx. Aggregated into a `Vec`
+/// so the post-tx finalize pass marks every row `done` (on
+/// commit) or `failed` (on rollback) atomically — no
+/// partial-state where some fields land `done` and others stay
+/// `pending`. Same shape as the `PendingJournal` in `router.rs`
+/// for `PATCH /books`.
+struct PendingJournal {
+    op_id: i64,
+    /// Column name (`"name"`, `"canonical_name"`, …). Used as
+    /// the `post_state` JSON key on success so the rendered row
+    /// reads `{ <field>: <intent> }`.
+    field_name: &'static str,
+    /// Intent value recorded in `pre_state.intent`. For `name`
+    /// it's always a JSON string; for the nullable fields it's
+    /// either a JSON string or `null`.
+    intent: serde_json::Value,
+    /// Tracing context string for `mark_done_or_log` /
+    /// `mark_failed_or_log` (`"api.collections_patch.<field>"`).
+    context: &'static str,
+}
+
+/// Flip every captured pending journal row to `done` (on commit)
+/// or `failed` (on rollback). Best-effort per
+/// [`crate::journal_capture`] semantics — a row left `pending`
+/// here gets reaped by the next daemon-startup recovery pass.
+async fn finalize_pending_journals(
+    pool: &sqlx::SqlitePool,
+    journals: Vec<PendingJournal>,
+    tx_result: &Result<(), sqlx::Error>,
+) {
+    for j in journals {
+        match tx_result {
+            Ok(()) => {
+                let mut post = serde_json::Map::new();
+                post.insert(j.field_name.to_owned(), j.intent);
+                crate::journal_capture::mark_done_or_log(
+                    pool,
+                    j.op_id,
+                    &serde_json::Value::Object(post),
+                    j.context,
+                )
+                .await;
+            }
+            Err(e) => {
+                crate::journal_capture::mark_failed_or_log(
+                    pool,
+                    j.op_id,
+                    &format!("collections_patch commit failed: {e}"),
+                    j.context,
+                )
+                .await;
+            }
         }
     }
 }

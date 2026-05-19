@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE book_collections SET description = ?, updated_at = strftime('%s','now') WHERE collection_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "d23d9420aa62da81082b96fbc6290fa395f3ff96c75b3198cd6b0120bca042db"
+}

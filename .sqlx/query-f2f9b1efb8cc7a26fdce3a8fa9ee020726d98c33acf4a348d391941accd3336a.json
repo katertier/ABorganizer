@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT collection_id AS \"id!: i64\"\n                     FROM book_collections\n                    WHERE audible_id = ? AND collection_id != ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "f2f9b1efb8cc7a26fdce3a8fa9ee020726d98c33acf4a348d391941accd3336a"
+}

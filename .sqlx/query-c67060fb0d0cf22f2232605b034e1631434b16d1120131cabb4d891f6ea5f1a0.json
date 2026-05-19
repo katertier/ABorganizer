@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT audible_id AS \"audible_id?: String\"\n                 FROM book_collections WHERE collection_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "audible_id?: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "c67060fb0d0cf22f2232605b034e1631434b16d1120131cabb4d891f6ea5f1a0"
+}
