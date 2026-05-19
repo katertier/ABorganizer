@@ -95,6 +95,11 @@ pub fn build_router(state: ApiState) -> Router {
         )
         .route("/series", get(crate::series::series_list))
         .route("/series/{series_id}", get(crate::series::series_get))
+        .route("/publishers", get(crate::publishers::publishers_list))
+        .route(
+            "/publishers/{publisher_id}",
+            get(crate::publishers::publishers_get),
+        )
         .route("/search", get(crate::search::search))
         .route(
             "/operation_journal",
