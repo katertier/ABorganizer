@@ -24,6 +24,7 @@ pub mod audiologo_review;
 pub mod auth;
 pub mod authors;
 pub mod background;
+pub mod books_chapters_subtitles;
 pub mod books_playlist;
 pub mod books_transcript;
 pub mod cleanup_targets;

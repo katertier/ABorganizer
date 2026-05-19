@@ -300,6 +300,16 @@ async fn books_transcript_get_protected() {
 }
 
 #[tokio::test]
+async fn books_chapters_srt_protected() {
+    assert_protected("GET", "/books/1/chapters.srt").await;
+}
+
+#[tokio::test]
+async fn books_chapters_vtt_protected() {
+    assert_protected("GET", "/books/1/chapters.vtt").await;
+}
+
+#[tokio::test]
 async fn authors_get_protected() {
     assert_protected("GET", "/authors/1").await;
 }
