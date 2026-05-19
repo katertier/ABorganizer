@@ -1552,6 +1552,117 @@ impl DoctorCheck for ProvenanceWinnerConflictCheck {
     }
 }
 
+/// `provenance-stale-stages` — flag rows whose stage isn't registered.
+///
+/// Drift here means a stage was renamed (or removed) but old
+/// `book_field_provenance` rows weren't migrated forward; the
+/// field-winner picker keeps the stale row's confidence but the
+/// human-facing source attribution is wrong.
+///
+/// Constructed with the live set of registered stage names (sourced from
+/// `Dag::known_stage_names()` at daemon boot) so the check stays accurate
+/// after each pipeline reshuffle without needing its own hard-coded list.
+pub struct ProvenanceStaleStagesCheck {
+    known_stages: Vec<&'static str>,
+}
+
+impl ProvenanceStaleStagesCheck {
+    #[must_use]
+    pub const fn new(known_stages: Vec<&'static str>) -> Self {
+        Self { known_stages }
+    }
+}
+
+#[async_trait]
+impl DoctorCheck for ProvenanceStaleStagesCheck {
+    fn name(&self) -> &'static str {
+        "provenance-stale-stages"
+    }
+    fn description(&self) -> &'static str {
+        "book_field_provenance rows whose stage isn't in the current pipeline"
+    }
+    async fn run(&self, ctx: &CheckCtx) -> CheckReport {
+        if self.known_stages.is_empty() {
+            // Defensive: an empty registered set would flag every row.
+            // Skip with a warning rather than mass-flag — the daemon
+            // wires a non-empty list at boot; empty means a bug.
+            return CheckReport::warn(
+                "no registered stages threaded into the check (configuration bug?)",
+            );
+        }
+
+        let distinct_stages: Vec<String> = match sqlx::query_scalar!(
+            r#"SELECT DISTINCT stage AS "stage!: String"
+                 FROM book_field_provenance
+                ORDER BY stage"#,
+        )
+        .fetch_all(ctx.library.pool())
+        .await
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                let mut r = CheckReport::fail("provenance stage scan failed");
+                r.details.push(CheckFinding {
+                    severity: CheckStatus::Failure,
+                    message: e.to_string(),
+                    remediation: Some(
+                        "Inspect ab-db logs; verify the library DB is reachable.".into(),
+                    ),
+                    doc_url: None,
+                });
+                return r;
+            }
+        };
+
+        let stale: Vec<String> = distinct_stages
+            .into_iter()
+            .filter(|s| !self.known_stages.iter().any(|k| *k == s))
+            .collect();
+
+        if stale.is_empty() {
+            return CheckReport::ok("all provenance.stage values match registered stages");
+        }
+
+        // Per-stale-stage row count keeps the remediation actionable —
+        // a single stage with 12 rows is one rename to chase; a dozen
+        // stages with one row each is probably a broader rename pass
+        // that missed a backfill.
+        let mut findings: Vec<CheckFinding> = Vec::with_capacity(stale.len());
+        let mut total_rows: i64 = 0;
+        for stale_stage in &stale {
+            let n: i64 = sqlx::query_scalar!(
+                r#"SELECT COUNT(*) AS "n!: i64"
+                     FROM book_field_provenance
+                    WHERE stage = ?"#,
+                stale_stage,
+            )
+            .fetch_one(ctx.library.pool())
+            .await
+            .unwrap_or(0);
+            total_rows = total_rows.saturating_add(n);
+            findings.push(CheckFinding {
+                severity: CheckStatus::Warning,
+                message: format!("{n} row(s) reference stage {stale_stage:?}"),
+                remediation: Some(format!(
+                    "If {stale_stage:?} was renamed, `UPDATE book_field_provenance \
+                     SET stage = '<new-name>' WHERE stage = {stale_stage:?}`. If the \
+                     stage was retired, decide whether to re-run the field-winner \
+                     pass or delete the stale rows."
+                )),
+                doc_url: None,
+            });
+        }
+
+        let stale_list = stale.join(", ");
+        let mut r = CheckReport::warn(format!(
+            "{} stale stage name(s) across {total_rows} row(s): {stale_list}",
+            stale.len()
+        ));
+        r.details = findings;
+        r
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
@@ -2373,5 +2484,75 @@ mod tests {
             report.details[0].remediation.is_some(),
             "remediation should be present for conflict warnings",
         );
+    }
+
+    async fn seed_books(ctx: &CheckCtx, ids: &[i64]) {
+        for id in ids {
+            sqlx::query("INSERT INTO books (book_id, title) VALUES (?, 'fixture')")
+                .bind(id)
+                .execute(ctx.library.pool())
+                .await
+                .expect("seed book");
+        }
+    }
+
+    #[tokio::test]
+    async fn provenance_stale_stages_ok_when_all_known() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        seed_books(&ctx, &[1]).await;
+        sqlx::query(
+            "INSERT INTO book_field_provenance \
+                (book_id, field, value, source, stage, confidence, is_winner) \
+              VALUES (1, 'title', 't', 'audnexus', 'enrich-from-audnexus', 0.9, 1)",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed row");
+        let check = ProvenanceStaleStagesCheck::new(vec!["enrich-from-audnexus", "read-tags"]);
+        let report = check.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Ok);
+    }
+
+    #[tokio::test]
+    async fn provenance_stale_stages_warns_with_counts_and_remediation() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        seed_books(&ctx, &[1, 2, 3]).await;
+        sqlx::query(
+            "INSERT INTO book_field_provenance \
+                (book_id, field, value, source, stage, confidence, is_winner) \
+              VALUES (1, 'title',    't_a', 'audnexus', 'old-enrich-stage', 0.9, 1), \
+                     (2, 'subtitle', 's_a', 'audible',  'old-enrich-stage', 0.8, 1), \
+                     (3, 'author',   'a_a', 'audnexus', 'retired-stage',    0.7, 1)",
+        )
+        .execute(ctx.library.pool())
+        .await
+        .expect("seed rows");
+        let check = ProvenanceStaleStagesCheck::new(vec!["read-tags", "enrich-from-audnexus"]);
+        let report = check.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Warning);
+        assert!(report.summary.contains("old-enrich-stage"));
+        assert!(report.summary.contains("retired-stage"));
+        // Two stale stages — each gets its own finding.
+        assert_eq!(report.details.len(), 2);
+        for finding in &report.details {
+            assert!(finding.remediation.is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn provenance_stale_stages_warns_when_registered_set_empty() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        let check = ProvenanceStaleStagesCheck::new(Vec::new());
+        let report = check.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Warning);
+        assert!(report.summary.to_lowercase().contains("no registered"));
+    }
+
+    #[tokio::test]
+    async fn provenance_stale_stages_ok_when_table_empty() {
+        let (ctx, _tmp) = fresh_ctx().await;
+        let check = ProvenanceStaleStagesCheck::new(vec!["read-tags"]);
+        let report = check.run(&ctx).await;
+        assert_eq!(report.status, CheckStatus::Ok);
     }
 }

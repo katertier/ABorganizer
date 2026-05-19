@@ -517,6 +517,9 @@ async fn main() -> Result<()> {
             disk_usage::disk_free_any(),
         )),
         Arc::new(ab_api::doctor::ProvenanceWinnerConflictCheck),
+        Arc::new(ab_api::doctor::ProvenanceStaleStagesCheck::new(
+            dag.known_stage_names(),
+        )),
     ]);
     let api_state = ab_api::ApiState::with_replay_registry(
         library.clone(),
