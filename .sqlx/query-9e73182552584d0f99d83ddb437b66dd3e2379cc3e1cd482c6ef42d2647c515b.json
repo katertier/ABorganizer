@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT b.book_id          AS \"book_id!: i64\",\n                  b.title            AS \"title!: String\",\n                  b.release_date     AS \"release_date?: String\",\n                  b.duration_ms      AS \"duration_ms?: i64\",\n                  b.reading_status   AS \"reading_status!: String\"\n             FROM book_collection_members m\n             JOIN books b ON b.book_id = m.book_id\n            WHERE m.collection_id = ?\n            ORDER BY m.position IS NULL,\n                     m.position,\n                     b.release_date IS NULL,\n                     b.release_date DESC,\n                     b.title COLLATE NOCASE\n            LIMIT ? OFFSET ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "book_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "title!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "release_date?: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "duration_ms?: i64",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "reading_status!: String",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      true,
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "9e73182552584d0f99d83ddb437b66dd3e2379cc3e1cd482c6ef42d2647c515b"
+}

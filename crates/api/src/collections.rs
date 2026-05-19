@@ -8,9 +8,11 @@
 //! paginated list with name + `book_count` + `audible_id`, single-row
 //! detail with the full row + `book_count`.
 //!
-//! Books-in-collection (`/collections/{id}/books`) ships in a
-//! follow-up slice; the slim list + detail endpoints land first so
-//! GUIs can render the collection picker without a JOIN.
+//! Books-in-collection (`/collections/{id}/books`) reuses the
+//! `EntityBookSummary` types from `crate::entity_books` and orders
+//! by `member.position` first (ordered box sets render in canonical
+//! sequence) then by `release_date` / title (unordered bags get a
+//! sensible fallback).
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -19,6 +21,7 @@ use axum::{Json, response::Response};
 use serde::{Deserialize, Serialize};
 
 use crate::ApiError;
+use crate::entity_books::{EntityBookSummary, EntityBooksQuery, EntityBooksResponse};
 use crate::pagination::{clamp_limit, clamp_offset};
 use crate::state::ApiState;
 
@@ -282,6 +285,117 @@ pub async fn collections_list(
         StatusCode::OK,
         Json(CollectionsListResponse {
             collections,
+            total,
+            limit,
+            offset,
+        }),
+    )
+        .into_response())
+}
+
+/// `GET /api/v1/collections/{collection_id}/books[?limit=&offset=]`
+///
+/// Returns `200 OK` with [`EntityBooksResponse`] JSON listing the
+/// books joined to this collection via `book_collection_members`.
+/// `404 Not Found` when the collection doesn't exist. Empty `books`
+/// array when the collection exists but has no members yet
+/// (legal — operator may have created the row before populating it).
+///
+/// Junction-table predicate like `narrators_books`. Each book
+/// appears at most once per collection, but a book in multiple
+/// collections appears in every other collection's bucket — same
+/// convention as `book_narrator`.
+///
+/// Ordering: `position` ASC (NULLs last), then `release_date DESC`
+/// (NULLs last), then `books.title COLLATE NOCASE`. The
+/// `position`-first sort means ordered box sets render in canonical
+/// sequence (volume 1, volume 2, …) while unordered "bag"
+/// collections fall back to a sensible chronological / alphabetical
+/// listing.
+///
+/// # Errors
+///
+/// Database access failures surface as [`ApiError::Internal`].
+#[allow(clippy::missing_panics_doc)] // panic-free
+pub async fn collections_books(
+    State(state): State<ApiState>,
+    Path(collection_id): Path<i64>,
+    Query(params): Query<EntityBooksQuery>,
+) -> Result<Response, ApiError> {
+    let pool = state.inner.library.pool();
+    let limit = clamp_limit(params.limit);
+    let offset = clamp_offset(params.offset);
+
+    let collection_exists = sqlx::query_scalar!(
+        r#"SELECT 1 AS "n!: i64" FROM book_collections WHERE collection_id = ?"#,
+        collection_id,
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        ApiError::Internal(ab_core::Error::Database(format!(
+            "collection existence check: {e}"
+        )))
+    })?
+    .is_some();
+
+    if !collection_exists {
+        return Err(ApiError::NotFound(format!("collection {collection_id}")));
+    }
+
+    let total: i64 = sqlx::query_scalar!(
+        r#"SELECT COUNT(*) AS "n!: i64"
+             FROM book_collection_members m
+             JOIN books b ON b.book_id = m.book_id
+            WHERE m.collection_id = ?"#,
+        collection_id,
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| {
+        ApiError::Internal(ab_core::Error::Database(format!(
+            "collection books count: {e}"
+        )))
+    })?;
+
+    let rows = sqlx::query!(
+        r#"SELECT b.book_id          AS "book_id!: i64",
+                  b.title            AS "title!: String",
+                  b.release_date     AS "release_date?: String",
+                  b.duration_ms      AS "duration_ms?: i64",
+                  b.reading_status   AS "reading_status!: String"
+             FROM book_collection_members m
+             JOIN books b ON b.book_id = m.book_id
+            WHERE m.collection_id = ?
+            ORDER BY m.position IS NULL,
+                     m.position,
+                     b.release_date IS NULL,
+                     b.release_date DESC,
+                     b.title COLLATE NOCASE
+            LIMIT ? OFFSET ?"#,
+        collection_id,
+        limit,
+        offset,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| ApiError::Internal(ab_core::Error::Database(format!("collection books: {e}"))))?;
+
+    let books: Vec<EntityBookSummary> = rows
+        .into_iter()
+        .map(|r| EntityBookSummary {
+            book_id: r.book_id,
+            title: r.title,
+            release_date: r.release_date,
+            duration_ms: r.duration_ms,
+            reading_status: r.reading_status,
+        })
+        .collect();
+
+    Ok((
+        StatusCode::OK,
+        Json(EntityBooksResponse {
+            books,
             total,
             limit,
             offset,
