@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT p.publisher_id AS \"publisher_id!: i64\",\n                  p.name AS \"name!: String\",\n                  p.canonical_name AS \"canonical_name?: String\",\n                  p.created_at AS \"created_at!: i64\",\n                  (SELECT COUNT(*) FROM books WHERE publisher_id = p.publisher_id)\n                      AS \"book_count!: i64\"\n           FROM publishers p\n           WHERE p.publisher_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "publisher_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "name!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "canonical_name?: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at!: i64",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "book_count!: i64",
+        "ordinal": 4,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "4b7862df0387a9a0231364a5e8b5e8e6483a7175609ed51669637e0e48316e7e"
+}

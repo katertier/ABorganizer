@@ -38,6 +38,7 @@ pub mod operation_journal;
 pub mod pagination;
 pub mod pairing;
 pub mod progress;
+pub mod publishers;
 pub mod rate_limit;
 pub mod reports;
 pub mod router;
