@@ -157,6 +157,47 @@ enum Command {
         #[command(subcommand)]
         action: JournalAction,
     },
+    /// Book-collection (box-set / curated bundle) inspector.
+    /// Read-only today; operator-curated mutation lands in a
+    /// follow-up slice.
+    Collection {
+        #[command(subcommand)]
+        action: CollectionAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CollectionAction {
+    /// List collections, newest-first by `book_count` if `--sort
+    /// book_count`, else alphabetically by name (default).
+    List {
+        /// Case-insensitive substring filter on `name`. Empty
+        /// string = no filter.
+        #[arg(long)]
+        q: Option<String>,
+        /// Filter by `kind` (`box_set`, `compilation`, `curated`, …).
+        #[arg(long)]
+        kind: Option<String>,
+        /// Sort key: `name` (default) or `book_count`.
+        #[arg(long, default_value = "name")]
+        sort: String,
+        /// Page size. Server clamps to [1, 200].
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+        /// Offset into the result set.
+        #[arg(long, default_value_t = 0)]
+        offset: i64,
+    },
+    /// Show one collection's detail + paginated members.
+    Show {
+        /// Collection id (from `aborg collection list`).
+        id: i64,
+        /// Page size on the books-in-collection table.
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+        #[arg(long, default_value_t = 0)]
+        offset: i64,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -858,6 +899,31 @@ async fn main() -> Result<()> {
             }
             JournalAction::Retry { op_id, yes } => {
                 journal_retry(&cli.daemon, op_id, yes, cli.output).await?;
+            }
+        },
+        Command::Collection { action } => match action {
+            CollectionAction::List {
+                q,
+                kind,
+                sort,
+                limit,
+                offset,
+            } => {
+                collection_list(
+                    &cli.daemon,
+                    CollectionListFilters {
+                        q,
+                        kind,
+                        sort,
+                        limit,
+                        offset,
+                    },
+                    cli.output,
+                )
+                .await?;
+            }
+            CollectionAction::Show { id, limit, offset } => {
+                collection_show(&cli.daemon, id, limit, offset, cli.output).await?;
             }
         },
     }
@@ -3033,6 +3099,198 @@ async fn journal_retry(daemon: &str, op_id: i64, yes: bool, output: OutputFormat
                 outcome = %body.outcome,
                 reason = body.reason.as_deref().unwrap_or("-"),
                 "journal.retry.done",
+            );
+        }
+    }
+    Ok(())
+}
+
+// ── aborg collection list/show ───────────────────────────────────────
+
+struct CollectionListFilters {
+    q: Option<String>,
+    kind: Option<String>,
+    sort: String,
+    limit: i64,
+    offset: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct CollectionListItemResp {
+    collection_id: i64,
+    name: String,
+    canonical_name: Option<String>,
+    audible_id: Option<String>,
+    kind: Option<String>,
+    book_count: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct CollectionsListResp {
+    collections: Vec<CollectionListItemResp>,
+    total: i64,
+    limit: i64,
+    offset: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct CollectionDetailResp {
+    collection_id: i64,
+    name: String,
+    canonical_name: Option<String>,
+    audible_id: Option<String>,
+    description: Option<String>,
+    kind: Option<String>,
+    book_count: i64,
+    created_at: i64,
+    updated_at: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct CollectionBookEntryResp {
+    book_id: i64,
+    title: String,
+    release_date: Option<String>,
+    duration_ms: Option<i64>,
+    reading_status: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct CollectionBooksResp {
+    books: Vec<CollectionBookEntryResp>,
+    total: i64,
+    limit: i64,
+    offset: i64,
+}
+
+async fn collection_list(
+    daemon: &str,
+    filters: CollectionListFilters,
+    output: OutputFormat,
+) -> Result<()> {
+    let mut query: Vec<(&str, String)> = Vec::with_capacity(5);
+    if let Some(q) = filters.q.as_ref() {
+        query.push(("q", q.clone()));
+    }
+    if let Some(k) = filters.kind.as_ref() {
+        query.push(("kind", k.clone()));
+    }
+    query.push(("sort", filters.sort));
+    query.push(("limit", filters.limit.to_string()));
+    query.push(("offset", filters.offset.to_string()));
+
+    let resp = client()
+        .get(format!("{daemon}/api/v1/collections"))
+        .query(&query)
+        .send()
+        .await
+        .context("GET /collections")?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        anyhow::bail!("collection list failed: HTTP {status}");
+    }
+    let body: CollectionsListResp = resp.json().await.context("parse collections list")?;
+
+    match output {
+        OutputFormat::Json => {
+            let s = serde_json::to_string_pretty(&body).context("encode")?;
+            println!("{s}");
+        }
+        OutputFormat::Human => {
+            println!(
+                "{:>5}  {:<40}  {:<12}  {:>10}",
+                "id", "name", "kind", "books",
+            );
+            for c in &body.collections {
+                let kind = c.kind.as_deref().unwrap_or("-");
+                println!(
+                    "{:>5}  {:<40}  {:<12}  {:>10}",
+                    c.collection_id, c.name, kind, c.book_count,
+                );
+            }
+            tracing::info!(
+                total = body.total,
+                shown = body.collections.len(),
+                limit = body.limit,
+                offset = body.offset,
+                "collection.list.done",
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn collection_show(
+    daemon: &str,
+    id: i64,
+    limit: i64,
+    offset: i64,
+    output: OutputFormat,
+) -> Result<()> {
+    let detail_url = format!("{daemon}/api/v1/collections/{id}");
+    let resp = client()
+        .get(&detail_url)
+        .send()
+        .await
+        .with_context(|| format!("GET {detail_url}"))?;
+    if resp.status().as_u16() == 404 {
+        anyhow::bail!("collection {id} not found");
+    }
+    if !resp.status().is_success() {
+        let status = resp.status();
+        anyhow::bail!("collection show failed: HTTP {status}");
+    }
+    let detail: CollectionDetailResp = resp.json().await.context("parse collection detail")?;
+
+    let books_url = format!("{daemon}/api/v1/collections/{id}/books");
+    let books_resp = client()
+        .get(&books_url)
+        .query(&[("limit", limit.to_string()), ("offset", offset.to_string())])
+        .send()
+        .await
+        .with_context(|| format!("GET {books_url}"))?;
+    if !books_resp.status().is_success() {
+        let status = books_resp.status();
+        anyhow::bail!("collection books failed: HTTP {status}");
+    }
+    let books: CollectionBooksResp = books_resp.json().await.context("parse collection books")?;
+
+    match output {
+        OutputFormat::Json => {
+            let combined = serde_json::json!({
+                "collection": detail,
+                "books": books,
+            });
+            let s = serde_json::to_string_pretty(&combined).context("encode")?;
+            println!("{s}");
+        }
+        OutputFormat::Human => {
+            tracing::info!(
+                collection_id = detail.collection_id,
+                name = %detail.name,
+                kind = detail.kind.as_deref().unwrap_or("-"),
+                audible_id = detail.audible_id.as_deref().unwrap_or("-"),
+                book_count = detail.book_count,
+                "collection.show.detail",
+            );
+            println!();
+            println!(
+                "{:>8}  {:<50}  {:<10}  {:<14}",
+                "book_id", "title", "released", "status",
+            );
+            for b in &books.books {
+                let released = b.release_date.as_deref().unwrap_or("-");
+                println!(
+                    "{:>8}  {:<50}  {:<10}  {:<14}",
+                    b.book_id, b.title, released, b.reading_status,
+                );
+            }
+            tracing::info!(
+                total = books.total,
+                shown = books.books.len(),
+                limit = books.limit,
+                offset = books.offset,
+                "collection.show.books",
             );
         }
     }
