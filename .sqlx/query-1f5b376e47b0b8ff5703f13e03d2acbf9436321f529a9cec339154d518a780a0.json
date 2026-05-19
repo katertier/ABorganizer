@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT abridged FROM books WHERE book_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "abridged",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "1f5b376e47b0b8ff5703f13e03d2acbf9436321f529a9cec339154d518a780a0"
+}
