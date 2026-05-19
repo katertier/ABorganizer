@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT collection_id AS \"id!: i64\" FROM book_collections WHERE name = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "b008d699a2fb6564e1a767c2ee2374fe85ff514e1a9ec829cb8d4f5ab0f49ef9"
+}

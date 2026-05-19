@@ -500,6 +500,187 @@ pub async fn books_collections(
         .into_response())
 }
 
+/// `op_kind` recorded in `operation_journal` for `POST /collections`
+/// (ADR-0039). Stable string used by
+/// [`crate::journal_replayers::CollectionCreateReplayer`] to claim
+/// rows on crash recovery.
+///
+/// `pre_state = { intent: <body-fields> }`. `post_state =
+/// { collection_id, name }`.
+pub const OP_KIND_COLLECTION_CREATE: &str = "collection-create";
+
+/// Body of `POST /api/v1/collections`.
+///
+/// `name` is required + non-empty after trim. The other four
+/// fields are optional and land verbatim on the new
+/// `book_collections` row.
+#[derive(Debug, Deserialize)]
+pub struct CollectionCreateRequest {
+    pub name: String,
+    #[serde(default)]
+    pub canonical_name: Option<String>,
+    #[serde(default)]
+    pub audible_id: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Free-text classification (`box_set` / `compilation` / …).
+    /// Validated by the doctor `collections-duplicate-audible-id`
+    /// check + the UNIQUE constraint on `(name)`; this endpoint
+    /// stores the verbatim value.
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+/// Response from `POST /api/v1/collections`.
+#[derive(Debug, Serialize)]
+pub struct CollectionCreateResponse {
+    pub collection_id: i64,
+}
+
+/// `POST /api/v1/collections` — operator-curated create.
+///
+/// Body: [`CollectionCreateRequest`]. Returns `201 Created` with
+/// [`CollectionCreateResponse`] on success.
+///
+/// Validates `name` is non-empty after trim. `409 Conflict` when
+/// the UNIQUE constraint on `name` (or partial UNIQUE on
+/// `audible_id`) fires. `400 Bad Request` for an empty `name`.
+///
+/// Journal capture (ADR-0039): after the INSERT commits, records
+/// an `operation_journal` row with `op_kind = collection-create`,
+/// `target = { kind: "collection", id: <new_id> }`,
+/// `pre_state.intent = <request body>`, `post_state =
+/// { collection_id, name }`. A journal-write failure is logged
+/// (warn) but does NOT undo the insert — the row is still created.
+///
+/// # Errors
+///
+/// Database access failures surface as [`ApiError::Internal`].
+#[allow(clippy::missing_panics_doc, clippy::too_many_lines)] // panic-free; insert + 409 mapping + journal capture all inline for top-to-bottom readability
+pub async fn collections_create(
+    State(state): State<ApiState>,
+    Json(req): Json<CollectionCreateRequest>,
+) -> Result<Response, ApiError> {
+    // 1. Validate + normalise inputs.
+    let name = req.name.trim();
+    if name.is_empty() {
+        return Err(ApiError::BadRequest(
+            "name is required and must not be empty".to_owned(),
+        ));
+    }
+    let name = name.to_owned();
+    let canonical_name = req
+        .canonical_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let audible_id = req
+        .audible_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let description = req
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let kind = req
+        .kind
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+
+    let pool = state.inner.library.pool();
+
+    // 2. INSERT — UNIQUE on name + partial UNIQUE on audible_id
+    //    surface as `409 Conflict`.
+    let result = sqlx::query!(
+        r#"INSERT INTO book_collections
+             (name, canonical_name, audible_id, description, kind)
+           VALUES (?, ?, ?, ?, ?)
+           RETURNING collection_id AS "collection_id!: i64""#,
+        name,
+        canonical_name,
+        audible_id,
+        description,
+        kind,
+    )
+    .fetch_one(pool)
+    .await;
+
+    let collection_id = match result {
+        Ok(r) => r.collection_id,
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("UNIQUE constraint failed") {
+                let column = if msg.contains("book_collections.name") {
+                    "name"
+                } else if msg.contains("book_collections.audible_id") {
+                    "audible_id"
+                } else {
+                    "unique"
+                };
+                return Err(ApiError::Conflict(format!(
+                    "collection {column} already exists"
+                )));
+            }
+            return Err(ApiError::Internal(ab_core::Error::Database(format!(
+                "collections_create insert: {e}"
+            ))));
+        }
+    };
+
+    // 3. Journal capture (ADR-0039). target.id is the new row's
+    //    collection_id; pre_state captures the request body
+    //    verbatim so a future replay / undo has the full intent.
+    //    A journal-write failure does NOT undo the insert.
+    let intent = serde_json::json!({
+        "name": name,
+        "canonical_name": canonical_name,
+        "audible_id": audible_id,
+        "description": description,
+        "kind": kind,
+    });
+    let entry = ab_journal::NewEntry {
+        op_kind: OP_KIND_COLLECTION_CREATE,
+        target: ab_journal::Target {
+            kind: "collection".to_owned(),
+            id: collection_id,
+        },
+        pre_state: serde_json::json!({ "intent": intent }),
+        reversible: false,
+        batch_id: None,
+    };
+    match crate::journal_capture::record_pending(pool, &entry).await {
+        Ok(op_id) => {
+            crate::journal_capture::mark_done_or_log(
+                pool,
+                op_id,
+                &serde_json::json!({ "collection_id": collection_id, "name": name }),
+                "api.collections_create",
+            )
+            .await;
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                collection_id,
+                "api.collections_create.journal_skipped"
+            );
+        }
+    }
+
+    Ok((
+        StatusCode::CREATED,
+        Json(CollectionCreateResponse { collection_id }),
+    )
+        .into_response())
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {

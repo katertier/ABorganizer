@@ -465,6 +465,131 @@ impl Replayer for TitleReplayer {
     }
 }
 
+/// Re-applies `POST /collections` mutations after a crash or on
+/// operator-triggered retry.
+///
+/// The capture path runs `INSERT INTO book_collections` and *then*
+/// records the journal row, so a pending row only survives in two
+/// cases:
+///
+/// 1. The insert succeeded but `record_pending` / `mark_done`
+///    failed. The row exists in `book_collections` at the
+///    `target.id` recorded on the journal entry — recovery should
+///    flip the journal row to `Retried` (already applied) with no
+///    extra DB writes.
+/// 2. (Defensive) The captured row no longer exists at `target.id`
+///    AND no row exists with the same `name`. This happens when
+///    the operator hard-deleted the collection between the
+///    original `POST` and the replay. Re-insert using
+///    `pre_state.intent.*` so the journal-driven undo→redo cycle
+///    is symmetric with the [`TitleReplayer`] shape.
+///
+/// Name collisions on replay (different `collection_id`, same
+/// `name`) are treated as drift and `Skipped` — re-inserting
+/// would either trip the UNIQUE constraint or silently rebind the
+/// original journal target to a row the operator created
+/// independently.
+pub struct CollectionCreateReplayer;
+
+#[async_trait]
+impl Replayer for CollectionCreateReplayer {
+    fn op_kind(&self) -> &'static str {
+        crate::collections::OP_KIND_COLLECTION_CREATE
+    }
+
+    async fn try_replay(
+        &self,
+        pool: &SqlitePool,
+        entry: &JournalEntry,
+    ) -> Result<ReplayDecision, JournalError> {
+        let captured_id = entry.target.id;
+        let Some(intent) = entry.pre_state.get("intent") else {
+            return Ok(ReplayDecision::Skipped(
+                "pre_state missing 'intent' object".to_owned(),
+            ));
+        };
+        let Some(name) = intent.get("name").and_then(Value::as_str) else {
+            return Ok(ReplayDecision::Skipped(
+                "pre_state.intent missing 'name' (or not a string)".to_owned(),
+            ));
+        };
+
+        // Case 1: row at captured id still exists → already-applied
+        // no-op. Validate the name still matches; mismatch is drift.
+        let row = sqlx::query!(
+            r#"SELECT name AS "name!: String" FROM book_collections WHERE collection_id = ?"#,
+            captured_id,
+        )
+        .fetch_optional(pool)
+        .await?;
+        if let Some(r) = row {
+            if r.name == name {
+                return Ok(ReplayDecision::Retried(json!({
+                    "collection_id": captured_id,
+                    "name": name,
+                    "already_applied": true,
+                })));
+            }
+            return Ok(ReplayDecision::Skipped(format!(
+                "drift detected — collection {captured_id} renamed from {name:?} to {:?}",
+                r.name
+            )));
+        }
+
+        // Case 2: captured row gone. Bail out if a *different* row
+        // already claims this name (operator created an independent
+        // collection during the recovery window — re-insert would
+        // hit UNIQUE).
+        let name_taken = sqlx::query_scalar!(
+            r#"SELECT collection_id AS "id!: i64" FROM book_collections WHERE name = ?"#,
+            name,
+        )
+        .fetch_optional(pool)
+        .await?;
+        if let Some(other_id) = name_taken {
+            return Ok(ReplayDecision::Skipped(format!(
+                "drift detected — name {name:?} now belongs to collection {other_id}"
+            )));
+        }
+
+        // Case 2 continued: re-insert using captured intent.
+        let canonical_name = intent
+            .get("canonical_name")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let audible_id = intent
+            .get("audible_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let description = intent
+            .get("description")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let kind = intent
+            .get("kind")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let new_id: i64 = sqlx::query_scalar!(
+            r#"INSERT INTO book_collections
+                 (name, canonical_name, audible_id, description, kind)
+               VALUES (?, ?, ?, ?, ?)
+               RETURNING collection_id AS "collection_id!: i64""#,
+            name,
+            canonical_name,
+            audible_id,
+            description,
+            kind,
+        )
+        .fetch_one(pool)
+        .await?;
+        Ok(ReplayDecision::Retried(json!({
+            "collection_id": new_id,
+            "name": name,
+            "recreated_from_id": captured_id,
+        })))
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
