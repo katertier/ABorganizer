@@ -112,6 +112,15 @@ pub enum Dimension {
     /// over-sums when multi-series books exist. Books with no
     /// `book_series` row roll into `unknown` (standalones).
     Series,
+    /// Books per collection. Joins through the `book_collection_members`
+    /// junction. A book in multiple collections (publisher bundle +
+    /// operator-curated "best of 2025") contributes one row per
+    /// (book, collection) pair, so it lands in multiple buckets —
+    /// same posture as `Series` and `Narrator`. Books with no
+    /// `book_collection_members` row roll into `unknown` (the bulk
+    /// of the catalogue today, since scanner-detection ships in a
+    /// follow-up slice).
+    Collection,
     /// Books per `books.audiologo_status`. Values come from the
     /// schema CHECK constraint (migration 010): `unknown`,
     /// `detected`, `applied`, `stripped`, `none`, `rejected`. No
@@ -154,6 +163,7 @@ impl Dimension {
             "author" => Self::Author,
             "narrator" => Self::Narrator,
             "series" => Self::Series,
+            "collection" => Self::Collection,
             "audiologo_status" => Self::AudiologoStatus,
             "abridged" => Self::Abridged,
             "rating" => Self::Rating,
@@ -174,6 +184,7 @@ impl Dimension {
             Self::Author => "author",
             Self::Narrator => "narrator",
             Self::Series => "series",
+            Self::Collection => "collection",
             Self::AudiologoStatus => "audiologo_status",
             Self::Abridged => "abridged",
             Self::Rating => "rating",
@@ -285,6 +296,7 @@ pub async fn breakdown(
         Dimension::Author => author_breakdown(pool).await?,
         Dimension::Narrator => narrator_breakdown(pool).await?,
         Dimension::Series => series_breakdown(pool).await?,
+        Dimension::Collection => collection_breakdown(pool).await?,
         Dimension::AudiologoStatus => audiologo_status_breakdown(pool).await?,
         Dimension::Abridged => abridged_breakdown(pool).await?,
         Dimension::Rating => rating_breakdown(pool).await?,
@@ -553,6 +565,31 @@ async fn series_breakdown(pool: &SqlitePool) -> Result<Vec<RawBucket>, StatsErro
          LEFT JOIN series s ON s.series_id = bs.series_id
          WHERE b.deleted_at IS NULL
          GROUP BY s.series_id
+         ORDER BY COUNT(*) DESC"#,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| RawBucket {
+            label: r.bucket_label,
+            count: r.n,
+            hours_ms: r.hours_ms,
+        })
+        .collect())
+}
+
+async fn collection_breakdown(pool: &SqlitePool) -> Result<Vec<RawBucket>, StatsError> {
+    let rows = sqlx::query!(
+        r#"SELECT
+            COALESCE(c.name, 'unknown') AS "bucket_label!: String",
+            COUNT(*) AS "n!: i64",
+            COALESCE(SUM(b.duration_ms), 0) AS "hours_ms!: i64"
+         FROM books b
+         LEFT JOIN book_collection_members m ON m.book_id = b.book_id
+         LEFT JOIN book_collections c ON c.collection_id = m.collection_id
+         WHERE b.deleted_at IS NULL
+         GROUP BY c.collection_id
          ORDER BY COUNT(*) DESC"#,
     )
     .fetch_all(pool)
@@ -955,6 +992,7 @@ mod tests {
             Dimension::Author,
             Dimension::Narrator,
             Dimension::Series,
+            Dimension::Collection,
             Dimension::AudiologoStatus,
             Dimension::Rating,
         ] {
