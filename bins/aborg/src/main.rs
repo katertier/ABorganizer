@@ -3009,7 +3009,7 @@ async fn journal_retry(daemon: &str, op_id: i64, yes: bool, output: OutputFormat
         .with_context(|| format!("POST {url}"))?;
     let status = resp.status();
     if status.as_u16() == 404 {
-        anyhow::bail!("op_id {op_id} not found, or no Replayer registered for that op_kind",);
+        anyhow::bail!("op_id {op_id} not found, or no Replayer registered for that op_kind");
     }
     if status.as_u16() == 409 {
         anyhow::bail!(
