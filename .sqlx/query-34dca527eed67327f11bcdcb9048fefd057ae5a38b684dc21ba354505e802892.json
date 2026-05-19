@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT kind AS \"kind?: String\" FROM book_collections WHERE collection_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "kind?: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "34dca527eed67327f11bcdcb9048fefd057ae5a38b684dc21ba354505e802892"
+}

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT canonical_name AS \"canonical_name?: String\"\n                 FROM book_collections WHERE collection_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "canonical_name?: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "8b19dd9b5aaaee342139695c15f4491582f7f9e55812230f778935b6dbda57bb"
+}

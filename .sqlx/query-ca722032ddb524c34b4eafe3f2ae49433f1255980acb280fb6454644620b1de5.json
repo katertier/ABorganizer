@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT description AS \"description?: String\"\n                 FROM book_collections WHERE collection_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "description?: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "ca722032ddb524c34b4eafe3f2ae49433f1255980acb280fb6454644620b1de5"
+}
