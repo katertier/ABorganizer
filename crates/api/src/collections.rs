@@ -404,6 +404,102 @@ pub async fn collections_books(
         .into_response())
 }
 
+/// One row in [`BookCollectionsResponse`]. Slim because the
+/// book-detail page renders dozens of these in a "Also in these
+/// collections" strip.
+#[derive(Debug, Serialize)]
+pub struct BookCollectionEntry {
+    pub collection_id: i64,
+    pub name: String,
+    pub canonical_name: Option<String>,
+    pub kind: Option<String>,
+    /// Member ordinal in this collection (NULL = unordered bag,
+    /// matches the `book_collection_members.position` semantics from
+    /// migration 043).
+    pub position: Option<i64>,
+}
+
+/// Response body for `GET /api/v1/books/{book_id}/collections`.
+///
+/// No pagination: a single book can only belong to a handful of
+/// collections in practice; the natural cap is the number of
+/// collections the operator + scanner have created. If the
+/// catalogue grows enough to need pagination here, lift this to
+/// the entity-list shape (total + limit + offset).
+#[derive(Debug, Serialize)]
+pub struct BookCollectionsResponse {
+    pub collections: Vec<BookCollectionEntry>,
+}
+
+/// `GET /api/v1/books/{book_id}/collections`
+///
+/// Reverse lookup mirroring `/collections/{id}/books` (cycle 35).
+/// Returns the list of collections this book belongs to, ordered
+/// by collection name. Empty `collections` array when the book
+/// exists but has no membership.
+///
+/// `404 Not Found` when no `books` row exists at that id.
+///
+/// # Errors
+///
+/// Database access failures surface as [`ApiError::Internal`].
+#[allow(clippy::missing_panics_doc)] // panic-free
+pub async fn books_collections(
+    State(state): State<ApiState>,
+    Path(book_id): Path<i64>,
+) -> Result<Response, ApiError> {
+    let pool = state.inner.library.pool();
+
+    let book_exists = sqlx::query_scalar!(
+        r#"SELECT 1 AS "n!: i64" FROM books WHERE book_id = ?"#,
+        book_id,
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        ApiError::Internal(ab_core::Error::Database(format!(
+            "book existence check: {e}"
+        )))
+    })?
+    .is_some();
+    if !book_exists {
+        return Err(ApiError::NotFound(format!("book {book_id}")));
+    }
+
+    let rows = sqlx::query!(
+        r#"SELECT c.collection_id  AS "collection_id!: i64",
+                  c.name           AS "name!: String",
+                  c.canonical_name AS "canonical_name?: String",
+                  c.kind           AS "kind?: String",
+                  m.position       AS "position?: i64"
+             FROM book_collection_members m
+             JOIN book_collections c ON c.collection_id = m.collection_id
+            WHERE m.book_id = ?
+            ORDER BY c.name COLLATE NOCASE"#,
+        book_id,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| ApiError::Internal(ab_core::Error::Database(format!("book collections: {e}"))))?;
+
+    let collections: Vec<BookCollectionEntry> = rows
+        .into_iter()
+        .map(|r| BookCollectionEntry {
+            collection_id: r.collection_id,
+            name: r.name,
+            canonical_name: r.canonical_name,
+            kind: r.kind,
+            position: r.position,
+        })
+        .collect();
+
+    Ok((
+        StatusCode::OK,
+        Json(BookCollectionsResponse { collections }),
+    )
+        .into_response())
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {

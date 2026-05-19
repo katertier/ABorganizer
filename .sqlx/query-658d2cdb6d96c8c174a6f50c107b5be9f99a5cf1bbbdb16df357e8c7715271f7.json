@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT c.collection_id  AS \"collection_id!: i64\",\n                  c.name           AS \"name!: String\",\n                  c.canonical_name AS \"canonical_name?: String\",\n                  c.kind           AS \"kind?: String\",\n                  m.position       AS \"position?: i64\"\n             FROM book_collection_members m\n             JOIN book_collections c ON c.collection_id = m.collection_id\n            WHERE m.book_id = ?\n            ORDER BY c.name COLLATE NOCASE",
+  "describe": {
+    "columns": [
+      {
+        "name": "collection_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "name!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "canonical_name?: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "kind?: String",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "position?: i64",
+        "ordinal": 4,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "658d2cdb6d96c8c174a6f50c107b5be9f99a5cf1bbbdb16df357e8c7715271f7"
+}

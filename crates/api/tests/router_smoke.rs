@@ -360,6 +360,11 @@ async fn collections_books_protected() {
 }
 
 #[tokio::test]
+async fn books_collections_protected() {
+    assert_protected("GET", "/books/1/collections").await;
+}
+
+#[tokio::test]
 async fn publishers_list_protected() {
     assert_protected("GET", "/publishers").await;
 }
