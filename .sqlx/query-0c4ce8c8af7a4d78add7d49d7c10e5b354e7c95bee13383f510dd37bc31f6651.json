@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"n!: i64\"\n                 FROM (\n                     SELECT audible_id\n                       FROM book_collections\n                      WHERE audible_id IS NOT NULL\n                      GROUP BY audible_id\n                     HAVING COUNT(*) > 1\n                 )",
+  "describe": {
+    "columns": [
+      {
+        "name": "n!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0c4ce8c8af7a4d78add7d49d7c10e5b354e7c95bee13383f510dd37bc31f6651"
+}

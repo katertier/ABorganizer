@@ -522,6 +522,7 @@ async fn main() -> Result<()> {
         )),
         Arc::new(ab_api::doctor::EmptyCollectionsCheck),
         Arc::new(ab_api::doctor::OrphanCollectionMembersCheck),
+        Arc::new(ab_api::doctor::CollectionsDuplicateAudibleIdCheck),
     ]);
     let api_state = ab_api::ApiState::with_replay_registry(
         library.clone(),
